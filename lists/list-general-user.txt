@@ -1,0 +1,8 @@
+# Ваши домены для обхода (как list-general-user.txt у Flowseal), по одному в строке.
+# Строку-заглушку не удаляйте: пустой список zapret2 считает как "любой домен".
+domain.example.abc
+# SoundCloud: сайт, API, CDN картинок и аудио (sndcdn.com), воспроизведение (soundcloud.cloud), короткие ссылки
+soundcloud.com
+sndcdn.com
+soundcloud.cloud
+snd.sc

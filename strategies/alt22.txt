@@ -1,0 +1,47 @@
+# name: BV2
+# desc: bol-van, общий профиль из примера для Windows и config.default: фейк с MD5 и сдвигом sequence (6 раз) + части ClientHello в обратном порядке с разрезом посередине домена. UDP - как в ALT12.
+# origin: github.com/bol-van/zapret2 docs/readme.md, config.default
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=stun_fs:repeats=3
+--lua-desync=fake:blob=discord_udp:repeats=3
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=3
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6
+--lua-desync=multidisorder:pos=midsld
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6
+--lua-desync=multidisorder:pos=midsld
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6
+--lua-desync=multidisorder:pos=midsld
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:tcp_md5
+--lua-desync=multisplit:pos=method+2
+[game_tcp]
+--out-range=<n4
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6
+--lua-desync=multidisorder:pos=midsld
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:tcp_md5
+--lua-desync=multisplit:pos=method+2
+--payload=unknown
+--lua-desync=fake:payload=unknown:blob=0x00000000000000000000000000000000:tcp_md5:tcp_seq=-10000:repeats=6
+--lua-desync=multidisorder:payload=unknown:pos=2
+[game_udp]
+--out-range=<n4
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=10
