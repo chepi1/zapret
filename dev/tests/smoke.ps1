@@ -33,6 +33,20 @@ foreach ($k in $steps.Keys) {
     try { & $steps[$k] *> $null; Write-Host ('ok   ' + $k) -ForegroundColor Green }
     catch { Write-Host ('FAIL ' + $k + ': ' + $_.Exception.Message + ' @ ' + $_.InvocationInfo.PositionMessage) -ForegroundColor Red; $fails++ }
 }
+# новые версии: сравнение по числам и своя версия по сохранённой проверке - без сети
+$uf = Get-PkgPath $Script:UpdatesFile
+$savedUpd = if (Test-Path $uf) { [System.IO.File]::ReadAllText($uf) } else { $null }
+$cmp = @((Test-NewerVersion 'v1.0.7' 'v1.0.6'), (Test-NewerVersion '1.10.4' '1.9'), (Test-NewerVersion 'v2' '1.1'), (-not (Test-NewerVersion 'v1.0' '1.0')), (-not (Test-NewerVersion 'v1.0' '1.1')))
+Write-TextNoBom $uf "zapret2=v1.0.6`r`nFlowseal=1.10.4`r`nzapret=v9.9`r`n"
+$newer = Get-ZapretUpdate
+$all = @(Get-AllNews)
+$hdr = ''; try { $hdr = (Show-Header 6>&1 | Out-String) } catch { $hdr = 'ERROR ' + $_.Exception.Message }
+Write-TextNoBom $uf "zapret=v1.0`r`n"
+$older = Get-ZapretUpdate
+if ($null -ne $savedUpd) { Write-TextNoBom $uf $savedUpd } else { Remove-Item $uf -ErrorAction SilentlyContinue }
+if (-not @($cmp | Where-Object { -not $_ }).Count -and $newer -eq 'v9.9' -and $all.Count -eq 1 -and $all[0] -like 'zapret v9.9*' -and -not $older -and $hdr -match 'новая версия zapret v9\.9') {
+    Write-Host 'ok   новые версии zapret' -ForegroundColor Green
+} else { Write-Host ('FAIL новые версии zapret: cmp=' + ($cmp -join ',') + ' newer=' + $newer + ' all=' + ($all -join '; ') + ' older=' + $older) -ForegroundColor Red; $fails++ }
 $before = @(Get-ChildItem (Join-Path $Pkg 'runtime') -Filter 'report-*.txt' -ErrorAction SilentlyContinue).Count
 $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Pkg 'tools\report.ps1') -NoPrompt -NoOpen 2>&1
 $rep = @(Get-ChildItem (Join-Path $Pkg 'runtime') -Filter 'report-*.txt' | Sort-Object LastWriteTime -Descending)

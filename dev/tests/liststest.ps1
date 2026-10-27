@@ -34,6 +34,8 @@ Check 'bad url keeps file' (-not $bad.Ok -and [System.IO.File]::ReadAllText($lg)
 Check 'upstream check ran' (Update-UpstreamCheck -Force)
 Write-Host ('  updates.txt: ' + ([System.IO.File]::ReadAllText((Get-PkgPath $Script:UpdatesFile)).Trim() -replace "`r`n", ' | '))
 Check 'no news on current base' (@(Get-UpstreamNews).Count -eq 0)
+Check 'own release found' ([System.IO.File]::ReadAllText((Get-PkgPath $Script:UpdatesFile)) -match '(?m)^zapret=v\d')
+Check 'no own update for this version' (-not (Get-ZapretUpdate))
 Check 'cached: second call skipped' (-not (Update-UpstreamCheck))
 $Script:Upstream['Flowseal'].Base = '1.10.3'
 $news = @(Get-UpstreamNews)
