@@ -152,6 +152,7 @@ $settings = Get-Settings
 function Get-BypassText([string]$Owner, [string]$Proto, [int]$Port) {
     if ($Owner -eq 'Take-Two') { return 'нет (2K)' }
     if ($Owner -eq 'Valve') { return 'нет (Valve)' }
+    if ($Owner -eq 'исключено') { return 'нет (исключено вами)' }
     # голос Discord: отдельный профиль по портам и распознаванию протокола, списки не нужны
     if ($Proto -eq 'udp' -and (($Port -ge 19294 -and $Port -le 19344) -or ($Port -ge 50000 -and $Port -le 50100))) { return 'да (голос)' }
     $gameOn = ($Proto -eq 'tcp' -and @('all', 'tcp') -contains $settings.game) -or ($Proto -eq 'udp' -and @('all', 'udp') -contains $settings.game)
@@ -291,6 +292,8 @@ function Get-SummaryLines([bool]$Final) {
         $s.Add(('  {0} {1,-46} {2,-10} {3,6}/{4,-6} retx {5,-3} пинг {6,-7} {7}{8} | обход: {9}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 46), $x.Proc,
             $x.Out, $x.In, $x.Retx, (Get-PingText $x.Ip), (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))))
     }
+    $touched = @($ep.Values | Where-Object { (Get-BypassText $_.Owner $_.Proto ([int]$_.Port)) -match '^да($| \((any|user)\))' })
+    if ($touched.Count) { $s.Add(('Если {0} с обходом работает хуже, чем без него, адреса, которые обход трогает, можно исключить: Инструменты -> 6.' -f $AppName)) }
     return $s
 }
 

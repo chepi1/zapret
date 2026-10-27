@@ -8,7 +8,7 @@ $name = 'zapret'
 $stage = Join-Path $env:TEMP ('zapret-build-' + [guid]::NewGuid().ToString('N'))
 $dst = Join-Path $stage $name
 # runtime - настройки и отчёты этого ПК; autohostlist.txt создаётся при первом запуске; .bak - старые списки
-& robocopy.exe $root $dst /E /XD .git dev dist runtime /XF *.bak autohostlist.txt .gitignore .gitattributes /NFL /NDL /NJH /NJS /NP | Out-Null
+& robocopy.exe $root $dst /E /XD .git .github dev dist runtime /XF *.bak autohostlist.txt .gitignore .gitattributes /NFL /NDL /NJH /NJS /NP | Out-Null
 if ($LASTEXITCODE -ge 8) { Write-Host ('robocopy: ошибка ' + $LASTEXITCODE) -ForegroundColor Red; exit 1 }
 New-Item -ItemType Directory (Join-Path $dst 'runtime') -Force | Out-Null
 [System.IO.File]::WriteAllText((Join-Path $dst 'runtime\.keep'), '')

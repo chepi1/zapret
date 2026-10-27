@@ -668,6 +668,8 @@ function Get-ServiceBinPath([string]$CmdLine) {
 
 # Запускает обход с текущими настройками. Возвращает $true, если winws2 жив через 3 секунды.
 function Start-Bypass([switch]$Quiet) {
+    # обход снова включают - уведомление "обход не работает" опять имеет смысл (см. пункт 2 меню)
+    Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
     $settings = Get-Settings
@@ -819,6 +821,7 @@ function Get-AltText([hashtable]$Settings) {
 }
 
 function Install-BypassService {
+    Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
     $settings = Get-Settings
@@ -956,6 +959,199 @@ function Get-TunAdapters {
     try {
         return @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wintun|TAP-Windows|WireGuard|sing-box|Clash|Mihomo|Meta Tunnel|Hiddify|Happ|AmneziaWG|OpenVPN|Xray' -or $_.Name -match 'tun|wg') })
     } catch { return @() }
+}
+
+# ---------- программы, застрявшие на прокси ----------
+# Steam и Discord запоминают системный прокси при запуске. Включили Happ, чтобы что-то открыть, выключили - а Steam так
+# и шлёт веб-запросы на 127.0.0.1:10809, где уже никто не слушает. К своим серверам он при этом подключён (по UDP),
+# поэтому выглядит "в сети", но в Доте нет цен на предметы и не работает "Играть". Лечится только перезапуском программы.
+$Script:ProxyAppNames = [ordered]@{ 'Steam' = @('steam'); 'Discord' = @('Discord') }
+$Script:ProxyAppsFile = 'runtime/proxy-apps.txt'
+$Script:ProxyStuckCache = $null
+
+# Локальные порты системного прокси - из настроек Windows, даже если прокси сейчас выключен
+function Get-LocalProxyPorts {
+    $srv = ''
+    try {
+        $is = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
+        if ($is.PSObject.Properties.Name -contains 'ProxyServer') { $srv = '' + $is.ProxyServer }
+    } catch { }
+    $ports = @(foreach ($m in [regex]::Matches($srv, '(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)')) { [int]$m.Groups[1].Value })
+    return @($ports | Select-Object -Unique)
+}
+
+function Test-PortListening([int]$Port) {
+    return @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+# Steam сам пишет в журнал подключений, через какой адрес ходит: "(127.0.0.1:10809, WebSocket)", проверка IPv6 через прокси.
+# Смотрим только строки после запуска этого Steam. $LogPath и $Since - для проверок.
+function Test-SteamProxyLog([int[]]$Ports, [string]$LogPath = '', [datetime]$Since = [datetime]::MinValue) {
+    if (-not $Ports.Count) { return $false }
+    if (-not $LogPath) {
+        $steam = @(Get-Process -Name 'steam' -ErrorAction SilentlyContinue)
+        if (-not $steam.Count) { return $false }
+        try { $Since = $steam[0].StartTime } catch { return $false }
+        try {
+            $reg = Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -ErrorAction Stop
+            if ($reg.PSObject.Properties.Name -contains 'SteamPath') { $LogPath = Join-Path $reg.SteamPath 'logs\connection_log.txt' }
+        } catch { }
+    }
+    if (-not $LogPath -or -not (Test-Path -LiteralPath $LogPath)) { return $false }
+    $pattern = '127\.0\.0\.1:(' + ($Ports -join '|') + ')\b'
+    foreach ($line in @(Get-Content -LiteralPath $LogPath -Tail 400 -ErrorAction SilentlyContinue)) {
+        if ($line -notmatch '^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\]') { continue }
+        $t = [datetime]::ParseExact($matches[1], 'yyyy-MM-dd HH:mm:ss', [System.Globalization.CultureInfo]::InvariantCulture)
+        if ($t -ge $Since.AddSeconds(-5) -and $line -match $pattern) { return $true }
+    }
+    return $false
+}
+
+# Какие программы застряли на выключенном прокси. Пока прокси работает - запоминаем, кто ходит через него
+# (runtime\proxy-apps.txt: программа, PID, время запуска). Когда прокси выключен - те же процессы, если ещё живы,
+# и есть застрявшие; Steam ещё и сам пишет это в журнал. Возвращает имена программ (Steam, Discord).
+function Get-ProxyStuckApps {
+    if ($Script:ProxyStuckCache -and ((Get-Date) - $Script:ProxyStuckCache.Time).TotalSeconds -lt 20) { return $Script:ProxyStuckCache.Apps }
+    $stuck = @()
+    $ports = @(Get-LocalProxyPorts)
+    $file = Get-PkgPath $Script:ProxyAppsFile
+    $known = @()
+    if (Test-Path $file) {
+        foreach ($l in [System.IO.File]::ReadAllLines($file)) {
+            $f = $l -split '\|'
+            if ($f.Count -ne 3 -or $f[1] -notmatch '^\d+$' -or $f[2] -notmatch '^\d+$') { continue }
+            $p = Get-Process -Id ([int]$f[1]) -ErrorAction SilentlyContinue
+            # PID могли отдать другому процессу - сверяем и время запуска
+            $same = $false
+            if ($p) { try { $same = ($p.StartTime.Ticks -eq [long]$f[2]) } catch { } }
+            if ($same) { $known += New-Object PSObject -Property @{ App = $f[0]; Line = $l } }
+        }
+    }
+    $alive = @($ports | Where-Object { Test-PortListening $_ })
+    if ($alive.Count) {
+        $conns = @(Get-NetTCPConnection -RemoteAddress '127.0.0.1' -ErrorAction SilentlyContinue | Where-Object { $alive -contains $_.RemotePort })
+        $lines = @($known | ForEach-Object { $_.Line })
+        foreach ($app in $Script:ProxyAppNames.Keys) {
+            foreach ($p in @(Get-Process -Name $Script:ProxyAppNames[$app] -ErrorAction SilentlyContinue)) {
+                if (-not @($conns | Where-Object { $_.OwningProcess -eq $p.Id }).Count) { continue }
+                try { $line = '{0}|{1}|{2}' -f $app, $p.Id, $p.StartTime.Ticks } catch { continue }
+                if ($lines -notcontains $line) { $lines += $line }
+            }
+        }
+        if ($lines.Count -or (Test-Path $file)) { Write-TextNoBom $file (($lines -join "`r`n") + "`r`n") }
+    } elseif ($ports.Count) {
+        $stuck = @($known | ForEach-Object { $_.App } | Select-Object -Unique)
+        if ($stuck -notcontains 'Steam' -and (Test-SteamProxyLog $ports)) { $stuck += 'Steam' }
+    }
+    $Script:ProxyStuckCache = New-Object PSObject -Property @{ Time = Get-Date; Apps = $stuck }
+    return $stuck
+}
+
+# Кто сейчас ходит через работающий локальный прокси (для проверки обходов: "если выключите прокси - перезапустите")
+function Get-ProxyAppsNow {
+    $alive = @(Get-LocalProxyPorts | Where-Object { Test-PortListening $_ })
+    if (-not $alive.Count) { return @() }
+    $conns = @(Get-NetTCPConnection -RemoteAddress '127.0.0.1' -ErrorAction SilentlyContinue | Where-Object { $alive -contains $_.RemotePort })
+    $ids = @($conns | ForEach-Object { $_.OwningProcess })
+    return @($Script:ProxyAppNames.Keys | Where-Object { @(Get-Process -Name $Script:ProxyAppNames[$_] -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.Id }).Count })
+}
+
+# ---------- правила "напрямую" для прокси-клиентов ----------
+# Steam, Discord и игры лучше пускать мимо прокси (Happ, v2rayN...): обход обрабатывает их сам, а через прокси Steam
+# получает обрывы (в Доте нет цен, не работает "Играть"), Discord - голос мимо прокси. steamcommunity.com сюда
+# не входит: он заблокирован, обход его не трогает (так у Flowseal), и без прокси он не откроется.
+$Script:DirectDomains = [ordered]@{
+    'Steam и Dota 2' = @('steampowered.com', 'steamserver.net', 'steamstatic.com', 'steamcontent.com', 'steam-chat.com', 'valvesoftware.com', 'dota2.com')
+    'Discord'        = @('discord.com', 'discord.gg', 'discordapp.com', 'discordapp.net', 'discord.media', 'discordcdn.com')
+    'NBA 2K и EAC'   = @('2k.com', 'take2games.com', 'easyanticheat.net')
+}
+
+# Текст правил: домены (как есть и в виде domain: для xray/Happ) и сети серверов игр (для режима TUN)
+function Get-DirectRulesText {
+    $t = New-Object System.Collections.Generic.List[string]
+    $t.Add('# zapret ' + $Script:Version + ': что пускать мимо прокси (правила "напрямую" / direct). Обход обрабатывает это сам.')
+    $t.Add('# Happ и другие клиенты на xray: вставьте строки из блока "domain:" в прямые домены, сети - в прямые IP.')
+    $t.Add('')
+    $t.Add('# --- домены, для xray / Happ ---')
+    foreach ($g in $Script:DirectDomains.Keys) { $t.Add('# ' + $g); foreach ($d in $Script:DirectDomains[$g]) { $t.Add('domain:' + $d) } }
+    $t.Add('')
+    $t.Add('# --- те же домены без приставки (для клиентов, которые её не понимают) ---')
+    foreach ($g in $Script:DirectDomains.Keys) { foreach ($d in $Script:DirectDomains[$g]) { $t.Add($d) } }
+    $t.Add('')
+    $t.Add('# --- сети серверов игр: Valve и Take-Two (нужны, если прокси в режиме TUN) ---')
+    foreach ($n in @(Get-ListLines (Join-Path $Script:Lists 'ipset-taketwo.txt')) + @($Script:ValveNets)) { $t.Add($n) }
+    return @($t)
+}
+
+# ---------- уведомления Windows ----------
+# Задача "zapret notify" раз в 5 минут от имени пользователя запускает tools\notify.ps1: он показывает уведомление,
+# если служба обхода не работает, Steam или Discord застряли на выключенном прокси, вышла новая версия zapret
+# или автонастройка что-то сделала. Об одном и том же - один раз (runtime\notify-state.txt).
+$Script:NotifyTask = 'zapret notify'
+# обход остановлен пунктом 2 - это не сбой, уведомлять не нужно
+$Script:ManualStopFile = 'runtime/manual-stop.txt'
+
+function Get-NotifyTask {
+    try { return Get-ScheduledTask -TaskName $Script:NotifyTask -ErrorAction Stop } catch { return $null }
+}
+
+function Install-NotifyTask {
+    # conhost --headless: без мелькающего окна PowerShell при каждом запуске
+    $script = Join-Path $PSScriptRoot 'notify.ps1'
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\conhost.exe') -WorkingDirectory $Script:Root `
+        -Argument ('--headless "' + $ps + '" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $script + '"')
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User ($env:USERDOMAIN + '\' + $env:USERNAME)
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
+    # от имени пользователя и без прав администратора: уведомления показываются только в его сеансе
+    $pr = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + '\' + $env:USERNAME) -LogonType Interactive -RunLevel Limited
+    try {
+        Register-ScheduledTask -TaskName $Script:NotifyTask -Action $action -Trigger @($every, $logon) -Settings $set -Principal $pr -Force `
+            -Description 'zapret: уведомления (обход не работает, Steam без сети после прокси, новая версия)' -ErrorAction Stop | Out-Null
+    } catch { Write-Color $_.Exception.Message Red; return $false }
+    return [bool](Get-NotifyTask)
+}
+
+function Remove-NotifyTask {
+    try { Unregister-ScheduledTask -TaskName $Script:NotifyTask -Confirm:$false -ErrorAction Stop } catch { }
+}
+
+# Уведомление Windows от имени PowerShell (своё имя приложения требует ярлыка в меню "Пуск" - не стоит того)
+function Show-Toast([string]$Title, [string]$Text) {
+    try {
+        [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+        [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+        $esc = { param($s) [System.Security.SecurityElement]::Escape($s) }
+        $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+        $xml.LoadXml(("<toast><visual><binding template='ToastGeneric'><text>{0}</text><text>{1}</text></binding></visual></toast>" -f (& $esc $Title), (& $esc $Text)))
+        $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show([Windows.UI.Notifications.ToastNotification]::new($xml))
+        return $true
+    } catch { return $false }
+}
+
+# Перезапуск Steam и Discord. Меню работает от администратора, и запущенные из него программы получили бы те же права,
+# поэтому закрываем и открываем их через Проводник (steam://, discord://) - от имени пользователя.
+function Restart-ProxyApps([string[]]$Apps) {
+    $ok = $true
+    foreach ($app in $Apps) {
+        if ($app -eq 'Steam') {
+            Start-Process -FilePath 'explorer.exe' -ArgumentList 'steam://exit'
+            for ($i = 0; $i -lt 30 -and @(Get-Process -Name 'steam' -ErrorAction SilentlyContinue).Count; $i++) { Start-Sleep -Seconds 1 }
+            if (@(Get-Process -Name 'steam' -ErrorAction SilentlyContinue).Count) {
+                Write-Color '  Steam не закрылся за 30 секунд (идёт загрузка?) - закройте его сами: меню Steam -> Выход.' Yellow
+                $ok = $false; continue
+            }
+            Start-Process -FilePath 'explorer.exe' -ArgumentList 'steam://open/main'
+        } elseif ($app -eq 'Discord') {
+            Stop-Process -Name 'Discord' -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Process -FilePath 'explorer.exe' -ArgumentList 'discord://-/'
+        }
+    }
+    $Script:ProxyStuckCache = $null
+    return $ok
 }
 
 # Игровые ускорители: сами перехватывают трафик игр и Discord и ведут его через свои серверы. Вместе с обходом пакеты
@@ -1605,6 +1801,107 @@ function Get-UpstreamNews {
     return $out
 }
 
+# ---------- обновление самой сборки ----------
+# Последний релиз с GitHub (Настройки -> 9). Архив сверяется по SHA-256, которую GitHub сам считает для каждого файла
+# релиза, и только потом раскладывается поверх папки. Не трогаются runtime\ (настройки, рейтинг, логи), ваши списки
+# lists\*-user.txt, автосписок и списки Flowseal (они обновляются сами и в папке обычно новее, чем в архиве).
+function Get-ZapretRelease {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    $tmp = Join-Path $Script:Runtime 'release.json'
+    $r = Invoke-Native $curl ('-s -f --ssl-no-revoke --max-time 20 -H "Accept: application/vnd.github+json" -o "' + $tmp + '" "https://api.github.com/repos/' + $Script:SelfRepo + '/releases/latest"') $Script:Runtime 30
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $tmp)) { return $null }
+    $j = $null
+    try { $j = [System.IO.File]::ReadAllText($tmp) | ConvertFrom-Json } catch { }
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    if (-not $j -or -not ($j.PSObject.Properties.Name -contains 'assets')) { return $null }
+    $prefix = 'https://github.com/' + $Script:SelfRepo + '/releases/download/'
+    $asset = @($j.assets | Where-Object { $_.name -match '^zapret-v[\d.]+\.zip$' -and ('' + $_.browser_download_url).StartsWith($prefix) }) | Select-Object -First 1
+    if (-not $asset) { return $null }
+    $digest = if ($asset.PSObject.Properties.Name -contains 'digest') { '' + $asset.digest } else { '' }
+    return New-Object PSObject -Property @{ Tag = '' + $j.tag_name; Url = '' + $asset.browser_download_url; Name = '' + $asset.name; Sha256 = ($digest -replace '^sha256:', '').ToLower() }
+}
+
+# Какие файлы нового архива ($Src - папка zapret из архива) класть в папку $Dst. Одинаковые не трогаем.
+function Get-UpdatePlan([string]$Src, [string]$Dst) {
+    $keep = @($Script:FlowsealLists.Keys) + @('autohostlist.txt')
+    $plan = @()
+    foreach ($f in @(Get-ChildItem -LiteralPath $Src -Recurse -File)) {
+        $rel = $f.FullName.Substring($Src.TrimEnd('\').Length).TrimStart('\')
+        if ($rel -like 'runtime\*') { continue }
+        $target = Join-Path $Dst $rel
+        $exists = Test-Path -LiteralPath $target
+        if ($rel -like 'lists\*' -and $exists) {
+            $name = Split-Path -Leaf $rel
+            if ($name -like '*-user.txt' -or $keep -contains $name) { continue }
+        }
+        if ($exists -and (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash) { continue }
+        $plan += $rel
+    }
+    return $plan
+}
+
+# Скачивает, проверяет и ставит релиз $Rel (из Get-ZapretRelease). Перед заменой старые файлы копируются
+# в runtime\update\backup и при сбое возвращаются. Возвращает $true, если обновлено.
+function Install-ZapretUpdate($Rel) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    $dir = Join-Path $Script:Runtime 'update'
+    if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
+    New-Item -ItemType Directory $dir | Out-Null
+    $zip = Join-Path $dir $Rel.Name
+    Write-Color ('Скачиваю ' + $Rel.Name + '...') Cyan
+    $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 300 -o "' + $zip + '" "' + $Rel.Url + '"') $dir 320
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $zip)) { Write-Color ('Не скачалось (curl код ' + $r.ExitCode + ').') Red; return $false }
+    $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+    if (-not $Rel.Sha256 -or $hash -ne $Rel.Sha256) {
+        Write-Color 'Контрольная сумма архива не совпала с GitHub - архив повреждён или подменён, не ставлю.' Red
+        Remove-Item $dir -Recurse -Force
+        return $false
+    }
+    $x = Join-Path $dir 'x'
+    New-Item -ItemType Directory $x | Out-Null
+    & (Join-Path $env:SystemRoot 'System32\tar.exe') -x -f $zip -C $x 2>&1 | Out-Null
+    $src = Join-Path $x 'zapret'
+    $ver = ''
+    if (Test-Path (Join-Path $src 'tools\lib.ps1')) { $ver = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $src 'tools\lib.ps1')), "Script:Version\s*=\s*'([^']+)'").Groups[1].Value }
+    if (-not (Test-Path (Join-Path $src 'zapret.bat')) -or -not (Test-Path (Join-Path $src 'bin\winws2.exe')) -or ('v' + $ver) -ne $Rel.Tag) {
+        Write-Color ('В архиве не то, что ожидалось (версия "' + $ver + '", релиз ' + $Rel.Tag + ') - не ставлю.') Red
+        return $false
+    }
+    $plan = @(Get-UpdatePlan $src $Script:Root)
+    # bin\WinDivert64.sys занят, пока драйвер загружен: останавливаем обход и выгружаем драйвер
+    $was = @(Get-OurProcesses).Count -gt 0
+    Stop-Bypass -Unload | Out-Null
+    $backup = Join-Path $dir 'backup'
+    $done = @()
+    try {
+        foreach ($item in $plan) {
+            $target = Join-Path $Script:Root $item
+            if (Test-Path -LiteralPath $target) {
+                $b = Join-Path $backup $item
+                New-Item -ItemType Directory (Split-Path -Parent $b) -Force | Out-Null
+                Copy-Item -LiteralPath $target $b -Force
+            } else { New-Item -ItemType Directory (Split-Path -Parent $target) -Force | Out-Null }
+            Copy-Item -LiteralPath (Join-Path $src $item) $target -Force -ErrorAction Stop
+            $done += $item
+        }
+    } catch {
+        Write-Color ('Не удалось заменить ' + $item + ': ' + $_.Exception.Message + '. Возвращаю прежние файлы.') Red
+        foreach ($d in $done) {
+            $b = Join-Path $backup $d
+            if (Test-Path -LiteralPath $b) { Copy-Item -LiteralPath $b (Join-Path $Script:Root $d) -Force } else { Remove-Item -LiteralPath (Join-Path $Script:Root $d) -Force -ErrorAction SilentlyContinue }
+        }
+        if ($was) { Start-Bypass -Quiet | Out-Null }
+        return $false
+    }
+    # новое меню само включит обход, если он работал (runtime\update-restart.txt)
+    Write-TextNoBom (Join-Path $Script:Runtime 'update-restart.txt') $(if ($was) { 'start' } else { '' })
+    Remove-Item (Join-Path $dir 'x') -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Color ('Обновлено до zapret {0}: файлов заменено {1}. Меню откроется заново.' -f $Rel.Tag, $plan.Count) Green
+    return $true
+}
+
 # Новая версия самой сборки по сохранённой проверке: тег вида v1.2 или $null
 function Get-ZapretUpdate {
     $f = Get-PkgPath $Script:UpdatesFile
@@ -1826,13 +2123,38 @@ function Load-IpSet([string]$File) {
 # Списки, по которым подписываются адреса игры. Порядок важен: первый совпавший и есть "владелец".
 function Get-OwnerSets {
     return [ordered]@{
-        # Valve первым: часть его ретрансляторов есть и в ipset-all, но обход их не трогает
+        # исключённое вами и Valve - первыми: эти адреса бывают и в ipset-all, но обход их не трогает
+        'исключено'    = (Load-IpSet 'ipset-exclude-user.txt')
         'Valve'        = (Load-IpSet 'ipset-valve.txt')
         'ipset-all'    = (Load-IpSet 'ipset-all.txt')
         'Take-Two'     = (Load-IpSet 'ipset-taketwo.txt')
         'найден ранее' = (Load-IpSet 'ipset-user.txt')
         'AWS'          = (Load-IpSet 'ipset-aws.txt')
     }
+}
+
+# Сети, которые обход трогал у программы, по журналу трекера (runtime\track-last.txt) - чтобы исключить игру из обхода,
+# если с ним она работает хуже, чем без него. Голос Discord не берём: он идёт отдельным профилем по портам.
+# Возвращает App, Started и Nets (IPv4 - /24, IPv6 - /64, как у сканера).
+function Get-TrackBypassedNets([string]$Path = (Join-Path $Script:Runtime 'track-last.txt')) {
+    $res = New-Object PSObject -Property @{ App = ''; Started = ''; Nets = @() }
+    if (-not (Test-Path $Path)) { return $res }
+    $nets = New-Object System.Collections.Generic.List[string]
+    $inAll = $false
+    foreach ($l in [System.IO.File]::ReadAllLines($Path)) {
+        if (-not $res.App -and $l -match 'трекер \((.+)\), начало (.+)$') { $res.App = $matches[1]; $res.Started = $matches[2]; continue }
+        if ($l.StartsWith('Все адреса')) { $inAll = $true; continue }
+        if (-not $inAll) { continue }
+        if ($l -notmatch '^\s+(TCP|UDP) \[?([0-9a-fA-F:.]+?)\]?:(\d+)\s.*\| обход: да(?: \((?:any|user)\))?\s*$') { continue }
+        $ip = $null
+        if (-not [System.Net.IPAddress]::TryParse($matches[2], [ref]$ip)) { continue }
+        $b = $ip.GetAddressBytes()
+        $net = if ($ip.AddressFamily -eq 'InterNetwork') { '{0}.{1}.{2}.0/24' -f $b[0], $b[1], $b[2] }
+        else { ([System.Net.IPAddress]::new([byte[]]($b[0..7] + @(0, 0, 0, 0, 0, 0, 0, 0)))).ToString() + '/64' }
+        if (-not $nets.Contains($net)) { $nets.Add($net) }
+    }
+    $res.Nets = @($nets)
+    return $res
 }
 
 function Get-Owner([string]$Ip, $Sets) {
