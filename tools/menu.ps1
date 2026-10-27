@@ -83,6 +83,8 @@ function Show-Header {
     $foreign = @(Get-ForeignBypass)
     if ($foreign.Count) { Write-BoxRow ('  ! Запущен другой обход: ' + ($foreign -join ', ') + '. Пункт 1 предложит его остановить.') Yellow }
     foreach ($b in @(Get-GameBoosters)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
+    $conf = @(Get-SystemConflicts)
+    if ($conf.Count) { Write-BoxRow ('  ! Мешает обходу: ' + (($conf | ForEach-Object { ($_.Text -split '[:(]')[0].Trim() }) -join ', ') + ' - подробно в пункте 5.') Yellow }
     $stuck = @(Get-ProxyStuckApps)
     if ($stuck.Count) { Write-BoxRow ('  ! ' + ($stuck -join ' и ') + ' ходит через выключенный прокси и сидит без сети (в Доте нет цен, не работает "Играть"). Перезапуск - пункт 5.') Yellow }
     $hs = Get-HostsStatus
@@ -151,12 +153,14 @@ function Show-ToolsMenu {
         Write-BoxRow '  5. Диагностика: winws2 в видимом окне'
         Write-BoxRow '  6. Исключить игру из обхода (по последнему трекеру)'
         Write-BoxRow '  7. Правила "напрямую" для Happ (Steam, Discord, игры)'
+        Write-BoxRow '  8. Telegram: ускорение через tg-ws-proxy'
+        Write-BoxRow '  9. Discord не запускается: очистить кэш'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
-        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag'; '6' = 'exclude'; '7' = 'direct' }
+        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag'; '6' = 'exclude'; '7' = 'direct'; '8' = 'telegram'; '9' = 'discordcache' }
         if ($map.ContainsKey($c)) { Invoke-MenuAction $map[$c] } elseif ($Script:LetterKeys.ContainsKey($c)) { Invoke-MenuAction $Script:LetterKeys[$c] }
     }
 }
@@ -350,6 +354,88 @@ function Update-ZapretMenu {
     Pause-Menu
 }
 
+function Clear-DiscordMenu {
+    Write-Host ''
+    Write-Color 'Очистка кэша Discord (как у Flowseal): помогает, если Discord не запускается, висит на загрузке или на обновлении.' Cyan
+    Write-Color 'Discord закроется. Вход, настройки и сообщения останутся - удаляются только папки кэша.' Gray
+    if (-not (Read-YesNo 'Очистить?')) { return }
+    $res = @(Clear-DiscordCache)
+    if (-not $res.Count) { Write-Color 'Discord на этом ПК не найден.' Yellow; Pause-Menu; return }
+    foreach ($r in $res) {
+        $t = '{0}: очищено папок кэша - {1}' -f $r.Name, $r.Cleared
+        if ($r.Failed.Count) { $t += ', не удалось: ' + ($r.Failed -join ', ') + ' (закройте Discord в трее и повторите)' }
+        Write-Color ('  ' + $t) $(if ($r.Failed.Count) { 'Yellow' } else { 'Green' })
+    }
+    if (@($res | Where-Object { $_.Name -eq 'Discord' }).Count) {
+        Start-Process -FilePath 'explorer.exe' -ArgumentList 'discord://-/'
+        Write-Color 'Discord запускается заново (первый запуск после очистки - чуть дольше).' Green
+    }
+    Pause-Menu
+}
+
+function Connect-TgDesktop {
+    $link = ''
+    for ($i = 0; $i -lt 20 -and -not $link; $i++) { $link = Get-TgLink; if (-not $link) { Start-Sleep -Milliseconds 500 } }
+    if (-not $link) {
+        Write-Color 'Настройки прокси ещё не созданы. Нажмите правой кнопкой по значку TG WS Proxy в трее -> "Открыть в Telegram".' Yellow
+        return
+    }
+    # tg://proxy открывает Telegram Desktop с вопросом "Подключиться к прокси?" - ответьте "Подключиться"
+    Start-Process -FilePath 'explorer.exe' -ArgumentList $link
+    Write-Color 'Открываю Telegram: на вопрос о прокси нажмите "Подключиться".' Green
+    Write-Color 'Если Telegram не открылся - правой кнопкой по значку TG WS Proxy в трее -> "Открыть в Telegram".' Gray
+}
+
+function Show-TelegramMenu {
+    while ($true) {
+        Show-Header
+        $st = Get-TgState
+        $state = if (-not $st.Installed) { 'не установлен' } else {
+            $st.Version + ', ' + $(if ($st.Running) { 'работает' } else { 'не запущен' }) + ', автозапуск ' + $(if ($st.Autostart) { 'вкл' } else { 'выкл' }) }
+        Write-BoxRow ' Telegram: tg-ws-proxy от Flowseal' Cyan
+        Write-BoxRow ('  Ускоряет Telegram Desktop: его трафик идёт через WebSocket. Сейчас: ' + $state) Gray
+        Write-BoxRow ('  1. ' + $(if ($st.Installed) { 'Обновить и запустить' } else { 'Установить и запустить' }))
+        Write-BoxRow '  2. Подключить Telegram Desktop к прокси'
+        Write-BoxRow ('  3. Автозапуск при входе в Windows: ' + $(if ($st.Autostart) { 'вкл' } else { 'выкл' }))
+        Write-BoxRow '  4. Удалить'
+        Write-BoxSep
+        Write-BoxRow '  0. Назад'
+        Write-BoxBottom
+        $c = (Read-Host 'Выбор').Trim()
+        switch ($c) {
+            '1' {
+                Write-Host ''
+                if (Install-TgWsProxy) {
+                    if (Start-TgWsProxy) {
+                        Write-Color 'tg-ws-proxy работает (значок в трее). При первом запуске он сам покажет окно с инструкцией.' Green
+                        if (-not $st.Installed -or (Read-YesNo 'Подключить Telegram Desktop к прокси сейчас?')) { Connect-TgDesktop }
+                    } else { Write-Color 'tg-ws-proxy не запустился. Возможно, его удалил антивирус: на упаковщик программы они часто ругаются ложно.' Yellow }
+                }
+                Pause-Menu
+            }
+            '2' {
+                Write-Host ''
+                if (-not $st.Installed) { Write-Color 'Сначала установите (пункт 1).' Yellow }
+                elseif (Start-TgWsProxy) { Connect-TgDesktop } else { Write-Color 'tg-ws-proxy не запустился.' Yellow }
+                Pause-Menu
+            }
+            '3' {
+                if (-not $st.Installed) { Write-Color 'Сначала установите (пункт 1).' Yellow; Pause-Menu }
+                else { Set-TgAutostart (-not $st.Autostart) }
+            }
+            '4' {
+                Write-Host ''
+                if ($st.Installed -and (Read-YesNo 'Удалить tg-ws-proxy?')) {
+                    if (Remove-TgWsProxy) { Write-Color 'Удалён. В Telegram выключите прокси: Настройки -> Продвинутые настройки -> Тип подключения.' Green }
+                    else { Write-Color 'Удалить не вышло: закройте TG WS Proxy в трее и повторите.' Yellow }
+                    Pause-Menu
+                }
+            }
+            default { return }
+        }
+    }
+}
+
 function Export-DirectRules {
     $text = @(Get-DirectRulesText)
     $file = Join-Path ([Environment]::GetFolderPath('Desktop')) 'zapret-direct-rules.txt'
@@ -481,6 +567,10 @@ function Show-PcCheck {
     if ($foreign.Count) {
         Write-Color ('  ! Запущен другой обход: ' + ($foreign -join ', ')) Yellow
         Add-Fix ('Остановить другой обход (' + ($foreign -join ', ') + ')') { Resolve-ForeignBypass }
+    }
+    foreach ($c in @(Get-SystemConflicts)) {
+        Write-Color ('  ! ' + $c.Text) Yellow
+        if ($c.Key -eq 'bfe') { Add-Fix 'Включить службу Base Filtering Engine: без неё WinDivert не работает' { Repair-Bfe } }
     }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
     $stuck = @(Get-ProxyStuckApps)
@@ -615,6 +705,8 @@ function Invoke-MenuAction([string]$Name) {
         'diag' { Start-Diagnostics }
         'exclude' { Exclude-TrackedGame }
         'direct' { Export-DirectRules }
+        'telegram' { Show-TelegramMenu }
+        'discordcache' { Clear-DiscordMenu }
         'notify' { Toggle-Notify }
     }
 }

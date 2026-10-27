@@ -26,7 +26,7 @@ $acl = Get-Acl $tools
 $writers = @($acl.Access | Where-Object { $_.AccessControlType -eq 'Allow' -and ($_.FileSystemRights -band [System.Security.AccessControl.FileSystemRights]::WriteData) -and
     @('S-1-5-18', 'S-1-5-32-544') -notcontains $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value })
 Check 'tools: inheritance off' ($acl.AreAccessRulesProtected)
-Check ('tools: only SYSTEM and Administrators can write (' + $writers.Count + ' others)') ($writers.Count -eq 0)
+Check ('tools: only SYSTEM and Administrators can write (' + $writers.Count + ' others' + $(if ($writers.Count) { ': ' + (($writers | ForEach-Object { '' + $_.IdentityReference + ' ' + $_.FileSystemRights + $(if ($_.IsInherited) { ' inherited' } else { '' }) }) -join '; ') } else { '' }) + ')') ($writers.Count -eq 0)
 $canRead = $true
 try { [System.IO.File]::ReadAllText((Join-Path $tools 'lib.ps1')) | Out-Null } catch { $canRead = $false }
 Check 'tools: still readable' $canRead

@@ -961,6 +961,184 @@ function Get-TunAdapters {
     } catch { return @() }
 }
 
+# ---------- программы и службы, которые мешают обходу (как в диагностике Flowseal) ----------
+# Проверяем только работающие службы и процессы. Key - для исправления (bfe), Text - что найдено и чем мешает.
+$Script:ConflictsCache = $null
+function Get-SystemConflicts {
+    if ($Script:ConflictsCache -and ((Get-Date) - $Script:ConflictsCache.Time).TotalSeconds -lt 60) { return $Script:ConflictsCache.Items }
+    $out = @()
+    function Add-Conflict([string]$Key, [string]$Text) { $script:found += New-Object PSObject -Property @{ Key = $Key; Text = $Text } }
+    $script:found = @()
+    $bfe = Get-Service -Name 'BFE' -ErrorAction SilentlyContinue
+    if (-not $bfe -or $bfe.Status -ne 'Running') { Add-Conflict 'bfe' 'не работает служба Base Filtering Engine (BFE): без неё WinDivert не запустится' }
+    $svc = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
+    $has = { param($re) @($svc | Where-Object { $_.Name -match $re -or $_.DisplayName -match $re }).Count -gt 0 }
+    if (@(Get-Process -Name 'AdguardSvc' -ErrorAction SilentlyContinue).Count) { Add-Conflict 'adguard' 'AdGuard: известно, что мешает Discord. Выключите в нём фильтрацию Discord или закройте его' }
+    if (& $has 'Killer') { Add-Conflict 'killer' 'службы Killer (сетевая программа на ноутбуках Dell, MSI и др.): конфликтуют с обходом - удалите Killer Control Center или выключите его службы' }
+    if (& $has 'Intel.*Connectivity.*Network') { Add-Conflict 'intel' 'Intel Connectivity Network Service: конфликтует с обходом - выключите её в services.msc' }
+    if (& $has 'TracSrvWrapper|EPWD') { Add-Conflict 'checkpoint' 'Check Point (VPN или защита): конфликтует с обходом - удалите его' }
+    if (& $has 'SmartByte') { Add-Conflict 'smartbyte' 'SmartByte (Dell): конфликтует с обходом - выключите его службу в services.msc' }
+    if ($env:OneDrive -and $Script:Root.StartsWith($env:OneDrive.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
+        Add-Conflict 'onedrive' 'папка сборки лежит в OneDrive: синхронизация мешает файлам обхода - перенесите её, например в C:\zapret'
+    }
+    $out = @($script:found)
+    $Script:ConflictsCache = New-Object PSObject -Property @{ Time = Get-Date; Items = $out }
+    return $out
+}
+
+function Repair-Bfe {
+    try { Set-Service -Name 'BFE' -StartupType Automatic -ErrorAction Stop; Start-Service -Name 'BFE' -ErrorAction Stop } catch { return $false }
+    $Script:ConflictsCache = $null
+    return $true
+}
+
+# ---------- кэш Discord ----------
+# Как у Flowseal: Discord закрывается, удаляются только папки кэша (вход, настройки и сообщения остаются). Помогает,
+# когда Discord не запускается, висит на загрузке или на обновлении.
+$Script:DiscordBuilds = [ordered]@{ 'Discord' = 'discord'; 'DiscordPTB' = 'discordptb'; 'DiscordCanary' = 'discordcanary'; 'DiscordDevelopment' = 'discorddevelopment' }
+
+function Clear-DiscordCache {
+    $res = @()
+    foreach ($proc in $Script:DiscordBuilds.Keys) {
+        $dir = Join-Path $env:APPDATA $Script:DiscordBuilds[$proc]
+        if (-not (Test-Path -LiteralPath $dir)) { continue }
+        $was = @(Get-Process -Name $proc -ErrorAction SilentlyContinue).Count -gt 0
+        Stop-Process -Name $proc -Force -ErrorAction SilentlyContinue
+        if ($was) { Start-Sleep -Seconds 1 }
+        $cleared = 0; $failed = @()
+        foreach ($sub in @('Cache', 'Code Cache', 'GPUCache')) {
+            $p = Join-Path $dir $sub
+            if (-not (Test-Path -LiteralPath $p)) { continue }
+            try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop; $cleared++ } catch { $failed += $sub }
+        }
+        $res += New-Object PSObject -Property @{ Name = $proc; Cleared = $cleared; Failed = $failed; WasRunning = $was }
+    }
+    return $res
+}
+
+# ---------- Telegram: tg-ws-proxy (Flowseal) ----------
+# Локальный MTProto-прокси для Telegram Desktop от Flowseal (github.com/Flowseal/tg-ws-proxy, MIT): гонит трафик Telegram
+# через WebSocket или Cloudflare, и Telegram перестаёт тормозить. Ставится по кнопке в runtime\tg-ws-proxy в портативном
+# режиме (его настройки - рядом, в TgWsProxy_data): скачивается со страницы релизов Flowseal и сверяется по SHA-256,
+# которую GitHub считает для файла релиза. Запускается от имени пользователя, без прав администратора меню.
+$Script:TgRepo = 'Flowseal/tg-ws-proxy'
+$Script:TgDir = 'runtime/tg-ws-proxy'
+$Script:TgRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+
+function Get-TgExe { return (Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy.exe') }
+
+function Get-TgProcesses {
+    $exe = Get-TgExe
+    return @(Get-Process -Name 'TgWsProxy*' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -eq $exe } catch { $false } })
+}
+
+# Installed, Version, Sha256 (записаны при установке в version.txt), Running, Autostart (как в настройках самого прокси)
+function Get-TgState {
+    $exe = Get-TgExe
+    $info = Join-Path (Get-PkgPath $Script:TgDir) 'version.txt'
+    $ver = ''; $sha = ''
+    if (Test-Path $info) {
+        $f = @([System.IO.File]::ReadAllText($info).Trim() -split '\s+')
+        $ver = $f[0]
+        if ($f.Count -gt 1) { $sha = $f[1] }
+    }
+    $auto = $false
+    try {
+        $run = Get-ItemProperty -Path $Script:TgRunKey -ErrorAction Stop
+        if ($run.PSObject.Properties.Name -contains 'TgWsProxy') { $auto = (('' + $run.TgWsProxy).Trim() -eq ('"' + $exe + '"')) }
+    } catch { }
+    return New-Object PSObject -Property @{ Installed = (Test-Path $exe); Version = $ver; Sha256 = $sha; Running = (@(Get-TgProcesses).Count -gt 0); Autostart = $auto }
+}
+
+# Ссылка tg://proxy из настроек прокси (как "Открыть в Telegram" в его меню). '' - настроек ещё нет.
+function Get-TgLink([string]$ConfigPath = (Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy_data\config.json')) {
+    if (-not (Test-Path $ConfigPath)) { return '' }
+    $j = $null
+    try { $j = [System.IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json } catch { return '' }
+    $names = @($j.PSObject.Properties.Name)
+    $secret = if ($names -contains 'secret') { '' + $j.secret } else { '' }
+    if ($secret -notmatch '^[0-9a-fA-F]{32}$') { return '' }
+    $port = if ($names -contains 'port' -and ('' + $j.port) -match '^\d+$') { [int]$j.port } else { 1443 }
+    $h = if ($names -contains 'host' -and $j.host) { '' + $j.host } else { '127.0.0.1' }
+    if ($h -eq '0.0.0.0') { $h = '127.0.0.1' }
+    return ('tg://proxy?server={0}&port={1}&secret=dd{2}' -f $h, $port, $secret)
+}
+
+# Ставит или обновляет tg-ws-proxy с GitHub Flowseal. Возвращает $true, если стоит последняя версия.
+function Install-TgWsProxy {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    $dir = Get-PkgPath $Script:TgDir
+    New-Item -ItemType Directory $dir -Force | Out-Null
+    $tmp = Join-Path $dir 'release.json'
+    $r = Invoke-Native $curl ('-s -f --ssl-no-revoke --max-time 20 -H "Accept: application/vnd.github+json" -o "' + $tmp + '" "https://api.github.com/repos/' + $Script:TgRepo + '/releases/latest"') $dir 30
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $tmp)) { Write-Color ('GitHub не ответил (curl код ' + $r.ExitCode + ').') Red; return $false }
+    $j = $null
+    try { $j = [System.IO.File]::ReadAllText($tmp) | ConvertFrom-Json } catch { }
+    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+    if (-not $j -or -not ($j.PSObject.Properties.Name -contains 'assets')) { Write-Color 'Ответ GitHub не похож на релиз.' Red; return $false }
+    $arm = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')
+    $want = if ($arm) { 'TgWsProxy_windows_arm64.exe' } else { 'TgWsProxy_windows.exe' }
+    $prefix = 'https://github.com/' + $Script:TgRepo + '/releases/download/'
+    $asset = @($j.assets | Where-Object { $_.name -eq $want -and ('' + $_.browser_download_url).StartsWith($prefix) }) | Select-Object -First 1
+    $sha = ''
+    if ($asset -and ($asset.PSObject.Properties.Name -contains 'digest')) { $sha = (('' + $asset.digest) -replace '^sha256:', '').ToLower() }
+    if (-not $asset -or $sha -notmatch '^[0-9a-f]{64}$') { Write-Color ('В релизе ' + $j.tag_name + ' нет ' + $want + ' с контрольной суммой.') Red; return $false }
+    $st = Get-TgState
+    if ($st.Installed -and $st.Sha256 -eq $sha -and (Get-FileHash -LiteralPath (Get-TgExe) -Algorithm SHA256).Hash.ToLower() -eq $sha) {
+        Write-Color ('Стоит последняя версия tg-ws-proxy: ' + $j.tag_name + '.') Green
+        return $true
+    }
+    $dl = Join-Path $dir 'download.tmp'
+    Write-Color ('Скачиваю tg-ws-proxy ' + $j.tag_name + ' (' + [math]::Round($asset.size / 1MB) + ' МБ)...') Cyan
+    $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 300 -o "' + $dl + '" "' + $asset.browser_download_url + '"') $dir 320
+    if ($r.ExitCode -ne 0 -or -not (Test-Path $dl)) { Write-Color ('Не скачалось (curl код ' + $r.ExitCode + ').') Red; return $false }
+    if ((Get-FileHash -LiteralPath $dl -Algorithm SHA256).Hash.ToLower() -ne $sha) {
+        Remove-Item $dl -Force
+        Write-Color 'Контрольная сумма не совпала с GitHub - файл повреждён или подменён, не ставлю.' Red
+        return $false
+    }
+    Stop-TgWsProxy
+    Move-Item -LiteralPath $dl (Get-TgExe) -Force
+    # папка рядом с программой включает её портативный режим: настройки и логи - здесь, а не в %APPDATA%
+    New-Item -ItemType Directory (Join-Path $dir 'TgWsProxy_data') -Force | Out-Null
+    Write-TextNoBom (Join-Path $dir 'version.txt') ($j.tag_name + ' ' + $sha)
+    Write-Color ('tg-ws-proxy ' + $j.tag_name + ' установлен.') Green
+    return $true
+}
+
+# Запуск через Проводник - от имени пользователя. Перед запуском файл сверяется с SHA-256, записанной при установке.
+function Start-TgWsProxy {
+    $st = Get-TgState
+    if (-not $st.Installed) { return $false }
+    if ($st.Running) { return $true }
+    if ($st.Sha256 -and (Get-FileHash -LiteralPath (Get-TgExe) -Algorithm SHA256).Hash.ToLower() -ne $st.Sha256) {
+        Write-Color 'TgWsProxy.exe изменился после установки - не запускаю. Поставьте его заново (пункт 1).' Red
+        return $false
+    }
+    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + (Get-TgExe) + '"')
+    for ($i = 0; $i -lt 30 -and -not @(Get-TgProcesses).Count; $i++) { Start-Sleep -Milliseconds 500 }
+    return (@(Get-TgProcesses).Count -gt 0)
+}
+
+function Stop-TgWsProxy {
+    foreach ($p in @(Get-TgProcesses)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+}
+
+# Автозапуск - та же запись, что ставит сам прокси в своих настройках (HKCU\...\Run, TgWsProxy)
+function Set-TgAutostart([bool]$On) {
+    if ($On) { New-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -Value ('"' + (Get-TgExe) + '"') -PropertyType String -Force | Out-Null }
+    elseif ((Get-TgState).Autostart) { Remove-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -ErrorAction SilentlyContinue }
+}
+
+function Remove-TgWsProxy {
+    Set-TgAutostart $false
+    Stop-TgWsProxy
+    Start-Sleep -Milliseconds 500
+    Remove-Item (Get-PkgPath $Script:TgDir) -Recurse -Force -ErrorAction SilentlyContinue
+    return -not (Test-Path (Get-TgExe))
+}
+
 # ---------- программы, застрявшие на прокси ----------
 # Steam и Discord запоминают системный прокси при запуске. Включили Happ, чтобы что-то открыть, выключили - а Steam так
 # и шлёт веб-запросы на 127.0.0.1:10809, где уже никто не слушает. К своим серверам он при этом подключён (по UDP),
@@ -1826,8 +2004,10 @@ function Get-ZapretRelease {
 function Get-UpdatePlan([string]$Src, [string]$Dst) {
     $keep = @($Script:FlowsealLists.Keys) + @('autohostlist.txt')
     $plan = @()
-    foreach ($f in @(Get-ChildItem -LiteralPath $Src -Recurse -File)) {
-        $rel = $f.FullName.Substring($Src.TrimEnd('\').Length).TrimStart('\')
+    # полный путь: в $Src может быть короткое имя (C:\Users\RUNNER~1\...), а FullName у файлов - всегда длинное
+    $base = (Get-Item -LiteralPath $Src).FullName.TrimEnd('\')
+    foreach ($f in @(Get-ChildItem -LiteralPath $base -Recurse -File)) {
+        $rel = $f.FullName.Substring($base.Length).TrimStart('\')
         if ($rel -like 'runtime\*') { continue }
         $target = Join-Path $Dst $rel
         $exists = Test-Path -LiteralPath $target
@@ -2255,6 +2435,7 @@ function Protect-Package {
         if (-not (Test-Path $p)) { continue }
         & $icacls $p /setowner '*S-1-5-32-544' /T /C /Q 2>&1 | Out-Null
         & $icacls $p /inheritance:r @dirGrant /Q 2>&1 | Out-Null
+        Remove-ForeignAces $p
         # содержимое - только унаследованные права от защищённой папки
         & $icacls (Join-Path $p '*') /reset /T /C /Q 2>&1 | Out-Null
     }
@@ -2263,6 +2444,18 @@ function Protect-Package {
         if (-not (Test-Path $p)) { continue }
         & $icacls $p /setowner '*S-1-5-32-544' /C /Q 2>&1 | Out-Null
         & $icacls $p /inheritance:r @fileGrant /Q 2>&1 | Out-Null
+        Remove-ForeignAces $p
+    }
+}
+
+# Явные права других учётных записей (бывают у папок в профиле пользователя: "Загрузки", рабочий стол) /inheritance:r
+# не убирает - а с ними программа без прав администратора могла бы подменить скрипт. Оставляем только наши четыре.
+function Remove-ForeignAces([string]$Path) {
+    $keep = @('S-1-5-18', 'S-1-5-32-544', 'S-1-5-32-545', 'S-1-5-11')
+    $sids = @()
+    try { $sids = @((Get-Acl -LiteralPath $Path -ErrorAction Stop).Access | ForEach-Object { try { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { } } | Select-Object -Unique) } catch { }
+    foreach ($sid in $sids) {
+        if ($sid -and $keep -notcontains $sid) { & (Join-Path $env:SystemRoot 'System32\icacls.exe') $Path /remove:g ('*' + $sid) /Q 2>&1 | Out-Null }
     }
 }
 

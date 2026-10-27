@@ -89,6 +89,17 @@ try { Get-ProxyStuckApps | Out-Null; Get-ProxyAppsNow | Out-Null } catch { $stuc
 Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 if ($proxyOk -and $trackOk -and $planOk -and $rulesOk -and $stuckOk) { Write-Host 'ok   прокси, исключение игры, план обновления, правила' -ForegroundColor Green }
 else { Write-Host ('FAIL 1.2: proxy={0} track={1} ({2}) plan={3} ({4}) rules={5} stuck={6}' -f $proxyOk, $trackOk, (@($tb.Nets) -join ','), $planOk, ($plan -join ','), $rulesOk, $stuckOk) -ForegroundColor Red; $fails++ }
+# Telegram (tg-ws-proxy): ссылка tg://proxy из его настроек; конфликтующие программы, меню Telegram - без установки и без сети
+$tgCfg = Join-Path $env:TEMP ('zapret-tg-' + [guid]::NewGuid().ToString('N') + '.json')
+[System.IO.File]::WriteAllText($tgCfg, '{"host": "127.0.0.1", "port": 1443, "secret": "0123456789abcdef0123456789abcdef"}')
+$link = Get-TgLink $tgCfg
+[System.IO.File]::WriteAllText($tgCfg, '{"secret": "bad"}')
+$noLink = Get-TgLink $tgCfg
+Remove-Item $tgCfg -Force
+$tgOk = $true
+try { Get-SystemConflicts | Out-Null; Get-TgState | Out-Null; Show-TelegramMenu *> $null } catch { $tgOk = $false; $tgErr = $_.Exception.Message }
+if ($link -eq 'tg://proxy?server=127.0.0.1&port=1443&secret=dd0123456789abcdef0123456789abcdef' -and $noLink -eq '' -and $tgOk) { Write-Host 'ok   Telegram, конфликты' -ForegroundColor Green }
+else { Write-Host ('FAIL Telegram: link=' + $link + ' bad=' + $noLink + ' ok=' + $tgOk) -ForegroundColor Red; $fails++ }
 # новые версии: сравнение по числам и своя версия по сохранённой проверке - без сети
 $uf = Get-PkgPath $Script:UpdatesFile
 $savedUpd = if (Test-Path $uf) { [System.IO.File]::ReadAllText($uf) } else { $null }

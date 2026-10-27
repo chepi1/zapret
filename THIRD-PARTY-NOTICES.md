@@ -12,6 +12,8 @@
 
 `strategies\*.txt` — стратегии Flowseal и примеры из документации zapret2, переведённые в формат этой сборки.
 
+По кнопке (Инструменты → 8) сборка скачивает [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) © Flowseal (MIT) с его страницы релизов в `runtime\tg-ws-proxy`. В архиве и репозитории его нет.
+
 SHA-256 файлов zapret2 — в [CHECKSUMS.txt](CHECKSUMS.txt): их можно сверить с официальным релизом zapret2.
 
 Внешние сервисы, к которым обращаются скрипты, все по HTTPS:
