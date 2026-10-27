@@ -1,0 +1,47 @@
+# name: ALT13
+# desc: Фейки (ClientHello sochi.park + stun2) и подмена имени хоста в ClientHello на mail.ru (hostfakesplit). YouTube: подмена на www.google.com.
+# flowseal: general (ALT13).bat (altorder=1 в zapret2 нет, порядок частей стандартный)
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=5
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=5
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_google:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=7
+--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_google
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--payload=http_req
+--lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+[game_tcp]
+--out-range=<n4
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--payload=http_req
+--lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--payload=unknown
+--lua-desync=fake:payload=unknown:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=fake:payload=unknown:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+[game_udp]
+--out-range=<n4
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=10

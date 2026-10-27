@@ -1,0 +1,47 @@
+# name: BV1
+# desc: bol-van, базовая из readme zapret2: фейк ClientHello со случайным SNI и MD5-опцией + разрезка с ложным TLS-заголовком (seqovl 5). UDP - как в ALT12.
+# origin: github.com/bol-van/zapret2 docs/readme.md
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=stun_fs:repeats=3
+--lua-desync=fake:blob=discord_udp:repeats=3
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=3
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:tcp_md5
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+[game_tcp]
+--out-range=<n4
+--payload=tls_client_hello
+--lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+--payload=http_req
+--lua-desync=fake:blob=fake_default_http:tcp_md5
+--lua-desync=multisplit:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+--payload=unknown
+--lua-desync=fake:payload=unknown:blob=0x00000000000000000000000000000000:tcp_md5
+--lua-desync=multisplit:payload=unknown:pos=1:seqovl=5:seqovl_pattern=0x1603030000
+[game_udp]
+--out-range=<n4
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=10

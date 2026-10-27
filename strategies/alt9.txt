@@ -1,0 +1,43 @@
+# name: ALT9
+# desc: Только подмена имени хоста (hostfakesplit ozon.ru / google) с устаревшим timestamp.
+# flowseal: general (ALT9).bat (перенесено конвертером из 1.10.4)
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=6
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=6
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=6
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=www.google.com:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4:ip_id=zero
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:tcp_md5:repeats=4
+--payload=http_req
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:tcp_md5:repeats=4
+[ipset_tcp]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4
+--payload=http_req
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4
+[game_tcp]
+--out-range=<n3
+--payload=tls_client_hello
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4
+--payload=http_req
+--lua-desync=hostfakesplit:host=ozon.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=4
+[game_udp]
+--out-range=<n2
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=12

@@ -1,0 +1,2 @@
+# Файлы хранятся байт в байт: .bat нужны CRLF, а файлы zapret2 сверяются по SHA-256 (CHECKSUMS.txt)
+* -text

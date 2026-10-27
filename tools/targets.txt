@@ -1,0 +1,37 @@
+# Адреса сервисов для автоподбора (пункт 3). Формат: Группа.Имя = https://адрес
+# Ответ сервера с любым HTTP-кодом (даже 403/404) считается успехом: важно, что TLS прошёл и данные пришли.
+# Замерзание 16-20 КБ проверяется отдельно по набору хостингов из tools\dpi-suite.json (как в тесте Flowseal).
+Discord.main      = https://discord.com/
+Discord.gateway   = https://gateway.discord.gg/
+Discord.cdn       = https://cdn.discordapp.com/
+Discord.updates   = https://updates.discord.com/
+YouTube.web       = https://www.youtube.com/
+YouTube.img       = https://i.ytimg.com/
+YouTube.video     = https://redirector.googlevideo.com/
+SoundCloud.web    = https://soundcloud.com/
+SoundCloud.api    = https://api-v2.soundcloud.com/
+SoundCloud.media  = https://cf-hls-media.sndcdn.com/
+NBA2K.site        = https://www.2k.com/
+NBA2K.nba         = https://nba.2k.com/
+NBA2K.accounts    = https://accounts.2k.com/
+NBA2K.sso         = https://sso.api.2kcoretech.online/
+NBA2K.cloud       = https://clouddata.api.2kcoretech.online/
+EAC.download      = https://download-alt.easyanticheat.net/
+EAC.modules       = https://modules-cdn.eac-prod.on.epicgames.com/
+EAC.epic_api      = https://api.epicgames.dev/
+# Незаблокированные сайты на разных CDN: обход не должен им вредить. Для каждой стратегии сравниваются
+# с прогоном без обхода: перестал открываться или TLS медленнее больше чем на 0,5 с - это вред.
+# bing/akamai/adobe/sony - те серверы Akamai, которым ALT11/ALT12 с ложным началом (seqovl) ломают TLS.
+Clean.bing        = https://www.bing.com/
+Clean.akamai      = https://www.akamai.com/
+Clean.adobe       = https://www.adobe.com/
+Clean.sony        = https://www.sony.com/
+Clean.apple       = https://www.apple.com/
+Clean.samsung     = https://www.samsung.com/
+Clean.ea          = https://www.ea.com/
+Clean.pypi        = https://pypi.org/
+Clean.github      = https://github.githubassets.com/
+Clean.mozilla     = https://www.mozilla.org/
+Clean.aws         = https://d1.awsstatic.com/
+Clean.booking     = https://www.booking.com/
+Clean.office      = https://www.office.com/

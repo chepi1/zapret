@@ -1,0 +1,47 @@
+# name: ALT5
+# desc: Данные в SYN-пакете (syndata) и части ClientHello в обратном порядке (multidisorder).
+# flowseal: general (ALT5).bat (перенесено конвертером из 1.10.4)
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=6
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=6
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=6
+[discord_media]
+--out-range=-d10
+--payload=empty
+--lua-desync=syndata
+--payload=tls_client_hello
+--lua-desync=multidisorder
+[google]
+--out-range=-d10
+--payload=empty
+--lua-desync=syndata
+--payload=tls_client_hello
+--lua-desync=multidisorder
+[general]
+--out-range=-d10
+--payload=empty
+--lua-desync=syndata
+--payload=tls_client_hello
+--lua-desync=multidisorder
+--payload=http_req
+--lua-desync=multidisorder
+[game_tcp]
+--out-range=<n4
+--payload=empty
+--lua-desync=syndata
+--payload=tls_client_hello
+--lua-desync=multidisorder
+--payload=http_req
+--lua-desync=multidisorder
+--payload=unknown
+--lua-desync=multidisorder:payload=unknown
+[game_udp]
+--out-range=<n3
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=14

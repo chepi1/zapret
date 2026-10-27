@@ -1,0 +1,42 @@
+# name: SIMPLE FAKE ALT2
+# desc: Только фейки (stun2 + ClientHello sferum) с устаревшим timestamp, без разрезки.
+# flowseal: general (SIMPLE FAKE ALT2).bat (перенесено конвертером из 1.10.4)
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=6
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=6
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=6
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_google:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_google:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6:ip_id=zero
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--payload=http_req
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+[game_tcp]
+--out-range=<n5
+--payload=tls_client_hello
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--payload=http_req
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--payload=unknown
+--lua-desync=fake:payload=unknown:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--lua-desync=fake:payload=unknown:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+[game_udp]
+--out-range=<n3
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=12

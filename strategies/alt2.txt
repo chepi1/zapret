@@ -1,0 +1,39 @@
+# name: ALT2
+# desc: Без фейков: разрезка с ложным началом (seqovl 652) по второму байту.
+# flowseal: general (ALT2).bat (перенесено конвертером из 1.10.4)
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=6
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=6
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=6
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google:ip_id=zero
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
+--payload=http_req
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
+[game_tcp]
+--out-range=<n3
+--payload=tls_client_hello
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
+--payload=http_req
+--lua-desync=multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google
+--payload=unknown
+--lua-desync=multisplit:payload=unknown:pos=2:seqovl=652:seqovl_pattern=tls_google
+[game_udp]
+--out-range=<n2
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=12
