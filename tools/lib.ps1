@@ -10,6 +10,7 @@ $Script:Runtime     = Join-Path $Script:Root 'runtime'
 $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
+$Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.1'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
@@ -635,12 +636,14 @@ function Invoke-Native([string]$File, [string]$Arguments, [string]$WorkDir, [int
     $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
     $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
     try { $p = [System.Diagnostics.Process]::Start($psi) }
-    catch { return New-Object PSObject -Property @{ ExitCode = -1; Output = ('не удалось запустить ' + $File + ': ' + $_.Exception.Message) } }
+    catch { return New-Object PSObject -Property @{ ExitCode = -1; Output = ('не удалось запустить ' + $File + ': ' + $_.Exception.Message); TimedOut = $false } }
     $so = $p.StandardOutput.ReadToEndAsync()
     $se = $p.StandardError.ReadToEndAsync()
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) { try { $p.Kill() } catch { } }
+    # TimedOut - процесс работал до конца срока и был остановлен (для winws2 это значит "запустился и работает")
+    $timedOut = -not $p.WaitForExit($TimeoutSec * 1000)
+    if ($timedOut) { try { $p.Kill() } catch { } }
     $p.WaitForExit()
-    return New-Object PSObject -Property @{ ExitCode = $p.ExitCode; Output = ($so.Result + $se.Result).Trim() }
+    return New-Object PSObject -Property @{ ExitCode = $p.ExitCode; Output = ($so.Result + $se.Result).Trim(); TimedOut = $timedOut }
 }
 
 # Проверка параметров без перехвата трафика (--dry-run)
@@ -680,10 +683,12 @@ function Start-Bypass([switch]$Quiet) {
 
     $cmd = Get-BypassCmdLine -Settings $settings
     $svc = Get-OurService
+    $since = Get-Date
+    $err = ''
     if ($svc) {
         # параметры службы живут в её командной строке: обновляем под текущие настройки
         Set-ItemProperty -Path ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $Script:ServiceName) -Name ImagePath -Value (Get-ServiceBinPath $cmd)
-        Start-Service -Name $Script:ServiceName -ErrorAction SilentlyContinue
+        $err = Start-OurService
     } else {
         # без окна: ошибки запуска видны через Инструменты -> 5 (диагностика)
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
@@ -696,6 +701,10 @@ function Start-Bypass([switch]$Quiet) {
         Start-Sleep -Seconds 3
         $alive = @(Get-OurProcesses).Count -gt 0
     }
+    if (-not $alive) {
+        Write-Color $(if ($svc) { 'Служба обхода не запустилась.' } else { 'winws2 завершился сразу после запуска.' }) Red
+        $alive = Show-StartFailure $err $since
+    }
     if ($alive) {
         Set-HighPriority
         if (-not $Quiet) {
@@ -705,12 +714,93 @@ function Start-Bypass([switch]$Quiet) {
             if (@(Get-ProxyWarnings).Count) { Write-Color 'Запущен прокси/VPN: трафик через него обход не видит. Для игры выйдите из клиента полностью.' Yellow }
             foreach ($b in @(Get-GameBoosters)) { Write-Color ('Запущен игровой ускоритель ' + $b + ': он ' + $Script:BoosterHint + '.') Yellow }
         }
-    } else {
-        Write-Color 'winws2 завершился сразу после запуска.' Red
-        Write-Color 'Частые причины: антивирус удалил WinDivert64.sys / winws2.exe, другой обход держит драйвер, запуск не от администратора.' Yellow
-        Write-Color 'Инструменты -> 5 (диагностика) запустит winws2 в окне и покажет ошибку.' Yellow
     }
     return $alive
+}
+
+# Start-Service, но вместо исключения - текст ошибки Windows ('' - служба запустилась)
+function Start-OurService {
+    try { Start-Service -Name $Script:ServiceName -ErrorAction Stop; return '' }
+    catch {
+        $e = $_.Exception
+        while ($e.InnerException) { $e = $e.InnerException }
+        return $e.Message
+    }
+}
+
+# Ошибки службы в журнале Windows "Система" с момента $Since (новые сверху, не больше трёх)
+function Get-ServiceEvents([datetime]$Since) {
+    $ev = @()
+    # записей нет - Get-WinEvent тоже бросает исключение
+    try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Level = 1, 2, 3; StartTime = $Since } -ErrorAction Stop) } catch { }
+    return @($ev | Where-Object { $_.Message -and ($_.Message.Contains($Script:ServiceDisplayName) -or $_.Message.Contains($Script:ServiceName)) } |
+        Select-Object -First 3 | ForEach-Object { ($_.Message -replace '\s+', ' ').Trim() })
+}
+
+# Подсказки по тексту ошибки: самые частые причины на чужих ПК
+function Get-StartFailureHints([string]$Text) {
+    $h = @()
+    if ($Text -match 'already running') { $h += 'Уже работает другой winws2 с теми же фильтрами: остановите его (пункт 2) или закройте Flowseal.' }
+    if ($Text -match '(?i)\b577\b|signature|подпис') { $h += 'Windows не приняла подпись драйвера WinDivert: установите все обновления Windows.' }
+    if ($Text -match '(?i)\b1275\b|blocked|заблокирова') {
+        $h += 'Загрузку драйвера WinDivert заблокировали: антивирус или "Безопасность Windows -> Безопасность устройства -> Изоляция ядра -> Целостность памяти". Добавьте папку в исключения антивируса; не поможет - выключите "Целостность памяти" и перезагрузите ПК.'
+    }
+    if ($Text -match '(?i)access is denied|отказано в доступе') { $h += 'Отказано в доступе: антивирус блокирует winws2.exe или WinDivert64.sys - добавьте папку в исключения антивируса.' }
+    if ($Text -match '(?i)\b1053\b|timely|своевременно') { $h += 'Служба не ответила Windows вовремя: обычно её держит проверка антивирусом. Добавьте папку в исключения антивируса.' }
+    if ($Text -match '(?i)cannot find the file|не удается найти указанный файл') { $h += 'Не найден файл: антивирус удалил winws2.exe или WinDivert64.sys. Добавьте папку в исключения и распакуйте архив заново.' }
+    return $h
+}
+
+# Почему обход не запустился. Сначала то, что видно сразу: ошибка Windows при запуске службы, код, с которым служба
+# завершилась, и записи журнала "Система". Затем winws2 запускается обычным процессом на 5 секунд с выводом в меню:
+# если он падает и так, его последние строки и есть причина; если работает - сбой только у службы, и обход остаётся
+# работать без неё. Всё это пишется в runtime\start-error.txt и попадает в отчёт (Инструменты -> 4).
+# -RemoveService - служба только что поставлена и не запустилась: она удаляется, а не остаётся сбоить при каждом старте.
+# Возвращает $true, если обход в итоге запущен без службы.
+function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$RemoveService) {
+    $lines = New-Object System.Collections.Generic.List[string]
+    if ($StartError) { $lines.Add('Windows: ' + $StartError) }
+    $svc = $null
+    try { $svc = Get-CimInstance Win32_Service -Filter ("Name='" + $Script:ServiceName + "'") -ErrorAction Stop } catch { }
+    # 1077 - службу с загрузки ещё не запускали
+    if ($svc -and @(0, 1077) -notcontains [int]$svc.ExitCode) {
+        $code = if ([int]$svc.ExitCode -eq 1066) { 'winws2 вернул код ' + $svc.ServiceSpecificExitCode }
+        else { '{0} - {1}' -f $svc.ExitCode, (New-Object System.ComponentModel.Win32Exception([int]$svc.ExitCode)).Message }
+        $lines.Add('служба завершилась: ' + $code)
+    }
+    foreach ($e in @(Get-ServiceEvents $Since)) { $lines.Add('журнал Windows: ' + $e) }
+
+    # пока winws2 проверяется отдельно, Windows не должна перезапустить службу: у неё автоперезапуск при сбое
+    Stop-Bypass
+    if ($svc) {
+        if ($RemoveService) { & sc.exe delete $Script:ServiceName | Out-Null }
+        else { & sc.exe config $Script:ServiceName start= disabled | Out-Null }
+    }
+    $cmd = Get-BypassCmdLine -Settings (Get-Settings)
+    $r = Invoke-Native $Script:Exe $cmd $Script:Bin 5
+    if ($svc -and -not $RemoveService) { & sc.exe config $Script:ServiceName start= auto | Out-Null }
+    $fallback = $false
+    if ($r.TimedOut) {
+        $lines.Add('winws2 без службы запускается и работает: сбой только у службы Windows')
+        Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
+        Start-Sleep -Seconds 2
+        $fallback = @(Get-OurProcesses).Count -gt 0
+    } else {
+        $tail = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 4)
+        $lines.Add(('winws2 и без службы завершился сразу (код {0})' -f $r.ExitCode) + $(if ($tail.Count) { ':' } else { ', ничего не написав' }))
+        foreach ($t in $tail) { $lines.Add('  ' + $t.Trim()) }
+    }
+    $hints = @(Get-StartFailureHints ($lines -join "`n"))
+
+    Write-Color 'Почему не запустилось:' Yellow
+    foreach ($l in $lines) { Write-Color ('  ' + $l) Gray }
+    foreach ($x in $hints) { Write-Color ('  ' + $x) Yellow }
+    if (-not $hints.Count) { Write-Color '  Пришлите отчёт (Инструменты -> 4): причина записана и туда. Инструменты -> 5 покажет winws2 в окне.' Yellow }
+    if ($fallback) { Write-Color 'Обход запущен без службы: он работает до перезагрузки ПК.' Green }
+    $os = '' + [Environment]::OSVersion.Version
+    $save = @(('Обход не запустился {0}, Windows {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $os)) + @($lines) + @($hints)
+    Write-TextNoBom (Join-Path $Script:Runtime 'start-error.txt') (($save -join "`r`n") + "`r`n")
+    return $fallback
 }
 
 function Get-AltText([hashtable]$Settings) {
@@ -739,14 +829,16 @@ function Install-BypassService {
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; return $false }
 
     $binPath = Get-ServiceBinPath (Get-BypassCmdLine -Settings $settings)
-    New-Service -Name $Script:ServiceName -BinaryPathName $binPath -DisplayName 'zapret - обход DPI' `
+    $since = Get-Date
+    New-Service -Name $Script:ServiceName -BinaryPathName $binPath -DisplayName $Script:ServiceDisplayName `
         -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic | Out-Null
     & sc.exe failure $Script:ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
-    Start-Service -Name $Script:ServiceName -ErrorAction SilentlyContinue
+    $err = Start-OurService
     Start-Sleep -Seconds 3
-    $ok = @(Get-OurProcesses).Count -gt 0
-    if ($ok) { Set-HighPriority }
-    return $ok
+    if (@(Get-OurProcesses).Count -gt 0) { Set-HighPriority; return $true }
+    Write-Color 'Служба не запустилась и удалена.' Red
+    Show-StartFailure $err $since -RemoveService | Out-Null
+    return $false
 }
 
 # Сборка называлась NBA2K27-zapret2: служба и задача автонастройки прежних версий переносятся под новые имена

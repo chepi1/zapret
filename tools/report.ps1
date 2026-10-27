@@ -36,6 +36,11 @@ foreach ($x in @(Get-AllNews)) { $r.Add('Вышла новая версия: ' +
 foreach ($k in ($s.Keys | Sort-Object)) { $r.Add("$k=$($s[$k])") }
 
 Add-Section 'Состояние'
+try { $r.Add('Windows: ' + (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).Caption + ' ' + [Environment]::OSVersion.Version) } catch { }
+# "Целостность памяти" (изоляция ядра) может не пустить драйвер WinDivert
+$hvci = $null
+try { $hvci = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\DeviceGuard\Scenarios\HypervisorEnforcedCodeIntegrity' -ErrorAction Stop).Enabled } catch { }
+$r.Add('Целостность памяти: ' + $(if ($hvci -eq 1) { 'вкл' } else { 'выкл' }))
 $procs = @(Get-OurProcesses)
 $r.Add('winws2 запущен: ' + ($procs.Count -gt 0))
 foreach ($p in $procs) { try { $r.Add(('  PID {0}, приоритет {1}, запущен {2}' -f $p.Id, $p.PriorityClass, $p.StartTime)) } catch { } }
@@ -81,6 +86,7 @@ if ($sites) {
 } else { $r.Add('(список сайтов не добавлен)') }
 
 Add-File 'Параметры winws2 (последний запуск)' (Join-Path $Script:Runtime 'args-active.txt')
+Add-File 'Последний сбой запуска обхода' (Join-Path $Script:Runtime 'start-error.txt')
 Add-File 'Последний автоподбор' (Join-Path $Script:Runtime 'test-last.txt') -StopAt 'Подробно'
 Add-File 'Журнал автонастройки' (Join-Path $Script:Runtime 'autotune.log') 30
 Add-File 'Последний сканер' (Join-Path $Script:Runtime 'scan-last.txt')

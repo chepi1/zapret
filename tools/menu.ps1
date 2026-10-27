@@ -365,7 +365,7 @@ function Toggle-Service {
         if (-not (Resolve-ForeignBypass)) { Write-Color 'Служба не установлена: сначала остановите другой обход.' Red; Pause-Menu; return }
         Write-Color 'Ставлю службу: обход будет включаться сам при старте Windows...' Cyan
         if (Install-BypassService) { Write-Color 'Служба установлена и запущена.' Green }
-        else { Write-Color 'Служба не запустилась. Попробуйте Инструменты -> 5 (диагностика).' Red }
+        else { Write-Color 'Автозапуск с Windows не включён.' Yellow }
     }
     Pause-Menu
 }
