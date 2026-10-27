@@ -305,7 +305,7 @@ function Show-Autolist {
 }
 
 function Update-Lists {
-    Write-Color ('Скачиваю свежие списки Flowseal (' + $Script:FlowsealRaw + '):') Cyan
+    Write-Color ('Скачиваю свежие списки Flowseal (' + $Script:FlowsealRaw + ') и адреса серверов Valve:') Cyan
     $res = @(Update-FlowsealLists)
     foreach ($u in $res) { Write-Color ('  ' + $u.Text) $(if (-not $u.Ok) { 'Red' } elseif ($u.Changed) { 'Green' } else { 'Gray' }) }
     if (@($res | Where-Object { $_.Changed }).Count) {
