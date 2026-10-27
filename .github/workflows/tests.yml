@@ -1,0 +1,15 @@
+# Проверки без сети и без прав на перехват: синтаксис и кодировка скриптов, --dry-run всех стратегий и сочетаний
+# настроек, логика автоподбора, защита от подмены, пункты меню. Трафик не перехватывается.
+name: tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  offline:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dev/tests/run-all.ps1 -Offline
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File dev\tests\run-all.ps1 -Offline

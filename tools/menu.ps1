@@ -83,10 +83,12 @@ function Show-Header {
     $foreign = @(Get-ForeignBypass)
     if ($foreign.Count) { Write-BoxRow ('  ! Запущен другой обход: ' + ($foreign -join ', ') + '. Пункт 1 предложит его остановить.') Yellow }
     foreach ($b in @(Get-GameBoosters)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
+    $stuck = @(Get-ProxyStuckApps)
+    if ($stuck.Count) { Write-BoxRow ('  ! ' + ($stuck -join ' и ') + ' ходит через выключенный прокси и сидит без сети (в Доте нет цен, не работает "Играть"). Перезапуск - пункт 5.') Yellow }
     $hs = Get-HostsStatus
     if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 5.' Yellow }
     $upd = Get-ZapretUpdate
-    if ($upd) { Write-BoxRow ('  ! Вышла новая версия zapret ' + $upd + ' - скачать: github.com/' + $Script:SelfRepo + '/releases') Yellow }
+    if ($upd) { Write-BoxRow ('  ! Вышла новая версия zapret ' + $upd + ' - обновить: Настройки -> 9.') Yellow }
     $news = @(Get-UpstreamNews)
     if ($news.Count) { Write-BoxRow ('  ! Вышли новые версии основы: ' + ($news -join ', ') + ' - сборку стоит обновить.') Yellow }
     Write-BoxSep
@@ -125,12 +127,15 @@ function Show-SettingsMenu {
         Write-BoxRow ('  6. Автозапуск с Windows: ' + $(if (-not $svc) { 'нет' } elseif ($svc.Status -eq 'Running') { 'служба работает' } else { 'служба (' + $svc.Status + ')' }))
         Write-BoxRow ('  7. Автонастройка по расписанию: ' + $tune)
         Write-BoxRow '  8. Обновить списки'
+        $upd = Get-ZapretUpdate
+        Write-BoxRow ('  9. Обновить zapret: у вас ' + $Script:Version + $(if ($upd) { ', вышла ' + $upd } else { '' }))
+        Write-BoxRow ('  10. Уведомления Windows: ' + $(if (Get-NotifyTask) { 'вкл' } else { 'выкл' }))
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
-        $map = @{ '1' = 'strategy'; '2' = 'auto'; '3' = 'game'; '4' = 'ipset'; '5' = 'autolist'; '6' = 'service'; '7' = 'autotune'; '8' = 'lists' }
+        $map = @{ '1' = 'strategy'; '2' = 'auto'; '3' = 'game'; '4' = 'ipset'; '5' = 'autolist'; '6' = 'service'; '7' = 'autotune'; '8' = 'lists'; '9' = 'update'; '10' = 'notify' }
         if ($map.ContainsKey($c)) { Invoke-MenuAction $map[$c] } elseif ($Script:LetterKeys.ContainsKey($c)) { Invoke-MenuAction $Script:LetterKeys[$c] }
     }
 }
@@ -144,12 +149,14 @@ function Show-ToolsMenu {
         Write-BoxRow '  3. Проверка провайдера (отчёт, чтобы переслать)'
         Write-BoxRow '  4. Отчёт: настройки и логи одним файлом'
         Write-BoxRow '  5. Диагностика: winws2 в видимом окне'
+        Write-BoxRow '  6. Исключить игру из обхода (по последнему трекеру)'
+        Write-BoxRow '  7. Правила "напрямую" для Happ (Steam, Discord, игры)'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
-        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag' }
+        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag'; '6' = 'exclude'; '7' = 'direct' }
         if ($map.ContainsKey($c)) { Invoke-MenuAction $map[$c] } elseif ($Script:LetterKeys.ContainsKey($c)) { Invoke-MenuAction $Script:LetterKeys[$c] }
     }
 }
@@ -326,6 +333,57 @@ function Update-Lists {
     Pause-Menu
 }
 
+function Update-ZapretMenu {
+    Write-Host ''
+    if (Test-Path (Join-Path $Script:Root '.git')) { Write-Color 'Это папка с исходниками (есть .git): обновляйте её через git pull.' Yellow; Pause-Menu; return }
+    Write-Color 'Узнаю последнюю версию на GitHub...' Cyan
+    $rel = Get-ZapretRelease
+    if (-not $rel) { Write-Color ('  GitHub не ответил. Скачать можно вручную: https://github.com/' + $Script:SelfRepo + '/releases') Yellow; Pause-Menu; return }
+    if (-not (Test-NewerVersion $rel.Tag $Script:Version)) { Write-Color ('  У вас последняя версия: zapret ' + $Script:Version + '.') Green; Pause-Menu; return }
+    Write-Color ('  Вышла zapret {0}, у вас {1}. Что нового: https://github.com/{2}/releases' -f $rel.Tag, $Script:Version, $Script:SelfRepo) White
+    Write-Color '  Обход остановится на полминуты. Настройки, рейтинг, ваши списки и списки Flowseal останутся.' Gray
+    if (-not (Read-YesNo 'Обновить?')) { return }
+    if (Install-ZapretUpdate $rel) {
+        Start-Process -FilePath (Join-Path $Script:Root 'zapret.bat') -WorkingDirectory $Script:Root
+        exit 0
+    }
+    Pause-Menu
+}
+
+function Export-DirectRules {
+    $text = @(Get-DirectRulesText)
+    $file = Join-Path ([Environment]::GetFolderPath('Desktop')) 'zapret-direct-rules.txt'
+    Write-TextNoBom $file (($text -join "`r`n") + "`r`n")
+    $copied = $false
+    try { Set-Clipboard -Value (@($text | Where-Object { $_ -like 'domain:*' }) -join "`r`n"); $copied = $true } catch { }
+    Write-Host ''
+    Write-Color 'Правила "напрямую" для Happ и других прокси: Steam, Discord и игры мимо прокси, их обрабатывает обход.' Cyan
+    foreach ($g in $Script:DirectDomains.Keys) { Write-Color ('  ' + $g + ': ' + ($Script:DirectDomains[$g] -join ', ')) Gray }
+    Write-Color ('Полный список (домены и сети серверов игр) - на рабочем столе: ' + (Split-Path -Leaf $file)) Green
+    if ($copied) { Write-Color 'Домены с приставкой domain: уже скопированы - вставьте их в прямые (direct) домены маршрутизации Happ.' Green }
+    Write-Color 'После правил перезапустите Steam и Discord: они запоминают прокси при запуске.' Gray
+    Pause-Menu
+}
+
+function Toggle-Notify {
+    Write-Host ''
+    if (Get-NotifyTask) {
+        if (Read-YesNo 'Уведомления включены. Выключить?') { Remove-NotifyTask; Write-Color 'Уведомления выключены.' Green }
+        Pause-Menu; return
+    }
+    Write-Color 'Уведомления Windows (раз в 5 минут, без окон, от имени вашей учётной записи):' Cyan
+    Write-Color '  - служба обхода остановилась и не поднялась сама;' Gray
+    Write-Color '  - Steam или Discord запущены при включённом прокси и после его выключения остались без сети;' Gray
+    Write-Color '  - вышла новая версия zapret; автонастройка обновила круги или списки.' Gray
+    if (Read-YesNo 'Включить?') {
+        if (Install-NotifyTask) {
+            Write-Color 'Уведомления включены. Проверочное уведомление - сейчас.' Green
+            if (-not (Show-Toast 'zapret' 'Уведомления включены.')) { Write-Color 'Показать уведомление не вышло: проверьте, что уведомления Windows не выключены.' Yellow }
+        } else { Write-Color 'Не удалось создать задачу в планировщике.' Red }
+    }
+    Pause-Menu
+}
+
 function Toggle-Autotune {
     Write-Host ''
     $task = Get-AutotuneTask
@@ -370,6 +428,32 @@ function Toggle-Service {
     Pause-Menu
 }
 
+# Исключить игру из обхода по последнему трекеру: для игр, которые с обходом работают хуже, чем без него
+# (серверы игры стоят у хостингов из ipset-all - так было с Dota 2 и Easy Anti-Cheat у NBA 2K).
+function Exclude-TrackedGame {
+    $t = Get-TrackBypassedNets
+    $file = Join-Path $Script:Lists 'ipset-exclude-user.txt'
+    Write-Host ''
+    if (-not $t.App) {
+        Write-Color 'Трекера ещё не было. Запустите игру, затем Инструменты -> 1 (имя процесса игры), поиграйте пару минут и вернитесь сюда.' Yellow
+        Pause-Menu; return
+    }
+    if (-not $t.Nets.Count) { Write-Color ('В последнем трекере ({0}, {1}) обход не трогал ни одного адреса - исключать нечего.' -f $t.App, $t.Started) Green; Pause-Menu; return }
+    Write-Color ('По последнему трекеру ({0}, {1}) обход трогает сети:' -f $t.App, $t.Started) Cyan
+    foreach ($n in $t.Nets) { Write-Host ('  ' + $n) }
+    Write-Color 'Исключайте, только если игра с обходом работает хуже, чем без него: не находит матч, вылетает, ругается античит.' Gray
+    if ($t.App -like 'NBA2K*') { Write-Color 'Для NBA 2K27 не стоит: её серверы на AWS без обхода замерзают на 16-20 КБ, и игра выкидывает из матча.' Yellow }
+    $add = @($t.Nets | Where-Object { @(Get-ListLines $file) -notcontains $_ })
+    if (-not $add.Count) { Write-Color 'Все эти сети уже исключены.' Green; Pause-Menu; return }
+    if (-not (Read-YesNo 'Добавить их в lists\ipset-exclude-user.txt?')) { return }
+    $text = if (Test-Path $file) { [System.IO.File]::ReadAllText($file) } else { '' }
+    if ($text -and -not $text.EndsWith("`n")) { $text += "`r`n" }
+    $text += ('# ' + $t.App + ': исключено по трекеру ' + (Get-Date -Format 'yyyy-MM-dd HH:mm') + "`r`n") + (($add -join "`r`n") + "`r`n")
+    Write-TextNoBom $file $text
+    Write-Color ('Исключено сетей: {0}. winws2 сам перечитает список. Вернуть - удалите эти строки из lists\ipset-exclude-user.txt.' -f $add.Count) Green
+    Pause-Menu
+}
+
 function Start-Diagnostics {
     Stop-Bypass
     Write-Color 'Подробный лог пишет каждый пакет и сам по себе поднимает пинг. Включайте его только для поиска ошибки.' Yellow
@@ -399,6 +483,14 @@ function Show-PcCheck {
         Add-Fix ('Остановить другой обход (' + ($foreign -join ', ') + ')') { Resolve-ForeignBypass }
     }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
+    $stuck = @(Get-ProxyStuckApps)
+    if ($stuck.Count) {
+        Write-Color ('  ! ' + ($stuck -join ' и ') + ' запущен, когда был включён прокси, и шлёт запросы в выключенный прокси: без сети, хотя выглядит "в сети".') Yellow
+        Add-Fix ('Перезапустить ' + ($stuck -join ' и ') + ': иначе у него не будет сети (в Доте - нет цен и не работает "Играть")') { Restart-ProxyApps $stuck }
+    } else {
+        $via = @(Get-ProxyAppsNow)
+        if ($via.Count) { Write-Color ('  ' + ($via -join ' и ') + ' сейчас ходит через прокси. Выключите прокси - перезапустите ' + $(if ($via.Count -gt 1) { 'их' } else { 'его' }) + ', иначе останется без сети.') Gray }
+    }
 
     Write-Color '2/4 IPv6 (~6 с)' Cyan
     $v6 = Get-Ipv6Report
@@ -468,12 +560,14 @@ function Invoke-MenuAction([string]$Name) {
         'stop' {
             # перед удалением или заменой папки - обычные права, чтобы Проводник не спрашивал разрешения на каждый файл
             Unprotect-Package
+            Write-TextNoBom (Get-PkgPath $Script:ManualStopFile) (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
             if (Stop-Bypass -Unload) { Write-Color 'Обход остановлен, драйвер WinDivert выгружен. Папку можно удалять или обновлять.' Green }
             else {
                 Write-Color ('Обход остановлен. Драйвер WinDivert оставлен: им пользуется другой обход (' + (@(Get-ForeignBypass) -join ', ') + ').') Yellow
                 Write-Color 'Чтобы удалить папку, сначала остановите тот обход и снова выберите пункт 2.' Yellow
             }
             if (Get-AutotuneTask) { Write-Color 'Автонастройка по расписанию включит обход после очередного теста, только если он работал. Перед удалением папки выключите её (Настройки -> 7).' Gray }
+            if (Get-NotifyTask) { Write-Color 'Перед удалением папки выключите и уведомления (Настройки -> 10).' Gray }
             # перед удалением - вернуть то, что сборка меняла в Windows по проверке обходов
             $hostsSet = @((Get-HostsStatus).Values | Where-Object { $_.Present }).Count -gt 0
             if ($hostsSet -or (Get-PreferIpv4)) {
@@ -503,6 +597,7 @@ function Invoke-MenuAction([string]$Name) {
         'service' { Toggle-Service }
         'autotune' { Toggle-Autotune }
         'lists' { Update-Lists }
+        'update' { Update-ZapretMenu }
         'tracker' {
             Write-Host ''
             Write-Host '  За какой программой следить?'
@@ -518,6 +613,9 @@ function Invoke-MenuAction([string]$Name) {
         'provider' { & (Join-Path $PSScriptRoot 'provider-check.ps1') }
         'report' { & (Join-Path $PSScriptRoot 'report.ps1'); Pause-Menu }
         'diag' { Start-Diagnostics }
+        'exclude' { Exclude-TrackedGame }
+        'direct' { Export-DirectRules }
+        'notify' { Toggle-Notify }
     }
 }
 
@@ -526,6 +624,15 @@ $Script:LetterKeys = @{
     'C' = 'check'; 'С' = 'check'; 'H' = 'check'; 'Р' = 'check'; 'T' = 'tracker'; 'Е' = 'tracker'; 'S' = 'service'; 'Ы' = 'service'
     'U' = 'autotune'; 'Г' = 'autotune'; 'A' = 'autolist'; 'Ф' = 'autolist'; 'P' = 'provider'; 'З' = 'provider'
     'R' = 'report'; 'К' = 'report'; 'D' = 'diag'; 'В' = 'diag'
+}
+
+# после обновления (Настройки -> 9) - включить обход, если он работал до него
+$updFlag = Join-Path $Script:Runtime 'update-restart.txt'
+if (Test-Path $updFlag) {
+    $wasOn = ([System.IO.File]::ReadAllText($updFlag).Trim() -eq 'start')
+    Remove-Item $updFlag -Force
+    Write-Color ('zapret обновлён до ' + $Script:Version + '.') Green
+    if ($wasOn) { Start-WithChecks; Pause-Menu }
 }
 
 while ($true) {

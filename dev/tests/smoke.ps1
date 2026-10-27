@@ -55,6 +55,40 @@ $okFail = ($sf1 -eq $false) -and $t1.Contains('Access is denied') -and $t1.Conta
 $okSvc = ($sf2 -eq $false) -and $t2.Contains('сбой только у службы') -and $script:fallbackStarted
 if ($okFail -and $okSvc) { Write-Host 'ok   причина сбоя запуска' -ForegroundColor Green }
 else { Write-Host ('FAIL причина сбоя запуска: sf1={0} sf2={1} fallback={2} | {3} || {4}' -f $sf1, $sf2, $script:fallbackStarted, $t1, $t2) -ForegroundColor Red; $fails++ }
+# новое в 1.2: Steam на выключенном прокси (по журналу Steam), исключение игры по трекеру, план обновления, правила для прокси
+$tmpDir = Join-Path $env:TEMP ('zapret-smoke-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tmpDir | Out-Null
+$now = Get-Date
+$steamLog = Join-Path $tmpDir 'connection_log.txt'
+[System.IO.File]::WriteAllLines($steamLog, @(
+    ('[{0:yyyy-MM-dd HH:mm:ss}] [Logged Off, 4, 0] ConnectionDisconnected(''Disconnected By Remote Host'') : ''OK'' (127.0.0.1:10809, WebSocket)' -f $now),
+    ('[{0:yyyy-MM-dd HH:mm:ss}] [Connecting, 4, 2] Connect() starting connection (162.254.197.1:27017, UDP)' -f $now)))
+$proxyOk = (Test-SteamProxyLog @(10809) $steamLog $now.AddMinutes(-1)) -and -not (Test-SteamProxyLog @(10808) $steamLog $now.AddMinutes(-1)) -and -not (Test-SteamProxyLog @(10809) $steamLog $now.AddMinutes(5))
+$trackLog = Join-Path $tmpDir 'track.txt'
+[System.IO.File]::WriteAllLines($trackLog, @(
+    'zapret v1.2 - трекер (dota2), начало 2026-10-27 20:32:31',
+    'Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход):',
+    '  UDP 185.25.182.10:27015                          dota2        100/90     retx 0   пинг 40      Вена AT | обход: да',
+    '  UDP [2a01:bc80:4::13]:27019                       dota2        10/10      retx 0   пинг 40      Вена AT | обход: да (user)',
+    '  TCP 155.133.229.5:27018                          steam        10/10      retx 0   пинг 40      Вена AT | обход: нет (Valve)',
+    '  UDP 104.29.153.97:19336                          Discord      23/0       retx 0   пинг молчит  NL | обход: да (голос)'))
+$tb = Get-TrackBypassedNets $trackLog
+$trackOk = $tb.App -eq 'dota2' -and (@($tb.Nets) -join ',') -eq '185.25.182.0/24,2a01:bc80:4::/64'
+$src = Join-Path $tmpDir 'new\zapret'; $dst = Join-Path $tmpDir 'old'
+foreach ($p in @('tools\lib.ps1', 'lists\ipset-user.txt', 'lists\ipset-all.txt', 'lists\ipset-valve.txt', 'lists\new-list.txt', 'runtime\.keep', 'bin\same.bin')) {
+    foreach ($base in @($src, $dst)) { New-Item -ItemType Directory (Split-Path -Parent (Join-Path $base $p)) -Force | Out-Null }
+    [System.IO.File]::WriteAllText((Join-Path $src $p), 'new ' + $p)
+    if ($p -ne 'lists\new-list.txt') { [System.IO.File]::WriteAllText((Join-Path $dst $p), $(if ($p -eq 'bin\same.bin') { 'new ' + $p } else { 'old ' + $p })) }
+}
+$plan = @(Get-UpdatePlan $src $dst | Sort-Object)
+$planOk = ($plan -join ',') -eq 'lists\ipset-valve.txt,lists\new-list.txt,tools\lib.ps1'
+$rules = @(Get-DirectRulesText)
+$rulesOk = ($rules -contains 'domain:steampowered.com') -and ($rules -contains '155.133.224.0/21') -and -not ($rules -match 'steamcommunity')
+$stuckOk = $true
+try { Get-ProxyStuckApps | Out-Null; Get-ProxyAppsNow | Out-Null } catch { $stuckOk = $false }
+Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
+if ($proxyOk -and $trackOk -and $planOk -and $rulesOk -and $stuckOk) { Write-Host 'ok   прокси, исключение игры, план обновления, правила' -ForegroundColor Green }
+else { Write-Host ('FAIL 1.2: proxy={0} track={1} ({2}) plan={3} ({4}) rules={5} stuck={6}' -f $proxyOk, $trackOk, (@($tb.Nets) -join ','), $planOk, ($plan -join ','), $rulesOk, $stuckOk) -ForegroundColor Red; $fails++ }
 # новые версии: сравнение по числам и своя версия по сохранённой проверке - без сети
 $uf = Get-PkgPath $Script:UpdatesFile
 $savedUpd = if (Test-Path $uf) { [System.IO.File]::ReadAllText($uf) } else { $null }

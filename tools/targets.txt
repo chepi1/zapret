@@ -35,3 +35,6 @@ Clean.mozilla     = https://www.mozilla.org/
 Clean.aws         = https://d1.awsstatic.com/
 Clean.booking     = https://www.booking.com/
 Clean.office      = https://www.office.com/
+# Steam: если стратегия ломает его, в Доте и других играх Steam пропадают цены, матчи и вход
+Clean.steam       = https://store.steampowered.com/
+Clean.steamapi    = https://api.steampowered.com/ISteamWebAPIUtil/GetServerInfo/v1/
