@@ -32,7 +32,7 @@ foreach ($x in @(Get-RingsText $s)) { $r.Add('  свой круг - ' + $x) }
 $r.Add('Game Filter: ' + (Get-GameText $s))
 $r.Add('IPSet: ' + $s.ipset)
 $r.Add('Автонастройка: ' + (Get-AutotuneText))
-foreach ($x in @(Get-UpstreamNews)) { $r.Add('Вышла новая версия: ' + $x) }
+foreach ($x in @(Get-AllNews)) { $r.Add('Вышла новая версия: ' + $x) }
 foreach ($k in ($s.Keys | Sort-Object)) { $r.Add("$k=$($s[$k])") }
 
 Add-Section 'Состояние'

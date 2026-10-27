@@ -25,7 +25,7 @@ Update-LegacyNames
 
 function Pause-Menu { Read-Host 'Enter - назад в меню' | Out-Null }
 
-# новые версии zapret2/Flowseal - раз в 3 дня при открытии меню (ответ GitHub запоминается в runtime\updates.txt)
+# новые версии zapret, zapret2 и Flowseal - раз в 3 дня при открытии меню (ответ GitHub запоминается в runtime\updates.txt)
 try { Update-UpstreamCheck -Days 3 | Out-Null } catch { }
 
 function Test-Running { return ((@(Get-OurProcesses).Count -gt 0) -or [bool](Get-OurService)) }
@@ -65,7 +65,7 @@ function Write-BoxRow([string]$Text, [string]$Color = 'Gray', [int[]]$Rgb = @())
     }
 }
 
-# Шапка: одна строка состояния и только то, что требует действия. Прокси и VPN - в проверке обходов (пункт 4): клиент
+# Шапка: одна строка состояния и только то, что требует действия. Прокси и VPN - в проверке обходов (пункт 5): клиент
 # прокси для браузера многие держат включённым постоянно, и строки о нём только мешали.
 function Show-Header {
     Clear-Host
@@ -84,7 +84,9 @@ function Show-Header {
     if ($foreign.Count) { Write-BoxRow ('  ! Запущен другой обход: ' + ($foreign -join ', ') + '. Пункт 1 предложит его остановить.') Yellow }
     foreach ($b in @(Get-GameBoosters)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
     $hs = Get-HostsStatus
-    if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 4.' Yellow }
+    if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 5.' Yellow }
+    $upd = Get-ZapretUpdate
+    if ($upd) { Write-BoxRow ('  ! Вышла новая версия zapret ' + $upd + ' - скачать: github.com/' + $Script:SelfRepo + '/releases') Yellow }
     $news = @(Get-UpstreamNews)
     if ($news.Count) { Write-BoxRow ('  ! Вышли новые версии основы: ' + ($news -join ', ') + ' - сборку стоит обновить.') Yellow }
     Write-BoxSep
@@ -96,10 +98,11 @@ function Show-Main {
     Write-BoxRow '  1. Запустить / перезапустить обход'
     Write-BoxRow '  2. Остановить обход'
     Write-BoxRow '  3. Автоподбор стратегии'
-    Write-BoxRow '  4. Проверка обходов'
+    Write-BoxRow '  4. Выбрать стратегию вручную'
+    Write-BoxRow '  5. Проверка обходов'
     Write-BoxSep
-    Write-BoxRow '  5. Настройки'
-    Write-BoxRow '  6. Инструменты: трекер, сканер, отчёты'
+    Write-BoxRow '  6. Настройки'
+    Write-BoxRow '  7. Инструменты: трекер, сканер, отчёты'
     Write-BoxRow '  0. Выход'
     Write-BoxBottom
 }
@@ -308,11 +311,15 @@ function Update-Lists {
     if (@($res | Where-Object { $_.Changed }).Count) {
         Write-Color 'Старые версии сохранены рядом (.bak). winws2 сам перечитает списки, перезапуск не нужен.' Gray
     }
-    Write-Color 'Проверяю новые версии zapret2 и Flowseal...' Cyan
+    Write-Color 'Проверяю новые версии zapret, zapret2 и Flowseal...' Cyan
     if (Update-UpstreamCheck -Force) {
+        $upd = Get-ZapretUpdate
         $news = @(Get-UpstreamNews)
-        if ($news.Count) { foreach ($x in $news) { Write-Color ('  Вышла новая версия: ' + $x) Yellow } }
-        else { Write-Color ('  Новых нет: zapret2 {0}, Flowseal {1}.' -f $Script:Upstream['zapret2'].Base, $Script:Upstream['Flowseal'].Base) Green }
+        if ($upd) { Write-Color ('  Вышла новая версия zapret ' + $upd + ' - скачать: https://github.com/' + $Script:SelfRepo + '/releases') Yellow }
+        foreach ($x in $news) { Write-Color ('  Вышла новая версия основы: ' + $x) Yellow }
+        if (-not $upd -and -not $news.Count) {
+            Write-Color ('  Новых нет: zapret {0}, zapret2 {1}, Flowseal {2}.' -f $Script:Version, $Script:Upstream['zapret2'].Base, $Script:Upstream['Flowseal'].Base) Green
+        }
     } else {
         Write-Color '  GitHub не ответил, проверю в другой раз.' Yellow
     }
@@ -530,9 +537,10 @@ while ($true) {
         '1' { Invoke-MenuAction 'start' }
         '2' { Invoke-MenuAction 'stop' }
         '3' { Invoke-MenuAction 'test' }
-        '4' { Invoke-MenuAction 'check' }
-        '5' { Show-SettingsMenu }
-        '6' { Show-ToolsMenu }
+        '4' { Invoke-MenuAction 'strategy' }
+        '5' { Invoke-MenuAction 'check' }
+        '6' { Show-SettingsMenu }
+        '7' { Show-ToolsMenu }
         default {
             if (@('N', 'Т') -contains $c) { Show-SettingsMenu }
             elseif (@('I', 'Ш') -contains $c) { Show-ToolsMenu }

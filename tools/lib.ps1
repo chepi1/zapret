@@ -10,7 +10,7 @@ $Script:Runtime     = Join-Path $Script:Root 'runtime'
 $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
-$Script:Version     = '1.0'
+$Script:Version     = '1.1'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -1133,10 +1133,10 @@ $Script:HostsGroups = [ordered]@{
     Telegram = @{ Match = '(^|\.)(telegram\.org|telegram\.me|telegram\.dog|telegram\.space|t\.me|telesco\.pe|tg\.dev)$'; Probe = 'telegram.org'; Path = '/' }
     Discord  = @{ Match = '(^|\.)discord\.com$'; Probe = 'discord.com'; Path = '/api/v9/gateway' }
 }
-$Script:HostsBegin = '# zapret: hosts Flowseal - начало (меню, пункт 4)'
+$Script:HostsBegin = '# zapret: hosts Flowseal - начало (меню: Проверка обходов)'
 $Script:HostsEnd = '# zapret: hosts Flowseal - конец'
-# метки, которыми блок помечали версии до переименования: такой блок тоже узнаётся и заменяется
-$Script:HostsLegacyBegin = @('# NBA2K27-zapret2: hosts Flowseal - начало (пункт H меню)')
+# метки, которыми блок помечали прежние версии: такой блок тоже узнаётся и заменяется
+$Script:HostsLegacyBegin = @('# NBA2K27-zapret2: hosts Flowseal - начало (пункт H меню)', '# zapret: hosts Flowseal - начало (меню, пункт 4)')
 $Script:HostsLegacyEnd = @('# NBA2K27-zapret2: hosts Flowseal - конец')
 
 # Записи hosts: адрес и имя (строка "IP имя1 имя2" даёт несколько записей)
@@ -1390,6 +1390,8 @@ $Script:Upstream = [ordered]@{
     'Flowseal' = @{ Repo = 'Flowseal/zapret-discord-youtube'; Base = '1.10.4' }
 }
 $Script:UpdatesFile = 'runtime/updates.txt'
+# Сама сборка: о её новой версии меню сообщает в шапке
+$Script:SelfRepo = 'chepi1/zapret'
 
 # Последний релиз на GitHub без API (у API лимит запросов): /releases/latest перенаправляет на страницу тега
 function Get-LatestRelease([string]$Repo) {
@@ -1416,8 +1418,22 @@ function Update-UpstreamCheck([int]$Days = 7, [switch]$Force) {
         }
         $lines += ('{0}={1}' -f $k, $tag)
     }
+    # своя версия - не обязательна: если её не узнали, основа всё равно запоминается
+    $self = Get-LatestRelease $Script:SelfRepo
+    if ($self) { $lines += ('zapret={0}' -f $self) }
     Write-TextNoBom $f (($lines -join "`r`n") + "`r`n")
     return $true
+}
+
+# Новее ли тег релиза, чем версия в сборке. По числам: 1.10.4 новее 1.9, v1.0 и 1.0 - одно и то же.
+function Test-NewerVersion([string]$Tag, [string]$Base) {
+    $t = $Tag -replace '^[vV]', ''
+    $b = $Base -replace '^[vV]', ''
+    if ($t -notmatch '\.') { $t += '.0' }
+    if ($b -notmatch '\.') { $b += '.0' }
+    $vt = $null; $vb = $null
+    if ([version]::TryParse($t, [ref]$vt) -and [version]::TryParse($b, [ref]$vb)) { return ($vt -gt $vb) }
+    return ($Tag -ne $Base)
 }
 
 # Что вышло новее основы сборки - по сохранённой проверке, без запросов в сеть (для шапки меню и отчётов)
@@ -1426,11 +1442,31 @@ function Get-UpstreamNews {
     if (-not (Test-Path $f)) { return @() }
     $out = @()
     foreach ($line in [System.IO.File]::ReadAllLines($f)) {
-        if ($line -match '^(\w+)=(\S+)$' -and $Script:Upstream.Contains($matches[1]) -and $matches[2] -ne $Script:Upstream[$matches[1]].Base) {
-            $out += ('{0} {1} (в сборке {2})' -f $matches[1], $matches[2], $Script:Upstream[$matches[1]].Base)
-        }
+        if ($line -notmatch '^(\w+)=(\S+)$' -or -not $Script:Upstream.Contains($matches[1])) { continue }
+        $k = $matches[1]; $tag = $matches[2]
+        if (Test-NewerVersion $tag $Script:Upstream[$k].Base) { $out += ('{0} {1} (в сборке {2})' -f $k, $tag, $Script:Upstream[$k].Base) }
     }
     return $out
+}
+
+# Новая версия самой сборки по сохранённой проверке: тег вида v1.2 или $null
+function Get-ZapretUpdate {
+    $f = Get-PkgPath $Script:UpdatesFile
+    if (-not (Test-Path $f)) { return $null }
+    foreach ($line in [System.IO.File]::ReadAllLines($f)) {
+        if ($line -notmatch '^zapret=(\S+)$') { continue }
+        $tag = $matches[1]
+        if (Test-NewerVersion $tag $Script:Version) { return $tag }
+    }
+    return $null
+}
+
+# Все новые версии одним списком (журнал автонастройки, отчёт): сама сборка и её основа
+function Get-AllNews {
+    $out = @()
+    $u = Get-ZapretUpdate
+    if ($u) { $out += ('zapret {0} (у вас {1})' -f $u, $Script:Version) }
+    return @($out + @(Get-UpstreamNews))
 }
 
 # Задача планировщика запускает tools\autotune.ps1 каждый день в 4:00 (или позже, если ПК был выключен), только когда

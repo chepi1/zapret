@@ -19,9 +19,9 @@ if ($Force -or -not (Test-Path $ipsetFile) -or ((Get-Date) - (Get-Item $ipsetFil
     Add-AutotuneLog ('списки Flowseal: ' + ((@(Update-FlowsealLists) | ForEach-Object { $_.Text }) -join '; '))
 }
 
-$newsBefore = @(Get-UpstreamNews) -join '; '
+$newsBefore = @(Get-AllNews) -join '; '
 if (Update-UpstreamCheck -Force:$Force) {
-    $news = @(Get-UpstreamNews) -join '; '
+    $news = @(Get-AllNews) -join '; '
     if ($news -and $news -ne $newsBefore) { Add-AutotuneLog ('вышли новые версии: ' + $news) }
 }
 
