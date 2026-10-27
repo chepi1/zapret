@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.1'
+$Script:Version     = '1.2'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -388,6 +388,8 @@ function Get-PkgPath([string]$Rel) {
 #  - из UDP 443 в драйвер попадают только пакеты QUIC Initial, а не весь QUIC-трафик YouTube;
 #  - сети Take-Two (собственные серверы 2K) исключены везде: они не заблокированы, а фейки и разрезка
 #    в их протоколе ломают проверку Easy Anti-Cheat (fee12ea9). У Flowseal их нет в ipset-all;
+#  - серверы Valve (Steam, ретрансляторы Dota 2 и CS2) исключены везде по той же причине: часть ретрансляторов
+#    стоит у хостингов из ipset-all, и фейки ломали матчи в Доте;
 #  - фейки с устаревшим timestamp к серверу без TCP timestamps портятся иначе (lua\fooling.lua), а не уходят целыми.
 function New-BypassArgList {
     param(
@@ -444,11 +446,11 @@ function New-BypassArgList {
     $hostEx = @(
         ('--hostlist-exclude=' + (Get-PkgPath 'lists/list-exclude.txt')),
         ('--hostlist-exclude=' + (Get-PkgPath 'lists/list-exclude-user.txt')))
-    # серверы 2K исключены во всех профилях, даже в IPSet any
-    $ipTakeTwo = @('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-taketwo.txt'))
+    # серверы игр, которые не заблокированы (2K и Valve), исключены во всех профилях, даже в IPSet any
+    $ipGames = @(('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-taketwo.txt')), ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-valve.txt')))
     $ipEx = @(
         ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-exclude.txt')),
-        ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-exclude-user.txt'))) + $ipTakeTwo
+        ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-exclude-user.txt'))) + $ipGames
     $ips = @()
     if ($ipMode -eq 'loaded') { $ips += '--ipset=' + (Get-PkgPath 'lists/ipset-all.txt') }
     elseif ($ipMode -eq 'any') { $ips += '--ipset=' + (Get-PkgPath 'runtime/ipset-any.txt') }
@@ -495,11 +497,11 @@ function New-BypassArgList {
 
     Add-Profile 'quic_list' (@('--filter-udp=443', '--filter-l7=quic') + $hostlists + $hostEx + $ipEx)
     Add-Section 'quic'
-    Add-Profile 'discord_voice' (@("--filter-udp=$($Script:DiscordUdpPorts)", '--filter-l7=discord,stun') + $ipTakeTwo)
+    Add-Profile 'discord_voice' (@("--filter-udp=$($Script:DiscordUdpPorts)", '--filter-l7=discord,stun') + $ipGames)
     Add-Section 'discord_udp'
-    Add-Profile 'discord_media' (@("--filter-tcp=$($Script:DiscordTcpPorts)", '--hostlist-domains=discord.media') + $ipTakeTwo)
+    Add-Profile 'discord_media' (@("--filter-tcp=$($Script:DiscordTcpPorts)", '--hostlist-domains=discord.media') + $ipGames)
     Add-Section 'discord_media' -Circular -CircularArgs ':reset'
-    Add-Profile 'google' (@('--filter-tcp=443', ('--hostlist=' + (Get-PkgPath 'lists/list-google.txt'))) + $ipTakeTwo)
+    Add-Profile 'google' (@('--filter-tcp=443', ('--hostlist=' + (Get-PkgPath 'lists/list-google.txt'))) + $ipGames)
     Add-Section 'google' -Circular -CircularArgs ':reset'
     Add-Profile 'general' (@('--filter-tcp=80,443') + $hostlists + $hostEx + $ipEx + @('--import=tpl_general'))
     Add-Profile 'quic_ipset' (@('--filter-udp=443', '--filter-l7=quic') + $ips + $hostEx + $ipEx)
@@ -1473,7 +1475,69 @@ function Update-FlowsealList([string]$Name) {
 }
 
 function Update-FlowsealLists {
-    return @($Script:FlowsealLists.Keys | ForEach-Object { Update-FlowsealList $_ })
+    # вместе со списками Flowseal - адреса серверов Valve (Update-ValveList)
+    return @(@($Script:FlowsealLists.Keys | ForEach-Object { Update-FlowsealList $_ }) + @(Update-ValveList))
+}
+
+# Серверы Valve (Steam, ретрансляторы Dota 2 и CS2) не заблокированы, а фейки ломают игру: часть ретрансляторов стоит
+# у хостинга Datapacket, чьи сети есть в ipset-all Flowseal (в Доте не нажималась "Играть" и не пускало в матч).
+# lists\ipset-valve.txt исключён во всех профилях: сети Valve (AS32590, по данным RIPE на 2026-10-27) и адреса
+# ретрансляторов из официального конфига Steam Datagram Relay, который обновляется вместе со списками Flowseal.
+$Script:ValveNets = @('45.121.184.0/24', '103.10.124.0/23', '103.28.54.0/24', '146.66.152.0/24', '146.66.155.0/24', '155.133.224.0/21', '155.133.236.0/22', '155.133.240.0/23', '155.133.244.0/24', '155.133.246.0/24', '155.133.248.0/22', '155.133.252.0/24', '155.133.254.0/23', '162.254.192.0/21', '185.25.180.0/24', '185.25.182.0/23', '192.69.96.0/22', '205.196.6.0/24', '208.64.200.0/22', '208.78.164.0/22', '2404:3fc0::/46', '2404:3fc0:8::/47', '2404:3fc0:a::/48', '2602:801:f000::/46', '2602:801:f005::/48', '2602:801:f006::/47', '2602:801:f008::/46', '2602:801:f00d::/48', '2602:801:f00e::/48', '2a01:bc80::/45', '2a01:bc80:8::/46', '2a01:bc80:c::/48')
+$Script:ValveSdrApps = @('570', '730')
+$Script:ValveListHead = @(
+    '# Серверы Valve: Steam, ретрансляторы Dota 2 и CS2 (Steam Datagram Relay). Они НЕ заблокированы, поэтому исключены',
+    '# из обработки во всех профилях: часть ретрансляторов стоит у хостингов из ipset-all (Datapacket), и фейки ломали Доту.',
+    '# Обновляется вместе со списками (Настройки -> 8): сети Valve + адреса ретрансляторов из GetSDRConfig Steam.',
+    '# сети Valve (AS32590)')
+
+# Скачивает адреса ретрансляторов Valve (Dota 2, CS2) и пересобирает lists\ipset-valve.txt (старый - в .bak).
+# Меньше 50 адресов или чужой ответ - оставляем старый: пустой список исключений zapret2 понял бы как "все адреса".
+function Update-ValveList {
+    $name = 'ipset-valve.txt'
+    $dst = Join-Path $Script:Lists $name
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    function Result([bool]$Ok, [bool]$Changed, [string]$Text) {
+        return New-Object PSObject -Property @{ Name = $name; Ok = $Ok; Changed = $Changed; Text = ($name + ': ' + $Text) }
+    }
+    function Get-Prop($O, [string]$Prop) {
+        if ($null -ne $O -and $O.PSObject.Properties.Name -contains $Prop) { return $O.$Prop }
+        return $null
+    }
+    $relays = New-Object System.Collections.Generic.List[string]
+    foreach ($app in $Script:ValveSdrApps) {
+        $tmp = Join-Path $Script:Runtime ('sdr-' + $app + '.json')
+        if (Test-Path $tmp) { Remove-Item $tmp -Force }
+        $r = Invoke-Native $curl ('-s -f --ssl-no-revoke --max-time 30 -o "' + $tmp + '" "https://api.steampowered.com/ISteamApps/GetSDRConfig/v1/?appid=' + $app + '"') $Script:Runtime 40
+        if ($r.ExitCode -ne 0 -or -not (Test-Path $tmp)) { return (Result $false $false ('не скачалось (curl код ' + $r.ExitCode + ')')) }
+        $j = $null
+        try { $j = [System.IO.File]::ReadAllText($tmp) | ConvertFrom-Json } catch { }
+        Remove-Item $tmp -Force
+        $pops = Get-Prop $j 'pops'
+        if (-not $pops) { return (Result $false $false 'ответ Steam не похож на конфиг, оставлен старый') }
+        foreach ($p in $pops.PSObject.Properties) {
+            foreach ($x in @(Get-Prop $p.Value 'relays')) {
+                $ip = '' + (Get-Prop $x 'ipv4')
+                if ($ip -match '^\d{1,3}(\.\d{1,3}){3}$' -and -not $relays.Contains($ip)) { $relays.Add($ip) }
+            }
+        }
+    }
+    if ($relays.Count -lt 50) { return (Result $false $false ('ретрансляторов всего {0}: не похоже на конфиг, оставлен старый' -f $relays.Count)) }
+    $relayLines = @($relays | Sort-Object { [version]$_ } | ForEach-Object { $_ + '/32' })
+    $lines = @($Script:ValveNets) + $relayLines
+    $old = @(Get-ListLines $dst)
+    if ((Test-Path $dst) -and (($lines -join "`n") -ceq ($old -join "`n"))) {
+        # время файла - дата последней проверки, как у списков Flowseal
+        (Get-Item $dst).LastWriteTime = Get-Date
+        return (Result $true $false ('без изменений, сетей и адресов: {0}' -f $lines.Count))
+    }
+    $text = @($Script:ValveListHead) + @($Script:ValveNets) + @('# ретрансляторы Steam Datagram Relay (Dota 2, CS2), ' + (Get-Date -Format 'yyyy-MM-dd')) + $relayLines
+    if (Test-Path $dst) { Copy-Item $dst ($dst + '.bak') -Force }
+    Write-TextNoBom $dst (($text -join "`r`n") + "`r`n")
+    $added = @($lines | Where-Object { $old -notcontains $_ }).Count
+    $removed = @($old | Where-Object { $lines -notcontains $_ }).Count
+    return (Result $true $true ('сетей и адресов: было {0}, стало {1} (+{2} -{3})' -f $old.Count, $lines.Count, $added, $removed))
 }
 
 # Основа сборки: с какими версиями zapret2 и Flowseal она собрана. Выход новых проверяется раз в несколько дней.
@@ -1762,6 +1826,8 @@ function Load-IpSet([string]$File) {
 # Списки, по которым подписываются адреса игры. Порядок важен: первый совпавший и есть "владелец".
 function Get-OwnerSets {
     return [ordered]@{
+        # Valve первым: часть его ретрансляторов есть и в ipset-all, но обход их не трогает
+        'Valve'        = (Load-IpSet 'ipset-valve.txt')
         'ipset-all'    = (Load-IpSet 'ipset-all.txt')
         'Take-Two'     = (Load-IpSet 'ipset-taketwo.txt')
         'найден ранее' = (Load-IpSet 'ipset-user.txt')
