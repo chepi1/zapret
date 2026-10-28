@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.3.1'
+$Script:Version     = '1.4'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
