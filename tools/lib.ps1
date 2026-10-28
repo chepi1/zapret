@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.2'
+$Script:Version     = '1.3'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -86,7 +86,8 @@ function Read-YesNo([string]$Question) {
 # ---------- настройки ----------
 
 function Get-Settings {
-    $s = @{ alt = '12'; auto = 'on'; game = 'all'; ipset = 'loaded'; gametcp = '1024-65535'; gameudp = '1024-65535'; autolist = 'on' }
+    # telegram, notify: on / off / пусто (ещё не выбирали - см. Test-NotifyEnabled и первый запуск обхода)
+    $s = @{ alt = '12'; auto = 'on'; game = 'all'; ipset = 'loaded'; gametcp = '1024-65535'; gameudp = '1024-65535'; autolist = 'on'; telegram = ''; notify = '' }
     $f = Join-Path $Script:Runtime 'settings.ini'
     if (Test-Path $f) {
         foreach ($line in [System.IO.File]::ReadAllLines($f)) {
@@ -96,6 +97,8 @@ function Get-Settings {
     if (@('all', 'tcp', 'udp', 'off') -notcontains $s.game) { $s.game = 'all' }
     if (@('loaded', 'any', 'none') -notcontains $s.ipset) { $s.ipset = 'loaded' }
     if (@('on', 'off') -notcontains $s.autolist) { $s.autolist = 'on' }
+    if (@('on', 'off', '') -notcontains $s.telegram) { $s.telegram = '' }
+    if (@('on', 'off', '') -notcontains $s.notify) { $s.notify = '' }
     if (-not (Test-PortList $s.gametcp)) { $s.gametcp = '1024-65535' }
     if (-not (Test-PortList $s.gameudp)) { $s.gameudp = '1024-65535' }
     return $s
@@ -1023,127 +1026,186 @@ function Clear-DiscordCache {
     return $res
 }
 
-# ---------- Telegram: tg-ws-proxy (Flowseal) ----------
-# Локальный MTProto-прокси для Telegram Desktop от Flowseal (github.com/Flowseal/tg-ws-proxy, MIT): гонит трафик Telegram
-# через WebSocket или Cloudflare, и Telegram перестаёт тормозить. Ставится по кнопке в runtime\tg-ws-proxy в портативном
-# режиме (его настройки - рядом, в TgWsProxy_data): скачивается со страницы релизов Flowseal и сверяется по SHA-256,
-# которую GitHub считает для файла релиза. Запускается от имени пользователя, без прав администратора меню.
-$Script:TgRepo = 'Flowseal/tg-ws-proxy'
+# ---------- Telegram: встроенный мост (tools\tgbridge.cs) ----------
+# Обход сам Telegram не лечит: у нас режут адреса его дата-центров. Мост - перенос основной логики tg-ws-proxy от Flowseal
+# (MIT): Telegram Desktop подключается к нему как к MTProto-прокси 127.0.0.1:1443, а мост гонит трафик через WebSocket
+# веб-версии Telegram, которую не режут. Ничего не скачивается: C# из tools\tgbridge.cs компилирует сама Windows.
+# Мост работает задачей "zapret telegram" от имени пользователя, без окна: с входа в Windows, а если упал или его
+# закрыли - Windows запускает его снова (задача повторяется раз в 5 минут; второй экземпляр не запускается).
+$Script:TgTask = 'zapret telegram'
+$Script:TgConfigFile = 'runtime/telegram.txt'
+$Script:TgPidFile = 'runtime/tgbridge.pid'
+# папка tg-ws-proxy от Flowseal, который ставила zapret 1.2: из неё берём secret, потом удаляем
 $Script:TgDir = 'runtime/tg-ws-proxy'
 $Script:TgRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
-function Get-TgExe { return (Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy.exe') }
-
-function Get-TgProcesses {
-    $exe = Get-TgExe
-    return @(Get-Process -Name 'TgWsProxy*' -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -eq $exe } catch { $false } })
+# Порт и secret моста (runtime\telegram.txt). Первый раз - из настроек tg-ws-proxy, если он стоял: тогда Telegram,
+# уже настроенный на него, перенастраивать не нужно. Иначе - порт 1443 и новый случайный secret.
+# $File и $Import - для проверок (dev	ests): чужие пути вместо runtime и настроек tg-ws-proxy
+function Get-TgConfig([string]$File = '', [string[]]$Import = @()) {
+    $f = if ($File) { $File } else { Get-PkgPath $Script:TgConfigFile }
+    if (-not $Import.Count) { $Import = @((Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy_data\config.json'), (Join-Path $env:APPDATA 'TgWsProxy\config.json')) }
+    $port = 0; $secret = ''
+    if (Test-Path $f) {
+        foreach ($l in [System.IO.File]::ReadAllLines($f)) {
+            if ($l -match '^port=(\d+)$') { $port = [int]$matches[1] } elseif ($l -match '^secret=([0-9a-f]{32})$') { $secret = $matches[1] }
+        }
+    }
+    if ($port -and $secret) { return New-Object PSObject -Property @{ Port = $port; Secret = $secret } }
+    foreach ($cfg in $Import) {
+        if ($secret -or -not (Test-Path -LiteralPath $cfg)) { continue }
+        try {
+            $j = [System.IO.File]::ReadAllText($cfg) | ConvertFrom-Json
+            $names = @($j.PSObject.Properties.Name)
+            if ($names -contains 'secret' -and ('' + $j.secret) -match '^[0-9a-fA-F]{32}$') { $secret = ('' + $j.secret).ToLower() }
+            if ($secret -and $names -contains 'port' -and ('' + $j.port) -match '^\d+$') { $port = [int]$j.port }
+        } catch { }
+    }
+    if (-not $secret) {
+        $b = New-Object byte[] 16
+        [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+        $secret = -join @($b | ForEach-Object { '{0:x2}' -f $_ })
+    }
+    if (-not $port) { $port = 1443 }
+    Write-TextNoBom $f ("port=$port`r`nsecret=$secret`r`n")
+    return New-Object PSObject -Property @{ Port = $port; Secret = $secret }
 }
 
-# Installed, Version, Sha256 (записаны при установке в version.txt), Running, Autostart (как в настройках самого прокси)
-function Get-TgState {
-    $exe = Get-TgExe
-    $info = Join-Path (Get-PkgPath $Script:TgDir) 'version.txt'
-    $ver = ''; $sha = ''
-    if (Test-Path $info) {
-        $f = @([System.IO.File]::ReadAllText($info).Trim() -split '\s+')
-        $ver = $f[0]
-        if ($f.Count -gt 1) { $sha = $f[1] }
+# Ссылка, по которой Telegram Desktop сам добавляет прокси ("dd" - протокол со случайной длиной пакетов)
+function Get-TgLink {
+    $c = Get-TgConfig
+    return ('tg://proxy?server=127.0.0.1&port={0}&secret=dd{1}' -f $c.Port, $c.Secret)
+}
+
+# Процесс моста - по PID и времени запуска из runtime\tgbridge.pid (PID мог достаться другому процессу)
+function Get-TgBridgeProcess {
+    $f = Get-PkgPath $Script:TgPidFile
+    if (-not (Test-Path $f)) { return $null }
+    $x = @([System.IO.File]::ReadAllText($f).Trim() -split '\|')
+    if ($x.Count -ne 2 -or $x[0] -notmatch '^\d+$' -or $x[1] -notmatch '^\d+$') { return $null }
+    $p = Get-Process -Id ([int]$x[0]) -ErrorAction SilentlyContinue
+    if (-not $p) { return $null }
+    try { if ($p.StartTime.Ticks -ne [long]$x[1]) { return $null } } catch { return $null }
+    return $p
+}
+
+function Test-TgBridgeRunning {
+    if (-not (Get-TgBridgeProcess)) { return $false }
+    return (Test-PortListening (Get-TgConfig).Port)
+}
+
+# Чей процесс слушает порт на 127.0.0.1 (если порт моста занят чужой программой) - имя или ''
+function Get-PortOwnerName([int]$Port) {
+    foreach ($l in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP 2>$null)) {
+        if ($l -match ('^\s*TCP\s+(127\.0\.0\.1|0\.0\.0\.0):' + $Port + '\s+\S+\s+\S+\s+(\d+)\s*$')) {
+            $p = Get-Process -Id ([int]$matches[2]) -ErrorAction SilentlyContinue
+            if ($p) { return $p.ProcessName }
+        }
     }
-    $auto = $false
+    return ''
+}
+
+function Get-TgTask {
+    try { return Get-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { return $null }
+}
+
+function Install-TgTask {
+    $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    # conhost --headless: без окна PowerShell
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\conhost.exe') -WorkingDirectory $Script:Root `
+        -Argument ('--headless "' + $ps + '" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'tgbridge.ps1') + '"')
+    $user = $env:USERDOMAIN + '\' + $env:USERNAME
+    $logon = New-ScheduledTaskTrigger -AtLogOn -User $user
+    # раз в 5 минут: если мост закрыли или он упал - запустится снова; пока работает, второй не запускается (IgnoreNew)
+    $every = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
+    $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) `
+        -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
+    # от имени пользователя и без прав администратора: мосту они не нужны
+    $pr = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
     try {
-        $run = Get-ItemProperty -Path $Script:TgRunKey -ErrorAction Stop
-        if ($run.PSObject.Properties.Name -contains 'TgWsProxy') { $auto = (('' + $run.TgWsProxy).Trim() -eq ('"' + $exe + '"')) }
-    } catch { }
-    return New-Object PSObject -Property @{ Installed = (Test-Path $exe); Version = $ver; Sha256 = $sha; Running = (@(Get-TgProcesses).Count -gt 0); Autostart = $auto }
-}
-
-# Ссылка tg://proxy из настроек прокси (как "Открыть в Telegram" в его меню). '' - настроек ещё нет.
-function Get-TgLink([string]$ConfigPath = (Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy_data\config.json')) {
-    if (-not (Test-Path $ConfigPath)) { return '' }
-    $j = $null
-    try { $j = [System.IO.File]::ReadAllText($ConfigPath) | ConvertFrom-Json } catch { return '' }
-    $names = @($j.PSObject.Properties.Name)
-    $secret = if ($names -contains 'secret') { '' + $j.secret } else { '' }
-    if ($secret -notmatch '^[0-9a-fA-F]{32}$') { return '' }
-    $port = if ($names -contains 'port' -and ('' + $j.port) -match '^\d+$') { [int]$j.port } else { 1443 }
-    $h = if ($names -contains 'host' -and $j.host) { '' + $j.host } else { '127.0.0.1' }
-    if ($h -eq '0.0.0.0') { $h = '127.0.0.1' }
-    return ('tg://proxy?server={0}&port={1}&secret=dd{2}' -f $h, $port, $secret)
-}
-
-# Ставит или обновляет tg-ws-proxy с GitHub Flowseal. Возвращает $true, если стоит последняя версия.
-function Install-TgWsProxy {
-    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
-    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $dir = Get-PkgPath $Script:TgDir
-    New-Item -ItemType Directory $dir -Force | Out-Null
-    $tmp = Join-Path $dir 'release.json'
-    $r = Invoke-Native $curl ('-s -f --ssl-no-revoke --max-time 20 -H "Accept: application/vnd.github+json" -o "' + $tmp + '" "https://api.github.com/repos/' + $Script:TgRepo + '/releases/latest"') $dir 30
-    if ($r.ExitCode -ne 0 -or -not (Test-Path $tmp)) { Write-Color ('GitHub не ответил (curl код ' + $r.ExitCode + ').') Red; return $false }
-    $j = $null
-    try { $j = [System.IO.File]::ReadAllText($tmp) | ConvertFrom-Json } catch { }
-    Remove-Item $tmp -Force -ErrorAction SilentlyContinue
-    if (-not $j -or -not ($j.PSObject.Properties.Name -contains 'assets')) { Write-Color 'Ответ GitHub не похож на релиз.' Red; return $false }
-    $arm = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')
-    $want = if ($arm) { 'TgWsProxy_windows_arm64.exe' } else { 'TgWsProxy_windows.exe' }
-    $prefix = 'https://github.com/' + $Script:TgRepo + '/releases/download/'
-    $asset = @($j.assets | Where-Object { $_.name -eq $want -and ('' + $_.browser_download_url).StartsWith($prefix) }) | Select-Object -First 1
-    $sha = ''
-    if ($asset -and ($asset.PSObject.Properties.Name -contains 'digest')) { $sha = (('' + $asset.digest) -replace '^sha256:', '').ToLower() }
-    if (-not $asset -or $sha -notmatch '^[0-9a-f]{64}$') { Write-Color ('В релизе ' + $j.tag_name + ' нет ' + $want + ' с контрольной суммой.') Red; return $false }
-    $st = Get-TgState
-    if ($st.Installed -and $st.Sha256 -eq $sha -and (Get-FileHash -LiteralPath (Get-TgExe) -Algorithm SHA256).Hash.ToLower() -eq $sha) {
-        Write-Color ('Стоит последняя версия tg-ws-proxy: ' + $j.tag_name + '.') Green
-        return $true
-    }
-    $dl = Join-Path $dir 'download.tmp'
-    Write-Color ('Скачиваю tg-ws-proxy ' + $j.tag_name + ' (' + [math]::Round($asset.size / 1MB) + ' МБ)...') Cyan
-    $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 300 -o "' + $dl + '" "' + $asset.browser_download_url + '"') $dir 320
-    if ($r.ExitCode -ne 0 -or -not (Test-Path $dl)) { Write-Color ('Не скачалось (curl код ' + $r.ExitCode + ').') Red; return $false }
-    if ((Get-FileHash -LiteralPath $dl -Algorithm SHA256).Hash.ToLower() -ne $sha) {
-        Remove-Item $dl -Force
-        Write-Color 'Контрольная сумма не совпала с GitHub - файл повреждён или подменён, не ставлю.' Red
-        return $false
-    }
-    Stop-TgWsProxy
-    Move-Item -LiteralPath $dl (Get-TgExe) -Force
-    # папка рядом с программой включает её портативный режим: настройки и логи - здесь, а не в %APPDATA%
-    New-Item -ItemType Directory (Join-Path $dir 'TgWsProxy_data') -Force | Out-Null
-    Write-TextNoBom (Join-Path $dir 'version.txt') ($j.tag_name + ' ' + $sha)
-    Write-Color ('tg-ws-proxy ' + $j.tag_name + ' установлен.') Green
+        Register-ScheduledTask -TaskName $Script:TgTask -Action $action -Trigger @($logon, $every) -Settings $set -Principal $pr -Force `
+            -Description 'zapret: мост Telegram (127.0.0.1, MTProto через WebSocket веб-версии Telegram)' -ErrorAction Stop | Out-Null
+    } catch { Write-Color $_.Exception.Message Red; return $false }
     return $true
 }
 
-# Запуск через Проводник - от имени пользователя. Перед запуском файл сверяется с SHA-256, записанной при установке.
-function Start-TgWsProxy {
-    $st = Get-TgState
-    if (-not $st.Installed) { return $false }
-    if ($st.Running) { return $true }
-    if ($st.Sha256 -and (Get-FileHash -LiteralPath (Get-TgExe) -Algorithm SHA256).Hash.ToLower() -ne $st.Sha256) {
-        Write-Color 'TgWsProxy.exe изменился после установки - не запускаю. Поставьте его заново (пункт 1).' Red
-        return $false
+# Запуск моста задачей - от имени пользователя, даже из меню с правами администратора. $true - мост слушает порт.
+function Start-TgBridge {
+    if (Test-TgBridgeRunning) { return $true }
+    if (-not (Get-TgTask) -and -not (Install-TgTask)) { return $false }
+    try { Start-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { }
+    # первый запуск - компиляция C# (секунда-две)
+    for ($i = 0; $i -lt 40 -and -not (Test-TgBridgeRunning); $i++) { Start-Sleep -Milliseconds 500 }
+    return (Test-TgBridgeRunning)
+}
+
+function Stop-TgBridge {
+    try { Stop-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { }
+    $p = Get-TgBridgeProcess
+    if ($p) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+}
+
+# tg-ws-proxy от Flowseal больше не нужен: мост его заменяет и занимает тот же порт. Закрываем его, убираем
+# его автозапуск и копию, которую ставила zapret 1.2 (runtime\tg-ws-proxy). Возвращает $true, если он был.
+function Remove-FlowsealTg {
+    $was = $false
+    foreach ($p in @(Get-Process -Name 'TgWsProxy*' -ErrorAction SilentlyContinue)) { $was = $true; try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+    try {
+        $run = Get-ItemProperty -Path $Script:TgRunKey -ErrorAction Stop
+        if ($run.PSObject.Properties.Name -contains 'TgWsProxy') { $was = $true; Remove-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -ErrorAction SilentlyContinue }
+    } catch { }
+    $d = Get-PkgPath $Script:TgDir
+    if (Test-Path $d) { $was = $true; Start-Sleep -Milliseconds 500; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    return $was
+}
+
+# Включить или выключить мост Telegram. Возвращает $true, если всё получилось (при включении - мост слушает порт).
+function Set-TelegramMode([bool]$On) {
+    $s = Get-Settings
+    if ($On) {
+        # secret - пока настройки tg-ws-proxy ещё на месте
+        Get-TgConfig | Out-Null
+        if (Remove-FlowsealTg) { Write-Color 'tg-ws-proxy от Flowseal закрыт и убран из автозапуска: его заменяет встроенный мост (тот же порт и secret).' Gray }
+        $s.telegram = 'on'
+        Save-Settings $s
+        if (-not (Install-TgTask)) { return $false }
+        return (Start-TgBridge)
     }
-    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"' + (Get-TgExe) + '"')
-    for ($i = 0; $i -lt 30 -and -not @(Get-TgProcesses).Count; $i++) { Start-Sleep -Milliseconds 500 }
-    return (@(Get-TgProcesses).Count -gt 0)
+    $s.telegram = 'off'
+    Save-Settings $s
+    Stop-TgBridge
+    try { Unregister-ScheduledTask -TaskName $Script:TgTask -Confirm:$false -ErrorAction Stop } catch { }
+    return $true
 }
 
-function Stop-TgWsProxy {
-    foreach ($p in @(Get-TgProcesses)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+# Есть ли на ПК Telegram Desktop (тогда при первом запуске обхода предлагаем мост)
+function Test-TelegramDesktop {
+    return (@(Get-Process -Name 'Telegram' -ErrorAction SilentlyContinue).Count -gt 0) -or (Test-Path (Join-Path $env:APPDATA 'Telegram Desktop'))
 }
 
-# Автозапуск - та же запись, что ставит сам прокси в своих настройках (HKCU\...\Run, TgWsProxy)
-function Set-TgAutostart([bool]$On) {
-    if ($On) { New-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -Value ('"' + (Get-TgExe) + '"') -PropertyType String -Force | Out-Null }
-    elseif ((Get-TgState).Autostart) { Remove-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -ErrorAction SilentlyContinue }
+# Telegram настроен на прокси 127.0.0.1:<порт моста> (стучится в него), а там никто не слушает - Telegram без сети
+function Test-TelegramWaitsForProxy {
+    $port = (Get-TgConfig).Port
+    if (Test-PortListening $port) { return $false }
+    $tg = @(Get-Process -Name 'Telegram' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+    if (-not $tg.Count) { return $false }
+    return (@(Get-ProxyClientPids @($port) | Where-Object { $tg -contains $_ }).Count -gt 0)
 }
 
-function Remove-TgWsProxy {
-    Set-TgAutostart $false
-    Stop-TgWsProxy
-    Start-Sleep -Milliseconds 500
-    Remove-Item (Get-PkgPath $Script:TgDir) -Recurse -Force -ErrorAction SilentlyContinue
-    return -not (Test-Path (Get-TgExe))
+# Уведомления включены? Пустое значение - настройки из 1.2, где их состояние хранила сама задача
+function Test-NotifyEnabled($S) {
+    if ($S.notify -eq 'on') { return $true }
+    if ($S.notify -eq 'off') { return $false }
+    return [bool](Get-NotifyTask)
+}
+
+# Ставит или убирает задачу уведомлений под настройку notify
+function Sync-UserTask($S) {
+    $need = Test-NotifyEnabled $S
+    $task = Get-NotifyTask
+    if ($need -and -not $task) { return (Install-NotifyTask) }
+    if (-not $need -and $task) { Remove-NotifyTask }
+    return $true
 }
 
 # ---------- программы, застрявшие на прокси ----------

@@ -89,17 +89,26 @@ try { Get-ProxyStuckApps | Out-Null; Get-ProxyAppsNow | Out-Null } catch { $stuc
 Remove-Item $tmpDir -Recurse -Force -ErrorAction SilentlyContinue
 if ($proxyOk -and $trackOk -and $planOk -and $rulesOk -and $stuckOk) { Write-Host 'ok   прокси, исключение игры, план обновления, правила' -ForegroundColor Green }
 else { Write-Host ('FAIL 1.2: proxy={0} track={1} ({2}) plan={3} ({4}) rules={5} stuck={6}' -f $proxyOk, $trackOk, (@($tb.Nets) -join ','), $planOk, ($plan -join ','), $rulesOk, $stuckOk) -ForegroundColor Red; $fails++ }
-# Telegram (tg-ws-proxy): ссылка tg://proxy из его настроек; конфликтующие программы, меню Telegram - без установки и без сети
-$tgCfg = Join-Path $env:TEMP ('zapret-tg-' + [guid]::NewGuid().ToString('N') + '.json')
-[System.IO.File]::WriteAllText($tgCfg, '{"host": "127.0.0.1", "port": 1443, "secret": "0123456789abcdef0123456789abcdef"}')
-$link = Get-TgLink $tgCfg
-[System.IO.File]::WriteAllText($tgCfg, '{"secret": "bad"}')
-$noLink = Get-TgLink $tgCfg
-Remove-Item $tgCfg -Force
+# Telegram, встроенный мост: secret переходит от tg-ws-proxy (zapret 1.2), ссылка tg://proxy, шифры моста (C# компилируется) -
+# всё на временных файлах, без сети и без запуска моста
+$tgTmp = Join-Path $env:TEMP ('zapret-tg-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory $tgTmp | Out-Null
+[System.IO.File]::WriteAllText((Join-Path $tgTmp 'old.json'), '{"host": "127.0.0.1", "port": 1443, "secret": "0123456789ABCDEF0123456789abcdef"}')
+$tgc = Get-TgConfig (Join-Path $tgTmp 'telegram.txt') @((Join-Path $tgTmp 'old.json'))
+$tgc2 = Get-TgConfig (Join-Path $tgTmp 'telegram.txt') @((Join-Path $tgTmp 'none.json'))
+$fresh = Get-TgConfig (Join-Path $tgTmp 'fresh.txt') @((Join-Path $tgTmp 'none.json'))
+Remove-Item $tgTmp -Recurse -Force
+$importOk = $tgc.Secret -eq '0123456789abcdef0123456789abcdef' -and $tgc.Port -eq 1443 -and $tgc2.Secret -eq $tgc.Secret -and $fresh.Secret -match '^[0-9a-f]{32}$' -and $fresh.Secret -ne $tgc.Secret
+$self = (& $ps -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Pkg 'tools\tgbridge.ps1') -SelfTest 2>&1 | Out-String).Trim()
 $tgOk = $true
-try { Get-SystemConflicts | Out-Null; Get-TgState | Out-Null; Show-TelegramMenu *> $null } catch { $tgOk = $false; $tgErr = $_.Exception.Message }
-if ($link -eq 'tg://proxy?server=127.0.0.1&port=1443&secret=dd0123456789abcdef0123456789abcdef' -and $noLink -eq '' -and $tgOk) { Write-Host 'ok   Telegram, конфликты' -ForegroundColor Green }
-else { Write-Host ('FAIL Telegram: link=' + $link + ' bad=' + $noLink + ' ok=' + $tgOk) -ForegroundColor Red; $fails++ }
+try { Get-SystemConflicts | Out-Null; Test-TgBridgeRunning | Out-Null; Get-TgLink | Out-Null; Show-TelegramMenu *> $null } catch { $tgOk = $false; $tgErr = $_.Exception.Message }
+if ($importOk -and $self -eq 'ok' -and $tgOk) { Write-Host 'ok   Telegram: мост, ключ, конфликты' -ForegroundColor Green }
+else { Write-Host ('FAIL Telegram: import=' + $importOk + ' selftest=' + $self + ' ok=' + $tgOk) -ForegroundColor Red; $fails++ }
+# Telegram вместе с обходом: настройки по умолчанию, уведомления по настройке, проверка "Telegram ждёт прокси" - без запуска
+$ds = Get-Settings
+$modeOk = ($ds.ContainsKey('telegram') -and $ds.ContainsKey('notify')) -and (Test-NotifyEnabled @{ notify = 'on' }) -and -not (Test-NotifyEnabled @{ notify = 'off' })
+try { Test-TelegramWaitsForProxy | Out-Null; Test-TelegramDesktop | Out-Null } catch { $modeOk = $false }
+if ($modeOk) { Write-Host 'ok   Telegram вместе с обходом' -ForegroundColor Green } else { Write-Host 'FAIL Telegram вместе с обходом' -ForegroundColor Red; $fails++ }
 # новые версии: сравнение по числам и своя версия по сохранённой проверке - без сети
 $uf = Get-PkgPath $Script:UpdatesFile
 $savedUpd = if (Test-Path $uf) { [System.IO.File]::ReadAllText($uf) } else { $null }

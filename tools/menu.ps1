@@ -73,7 +73,8 @@ function Show-Header {
     $st = Get-Strategy $s.alt
     $state = @($(if (@(Get-OurProcesses).Count) { 'Обход: РАБОТАЕТ' } else { 'Обход: остановлен' }),
         $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }),
-        $(if (Get-OurService) { 'автозапуск с Windows' }))
+        $(if (Get-OurService) { 'автозапуск с Windows' }),
+        $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'Telegram' } else { 'Telegram: не запущен' } }))
     Write-BoxTop (' zapret v' + $Script:Version + ' ')
     Write-BoxRow ('  ' + (@($state | Where-Object { $_ }) -join ' · ')) -Rgb @(255, 200, 220)
     $bad = @(Test-PackageIntegrity -Cached)
@@ -131,7 +132,7 @@ function Show-SettingsMenu {
         Write-BoxRow '  8. Обновить списки'
         $upd = Get-ZapretUpdate
         Write-BoxRow ('  9. Обновить zapret: у вас ' + $Script:Version + $(if ($upd) { ', вышла ' + $upd } else { '' }))
-        Write-BoxRow ('  10. Уведомления Windows: ' + $(if (Get-NotifyTask) { 'вкл' } else { 'выкл' }))
+        Write-BoxRow ('  10. Уведомления Windows: ' + $(if (Test-NotifyEnabled $s) { 'вкл' } else { 'выкл' }))
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
@@ -153,7 +154,7 @@ function Show-ToolsMenu {
         Write-BoxRow '  5. Диагностика: winws2 в видимом окне'
         Write-BoxRow '  6. Исключить игру из обхода (по последнему трекеру)'
         Write-BoxRow '  7. Правила "напрямую" для Happ (Steam, Discord, игры)'
-        Write-BoxRow '  8. Telegram: ускорение через tg-ws-proxy'
+        Write-BoxRow '  8. Telegram: встроенный мост (без VPN и программ)'
         Write-BoxRow '  9. Discord не запускается: очистить кэш'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
@@ -172,6 +173,29 @@ function Start-WithChecks {
         return
     }
     Start-Bypass | Out-Null
+    Start-TelegramWithBypass
+}
+
+# Telegram вместе с обходом: включён - запускаем tg-ws-proxy; ещё не выбирали, а Telegram Desktop есть - спрашиваем один раз
+function Start-TelegramWithBypass {
+    $s = Get-Settings
+    if ($s.telegram -eq 'on') {
+        if (Start-TgBridge) { Write-Color 'Telegram: мост работает.' Green } else { Write-Color 'Telegram: мост не запустился (Инструменты -> 8).' Yellow }
+        return
+    }
+    if ($s.telegram -or -not (Test-TelegramDesktop)) { return }
+    Write-Host ''
+    Write-Color 'Telegram у нас режут по адресам его серверов: без VPN он тормозит или не грузит фото и видео.' Cyan
+    Write-Color 'Обход это не лечит, а встроенный мост zapret - лечит: Telegram Desktop ходит через него, а мост - через' Cyan
+    Write-Color 'веб-версию Telegram, которую не режут. Ничего не скачивается; мост работает с входа в Windows.' Cyan
+    if (Read-YesNo 'Включить мост Telegram?') {
+        if (Set-TelegramMode $true) { Write-Color 'Telegram: мост работает.' Green; Connect-TgDesktop }
+        else { Write-Color 'Мост не запустился: Инструменты -> 8.' Yellow }
+    } else {
+        $s.telegram = 'off'
+        Save-Settings $s
+        Write-Color 'Хорошо. Включить можно позже: Инструменты -> 8.' Gray
+    }
 }
 
 function Select-AltManual {
@@ -374,30 +398,22 @@ function Clear-DiscordMenu {
 }
 
 function Connect-TgDesktop {
-    $link = ''
-    for ($i = 0; $i -lt 20 -and -not $link; $i++) { $link = Get-TgLink; if (-not $link) { Start-Sleep -Milliseconds 500 } }
-    if (-not $link) {
-        Write-Color 'Настройки прокси ещё не созданы. Нажмите правой кнопкой по значку TG WS Proxy в трее -> "Открыть в Telegram".' Yellow
-        return
-    }
     # tg://proxy открывает Telegram Desktop с вопросом "Подключиться к прокси?" - ответьте "Подключиться"
-    Start-Process -FilePath 'explorer.exe' -ArgumentList $link
+    Start-Process -FilePath 'explorer.exe' -ArgumentList (Get-TgLink)
     Write-Color 'Открываю Telegram: на вопрос о прокси нажмите "Подключиться".' Green
-    Write-Color 'Если Telegram не открылся - правой кнопкой по значку TG WS Proxy в трее -> "Открыть в Telegram".' Gray
+    Write-Color 'Не открылся - Telegram: Настройки -> Продвинутые настройки -> Тип подключения -> Прокси: MTProto, 127.0.0.1, порт и secret - в runtime\telegram.txt (secret с dd впереди).' Gray
 }
 
 function Show-TelegramMenu {
     while ($true) {
         Show-Header
-        $st = Get-TgState
-        $state = if (-not $st.Installed) { 'не установлен' } else {
-            $st.Version + ', ' + $(if ($st.Running) { 'работает' } else { 'не запущен' }) + ', автозапуск ' + $(if ($st.Autostart) { 'вкл' } else { 'выкл' }) }
-        Write-BoxRow ' Telegram: tg-ws-proxy от Flowseal' Cyan
-        Write-BoxRow ('  Ускоряет Telegram Desktop: его трафик идёт через WebSocket. Сейчас: ' + $state) Gray
-        Write-BoxRow ('  1. ' + $(if ($st.Installed) { 'Обновить и запустить' } else { 'Установить и запустить' }))
-        Write-BoxRow '  2. Подключить Telegram Desktop к прокси'
-        Write-BoxRow ('  3. Автозапуск при входе в Windows: ' + $(if ($st.Autostart) { 'вкл' } else { 'выкл' }))
-        Write-BoxRow '  4. Удалить'
+        $on = (Get-Settings).telegram -eq 'on'
+        $state = if (-not $on) { 'выключен' } elseif (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' }
+        Write-BoxRow ' Telegram: встроенный мост' Cyan
+        Write-BoxRow '  Telegram Desktop ходит через мост на этом ПК, а мост - через веб-версию Telegram, которую не режут. Ничего не скачивается.' Gray
+        Write-BoxRow ('  Сейчас: ' + $state) Gray
+        Write-BoxRow ('  1. ' + $(if ($on) { 'Выключить' } else { 'Включить: работает с входа в Windows и сам поднимается, если закрылся' }))
+        Write-BoxRow '  2. Подключить Telegram Desktop к мосту'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
@@ -405,31 +421,23 @@ function Show-TelegramMenu {
         switch ($c) {
             '1' {
                 Write-Host ''
-                if (Install-TgWsProxy) {
-                    if (Start-TgWsProxy) {
-                        Write-Color 'tg-ws-proxy работает (значок в трее). При первом запуске он сам покажет окно с инструкцией.' Green
-                        if (-not $st.Installed -or (Read-YesNo 'Подключить Telegram Desktop к прокси сейчас?')) { Connect-TgDesktop }
-                    } else { Write-Color 'tg-ws-proxy не запустился. Возможно, его удалил антивирус: на упаковщик программы они часто ругаются ложно.' Yellow }
+                if ($on) {
+                    Set-TelegramMode $false | Out-Null
+                    Write-Color 'Мост выключен. В Telegram выключите прокси, иначе он останется без сети: Настройки -> Продвинутые настройки -> Тип подключения.' Yellow
+                } elseif (Set-TelegramMode $true) {
+                    Write-Color 'Мост работает: стартует с входом в Windows, а если его закрыть, поднимется сам.' Green
+                    if (Read-YesNo 'Подключить Telegram Desktop к мосту (если ещё не подключали)?') { Connect-TgDesktop }
+                } else {
+                    $owner = Get-PortOwnerName (Get-TgConfig).Port
+                    if ($owner) { Write-Color ('Мост не запустился: порт ' + (Get-TgConfig).Port + ' занят программой ' + $owner + '. Закройте её и включите снова.') Yellow }
+                    else { Write-Color 'Мост не запустился. Подробности - в runtime\tgbridge.log; отчёт (Инструменты -> 4) тоже их покажет.' Yellow }
                 }
                 Pause-Menu
             }
             '2' {
                 Write-Host ''
-                if (-not $st.Installed) { Write-Color 'Сначала установите (пункт 1).' Yellow }
-                elseif (Start-TgWsProxy) { Connect-TgDesktop } else { Write-Color 'tg-ws-proxy не запустился.' Yellow }
+                if (-not $on) { Write-Color 'Сначала включите мост (пункт 1).' Yellow } else { Start-TgBridge | Out-Null; Connect-TgDesktop }
                 Pause-Menu
-            }
-            '3' {
-                if (-not $st.Installed) { Write-Color 'Сначала установите (пункт 1).' Yellow; Pause-Menu }
-                else { Set-TgAutostart (-not $st.Autostart) }
-            }
-            '4' {
-                Write-Host ''
-                if ($st.Installed -and (Read-YesNo 'Удалить tg-ws-proxy?')) {
-                    if (Remove-TgWsProxy) { Write-Color 'Удалён. В Telegram выключите прокси: Настройки -> Продвинутые настройки -> Тип подключения.' Green }
-                    else { Write-Color 'Удалить не вышло: закройте TG WS Proxy в трее и повторите.' Yellow }
-                    Pause-Menu
-                }
             }
             default { return }
         }
@@ -453,8 +461,9 @@ function Export-DirectRules {
 
 function Toggle-Notify {
     Write-Host ''
-    if (Get-NotifyTask) {
-        if (Read-YesNo 'Уведомления включены. Выключить?') { Remove-NotifyTask; Write-Color 'Уведомления выключены.' Green }
+    $s = Get-Settings
+    if (Test-NotifyEnabled $s) {
+        if (Read-YesNo 'Уведомления включены. Выключить?') { $s.notify = 'off'; Save-Settings $s; Sync-UserTask $s | Out-Null; Write-Color 'Уведомления выключены.' Green }
         Pause-Menu; return
     }
     Write-Color 'Уведомления Windows (раз в 5 минут, без окон, от имени вашей учётной записи):' Cyan
@@ -462,7 +471,9 @@ function Toggle-Notify {
     Write-Color '  - Steam или Discord запущены при включённом прокси и после его выключения остались без сети;' Gray
     Write-Color '  - вышла новая версия zapret; автонастройка обновила круги или списки.' Gray
     if (Read-YesNo 'Включить?') {
-        if (Install-NotifyTask) {
+        $s.notify = 'on'
+        Save-Settings $s
+        if (Sync-UserTask $s) {
             Write-Color 'Уведомления включены. Проверочное уведомление - сейчас.' Green
             if (-not (Show-Toast 'zapret' 'Уведомления включены.')) { Write-Color 'Показать уведомление не вышло: проверьте, что уведомления Windows не выключены.' Yellow }
         } else { Write-Color 'Не удалось создать задачу в планировщике.' Red }
@@ -573,6 +584,14 @@ function Show-PcCheck {
         if ($c.Key -eq 'bfe') { Add-Fix 'Включить службу Base Filtering Engine: без неё WinDivert не работает' { Repair-Bfe } }
     }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
+    $tgOn = (Get-Settings).telegram -eq 'on'
+    if ($tgOn -and -not (Test-TgBridgeRunning)) {
+        Write-Color '  ! Мост Telegram не запущен: Telegram без него без сети.' Yellow
+        Add-Fix 'Запустить мост Telegram' { Start-TgBridge }
+    } elseif (-not $tgOn -and (Test-TelegramWaitsForProxy)) {
+        Write-Color '  ! Telegram настроен на прокси 127.0.0.1, а там никто не слушает: Telegram без сети.' Yellow
+        Add-Fix 'Включить мост Telegram (или выключите прокси в настройках Telegram)' { Set-TelegramMode $true }
+    }
     $stuck = @(Get-ProxyStuckApps)
     if ($stuck.Count) {
         Write-Color ('  ! ' + ($stuck -join ' и ') + ' запущен, когда был включён прокси, и шлёт запросы в выключенный прокси: без сети, хотя выглядит "в сети".') Yellow

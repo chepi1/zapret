@@ -3,6 +3,9 @@
 # Совместимо с Windows PowerShell 5.1.
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
+$settings = Get-Settings
+if (-not (Test-NotifyEnabled $settings)) { exit 0 }
+
 $stateFile = Get-PkgPath 'runtime/notify-state.txt'
 $state = @{}
 if (Test-Path $stateFile) {
