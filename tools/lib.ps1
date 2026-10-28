@@ -138,9 +138,15 @@ function Get-IpsetText([string]$Mode) {
 # ---------- стратегии ----------
 # Файл strategies\altNN.txt: заголовок "# name:", "# desc:", затем секции [quic], [discord_udp] ... с параметрами winws2.
 
+# Разбор 27 файлов стратегий - заметная часть времени шапки меню и сборки командной строки (Get-RotationOrder
+# зовёт его для каждого профиля), поэтому результат хранится, пока не изменился ни один файл strategies\alt*.txt.
+$Script:StrategiesCache = $null
 function Get-Strategies {
+    $files = @(Get-ChildItem -Path $Script:StratDir -Filter 'alt*.txt' | Sort-Object { [int]($_.BaseName -replace '\D', '') })
+    $sig = (@($files | ForEach-Object { $_.Name + ':' + $_.Length + ':' + $_.LastWriteTimeUtc.Ticks }) -join '|')
+    if ($Script:StrategiesCache -and $Script:StrategiesCache.Sig -eq $sig) { return $Script:StrategiesCache.Items }
     $result = @()
-    foreach ($file in (Get-ChildItem -Path $Script:StratDir -Filter 'alt*.txt' | Sort-Object { [int]($_.BaseName -replace '\D', '') })) {
+    foreach ($file in $files) {
         if ($file.BaseName -notmatch '^alt(\d+)$') { continue }
         $id = $matches[1]
         $name = 'ALT' + $id
@@ -160,6 +166,7 @@ function Get-Strategies {
             Id = $id; Name = $name; Desc = $desc; File = $file.FullName; Sections = $sec; Missing = $missing
         }
     }
+    $Script:StrategiesCache = New-Object PSObject -Property @{ Sig = $sig; Items = $result }
     return $result
 }
 
@@ -964,26 +971,26 @@ function Get-TunAdapters {
 # ---------- программы и службы, которые мешают обходу (как в диагностике Flowseal) ----------
 # Проверяем только работающие службы и процессы. Key - для исправления (bfe), Text - что найдено и чем мешает.
 $Script:ConflictsCache = $null
-function Get-SystemConflicts {
-    if ($Script:ConflictsCache -and ((Get-Date) - $Script:ConflictsCache.Time).TotalSeconds -lt 60) { return $Script:ConflictsCache.Items }
-    $out = @()
-    function Add-Conflict([string]$Key, [string]$Text) { $script:found += New-Object PSObject -Property @{ Key = $Key; Text = $Text } }
-    $script:found = @()
+function New-Conflict([string]$Key, [string]$Text) { return New-Object PSObject -Property @{ Key = $Key; Text = $Text } }
+
+# -Cached - для шапки меню (раз в минуту); проверка обходов смотрит сразу, чтобы исправленное не мерещилось
+function Get-SystemConflicts([switch]$Cached) {
+    if ($Cached -and $Script:ConflictsCache -and ((Get-Date) - $Script:ConflictsCache.Time).TotalSeconds -lt 60) { return $Script:ConflictsCache.Items }
+    $found = @()
     $bfe = Get-Service -Name 'BFE' -ErrorAction SilentlyContinue
-    if (-not $bfe -or $bfe.Status -ne 'Running') { Add-Conflict 'bfe' 'не работает служба Base Filtering Engine (BFE): без неё WinDivert не запустится' }
+    if (-not $bfe -or $bfe.Status -ne 'Running') { $found += New-Conflict 'bfe' 'не работает служба Base Filtering Engine (BFE): без неё WinDivert не запустится' }
     $svc = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
     $has = { param($re) @($svc | Where-Object { $_.Name -match $re -or $_.DisplayName -match $re }).Count -gt 0 }
-    if (@(Get-Process -Name 'AdguardSvc' -ErrorAction SilentlyContinue).Count) { Add-Conflict 'adguard' 'AdGuard: известно, что мешает Discord. Выключите в нём фильтрацию Discord или закройте его' }
-    if (& $has 'Killer') { Add-Conflict 'killer' 'службы Killer (сетевая программа на ноутбуках Dell, MSI и др.): конфликтуют с обходом - удалите Killer Control Center или выключите его службы' }
-    if (& $has 'Intel.*Connectivity.*Network') { Add-Conflict 'intel' 'Intel Connectivity Network Service: конфликтует с обходом - выключите её в services.msc' }
-    if (& $has 'TracSrvWrapper|EPWD') { Add-Conflict 'checkpoint' 'Check Point (VPN или защита): конфликтует с обходом - удалите его' }
-    if (& $has 'SmartByte') { Add-Conflict 'smartbyte' 'SmartByte (Dell): конфликтует с обходом - выключите его службу в services.msc' }
+    if (@(Get-Process -Name 'AdguardSvc' -ErrorAction SilentlyContinue).Count) { $found += New-Conflict 'adguard' 'AdGuard: известно, что мешает Discord. Выключите в нём фильтрацию Discord или закройте его' }
+    if (& $has 'Killer') { $found += New-Conflict 'killer' 'службы Killer (сетевая программа на ноутбуках Dell, MSI и др.): конфликтуют с обходом - удалите Killer Control Center или выключите его службы' }
+    if (& $has 'Intel.*Connectivity.*Network') { $found += New-Conflict 'intel' 'Intel Connectivity Network Service: конфликтует с обходом - выключите её в services.msc' }
+    if (& $has 'TracSrvWrapper|EPWD') { $found += New-Conflict 'checkpoint' 'Check Point (VPN или защита): конфликтует с обходом - удалите его' }
+    if (& $has 'SmartByte') { $found += New-Conflict 'smartbyte' 'SmartByte (Dell): конфликтует с обходом - выключите его службу в services.msc' }
     if ($env:OneDrive -and $Script:Root.StartsWith($env:OneDrive.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
-        Add-Conflict 'onedrive' 'папка сборки лежит в OneDrive: синхронизация мешает файлам обхода - перенесите её, например в C:\zapret'
+        $found += New-Conflict 'onedrive' 'папка сборки лежит в OneDrive: синхронизация мешает файлам обхода - перенесите её, например в C:\zapret'
     }
-    $out = @($script:found)
-    $Script:ConflictsCache = New-Object PSObject -Property @{ Time = Get-Date; Items = $out }
-    return $out
+    $Script:ConflictsCache = New-Object PSObject -Property @{ Time = Get-Date; Items = $found }
+    return $found
 }
 
 function Repair-Bfe {
@@ -1158,8 +1165,21 @@ function Get-LocalProxyPorts {
     return @($ports | Select-Object -Unique)
 }
 
+# Get-NetTCPConnection отвечает около 0,5 с - для шапки меню слишком долго; список слушающих портов из .NET - мгновенно
 function Test-PortListening([int]$Port) {
-    return @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue).Count -gt 0
+    try { return @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq $Port }).Count -gt 0 }
+    catch { return $false }
+}
+
+# PID программ с TCP-соединениями к 127.0.0.1:<порт прокси>. netstat в разы быстрее Get-NetTCPConnection; состояние
+# соединения не разбираем (оно бывает переведено на язык Windows) - только адрес и PID в последнем столбце.
+function Get-ProxyClientPids([int[]]$Ports) {
+    if (-not $Ports.Count) { return @() }
+    $ids = @()
+    foreach ($l in @(& (Join-Path $env:SystemRoot 'System32\netstat.exe') -ano -p TCP 2>$null)) {
+        if ($l -match '^\s*TCP\s+\S+\s+127\.0\.0\.1:(\d+)\s+\S+\s+(\d+)\s*$' -and $Ports -contains [int]$matches[1]) { $ids += [int]$matches[2] }
+    }
+    return @($ids | Select-Object -Unique)
 }
 
 # Steam сам пишет в журнал подключений, через какой адрес ходит: "(127.0.0.1:10809, WebSocket)", проверка IPv6 через прокси.
@@ -1188,8 +1208,9 @@ function Test-SteamProxyLog([int[]]$Ports, [string]$LogPath = '', [datetime]$Sin
 # Какие программы застряли на выключенном прокси. Пока прокси работает - запоминаем, кто ходит через него
 # (runtime\proxy-apps.txt: программа, PID, время запуска). Когда прокси выключен - те же процессы, если ещё живы,
 # и есть застрявшие; Steam ещё и сам пишет это в журнал. Возвращает имена программ (Steam, Discord).
-function Get-ProxyStuckApps {
-    if ($Script:ProxyStuckCache -and ((Get-Date) - $Script:ProxyStuckCache.Time).TotalSeconds -lt 20) { return $Script:ProxyStuckCache.Apps }
+# -Cached - для шапки меню (раз в 20 секунд); проверка обходов и уведомления смотрят сразу
+function Get-ProxyStuckApps([switch]$Cached) {
+    if ($Cached -and $Script:ProxyStuckCache -and ((Get-Date) - $Script:ProxyStuckCache.Time).TotalSeconds -lt 20) { return $Script:ProxyStuckCache.Apps }
     $stuck = @()
     $ports = @(Get-LocalProxyPorts)
     $file = Get-PkgPath $Script:ProxyAppsFile
@@ -1207,11 +1228,11 @@ function Get-ProxyStuckApps {
     }
     $alive = @($ports | Where-Object { Test-PortListening $_ })
     if ($alive.Count) {
-        $conns = @(Get-NetTCPConnection -RemoteAddress '127.0.0.1' -ErrorAction SilentlyContinue | Where-Object { $alive -contains $_.RemotePort })
+        $ids = @(Get-ProxyClientPids $alive)
         $lines = @($known | ForEach-Object { $_.Line })
         foreach ($app in $Script:ProxyAppNames.Keys) {
             foreach ($p in @(Get-Process -Name $Script:ProxyAppNames[$app] -ErrorAction SilentlyContinue)) {
-                if (-not @($conns | Where-Object { $_.OwningProcess -eq $p.Id }).Count) { continue }
+                if ($ids -notcontains $p.Id) { continue }
                 try { $line = '{0}|{1}|{2}' -f $app, $p.Id, $p.StartTime.Ticks } catch { continue }
                 if ($lines -notcontains $line) { $lines += $line }
             }
@@ -1229,8 +1250,7 @@ function Get-ProxyStuckApps {
 function Get-ProxyAppsNow {
     $alive = @(Get-LocalProxyPorts | Where-Object { Test-PortListening $_ })
     if (-not $alive.Count) { return @() }
-    $conns = @(Get-NetTCPConnection -RemoteAddress '127.0.0.1' -ErrorAction SilentlyContinue | Where-Object { $alive -contains $_.RemotePort })
-    $ids = @($conns | ForEach-Object { $_.OwningProcess })
+    $ids = @(Get-ProxyClientPids $alive)
     return @($Script:ProxyAppNames.Keys | Where-Object { @(Get-Process -Name $Script:ProxyAppNames[$_] -ErrorAction SilentlyContinue | Where-Object { $ids -contains $_.Id }).Count })
 }
 
@@ -1269,8 +1289,14 @@ $Script:NotifyTask = 'zapret notify'
 # обход остановлен пунктом 2 - это не сбой, уведомлять не нужно
 $Script:ManualStopFile = 'runtime/manual-stop.txt'
 
+$Script:NotifyTaskCache = $null
 function Get-NotifyTask {
-    try { return Get-ScheduledTask -TaskName $Script:NotifyTask -ErrorAction Stop } catch { return $null }
+    $c = $Script:NotifyTaskCache
+    if ($c -and ((Get-Date) - $c.Time).TotalSeconds -lt 60) { return $c.Task }
+    $task = $null
+    try { $task = Get-ScheduledTask -TaskName $Script:NotifyTask -ErrorAction Stop } catch { }
+    $Script:NotifyTaskCache = New-Object PSObject -Property @{ Time = Get-Date; Task = $task }
+    return $task
 }
 
 function Install-NotifyTask {
@@ -1284,6 +1310,7 @@ function Install-NotifyTask {
     $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 2) -MultipleInstances IgnoreNew
     # от имени пользователя и без прав администратора: уведомления показываются только в его сеансе
     $pr = New-ScheduledTaskPrincipal -UserId ($env:USERDOMAIN + '\' + $env:USERNAME) -LogonType Interactive -RunLevel Limited
+    $Script:NotifyTaskCache = $null
     try {
         Register-ScheduledTask -TaskName $Script:NotifyTask -Action $action -Trigger @($every, $logon) -Settings $set -Principal $pr -Force `
             -Description 'zapret: уведомления (обход не работает, Steam без сети после прокси, новая версия)' -ErrorAction Stop | Out-Null
@@ -1293,6 +1320,7 @@ function Install-NotifyTask {
 
 function Remove-NotifyTask {
     try { Unregister-ScheduledTask -TaskName $Script:NotifyTask -Confirm:$false -ErrorAction Stop } catch { }
+    $Script:NotifyTaskCache = $null
 }
 
 # Уведомление Windows от имени PowerShell (своё имя приложения требует ярлыка в меню "Пуск" - не стоит того)
@@ -1349,7 +1377,11 @@ $Script:GameBoosters = [ordered]@{
 $Script:BoosterHint = 'перехватывает трафик игр и Discord вместе с обходом - голос Discord пропадает, игра может вылетать. Закройте его полностью (и в трее)'
 
 # Запущенные ускорители: "ExitLag" или "ExitLag (служба ExitLagSvc)", если окна нет, а служба работает
-function Get-GameBoosters {
+# -Cached - для шапки меню (она перерисовывается на каждом экране): не чаще раза в 15 секунд. Проверки, автоподбор
+# и автонастройка смотрят процессы сразу - закрытый ускоритель не должен им мерещиться.
+$Script:BoostersCache = $null
+function Get-GameBoosters([switch]$Cached) {
+    if ($Cached -and $Script:BoostersCache -and ((Get-Date) - $Script:BoostersCache.Time).TotalSeconds -lt 15) { return $Script:BoostersCache.Items }
     $procs = @(Get-Process -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
     $svcs = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
     $found = @()
@@ -1360,6 +1392,7 @@ function Get-GameBoosters {
         $s = @($svcs | Where-Object { $sv = $_; @($pats | Where-Object { $sv.Name -like $_ -or $sv.DisplayName -like $_ }).Count })
         if ($s.Count) { $found += ('{0} (служба {1})' -f $name, $s[0].Name) }
     }
+    $Script:BoostersCache = New-Object PSObject -Property @{ Time = Get-Date; Items = $found }
     return $found
 }
 
@@ -2398,14 +2431,25 @@ $Script:UpstreamHashes = [ordered]@{
 $Script:ProtectedDirs = @('bin', 'lua', 'tools', 'strategies', 'fake', 'windivert')
 $Script:ProtectedFiles = @('zapret.bat')
 
-# Что не совпало с релизом zapret2 (пусто - всё в порядке)
-function Test-PackageIntegrity {
+# Что не совпало с релизом zapret2 (пусто - всё в порядке).
+# -Cached - для шапки меню: хеши пересчитываются, только если у файлов изменились размер или время. Перед запуском обхода,
+# службы, теста и диагностики сверка всегда полная.
+$Script:IntegrityCache = $null
+function Test-PackageIntegrity([switch]$Cached) {
+    $sig = ''
+    if ($Cached) {
+        $sig = (@($Script:UpstreamHashes.Keys | ForEach-Object {
+            $i = Get-Item -LiteralPath (Join-Path $Script:Root $_) -ErrorAction SilentlyContinue
+            if ($i) { $_ + ':' + $i.Length + ':' + $i.LastWriteTimeUtc.Ticks } else { $_ + ':-' } }) -join '|')
+        if ($Script:IntegrityCache -and $Script:IntegrityCache.Sig -eq $sig) { return $Script:IntegrityCache.Bad }
+    }
     $bad = @()
     foreach ($rel in $Script:UpstreamHashes.Keys) {
         $p = Join-Path $Script:Root $rel
         if (-not (Test-Path $p)) { $bad += ($rel + ' - нет файла'); continue }
         if ((Get-FileHash $p -Algorithm SHA256).Hash.ToLower() -ne $Script:UpstreamHashes[$rel]) { $bad += ($rel + ' - изменён') }
     }
+    if ($Cached) { $Script:IntegrityCache = New-Object PSObject -Property @{ Sig = $sig; Bad = $bad } }
     return $bad
 }
 

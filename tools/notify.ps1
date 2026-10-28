@@ -16,7 +16,8 @@ $svc = Get-OurService
 $testFile = Join-Path $Script:Runtime 'args-test.txt'
 $testing = (Test-Path $testFile) -and ((Get-Date) - (Get-Item $testFile).LastWriteTime).TotalMinutes -lt 3
 $manual = Test-Path (Get-PkgPath $Script:ManualStopFile)
-$down = if ($svc -and $svc.Status -ne 'Running' -and -not $manual -and -not $testing -and -not (Test-AutotuneRunning)) { 'down' } else { '' }
+# только Stopped: StartPending/StopPending бывают на секунды, пока служба сама перезапускается после сбоя
+$down = if ($svc -and $svc.Status -eq 'Stopped' -and -not $manual -and -not $testing -and -not (Test-AutotuneRunning)) { 'down' } else { '' }
 if ($down -and (Get-State 'service') -ne 'down') { Show-Toast 'zapret: обход не работает' 'Служба обхода остановлена. Откройте zapret.bat и нажмите 1 - меню покажет причину.' | Out-Null }
 $state['service'] = $down
 

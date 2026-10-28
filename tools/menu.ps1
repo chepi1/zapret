@@ -76,16 +76,16 @@ function Show-Header {
         $(if (Get-OurService) { 'автозапуск с Windows' }))
     Write-BoxTop (' zapret v' + $Script:Version + ' ')
     Write-BoxRow ('  ' + (@($state | Where-Object { $_ }) -join ' · ')) -Rgb @(255, 200, 220)
-    $bad = @(Test-PackageIntegrity)
+    $bad = @(Test-PackageIntegrity -Cached)
     if ($bad.Count) { Write-BoxRow ('  ! Файлы zapret2 изменены (' + ($bad -join ', ') + '): обход не запустится. Скачайте сборку заново.') Red }
     if (Test-AutotuneRunning) { Write-BoxRow '  ! Идёт автонастройка по расписанию: обход включится сам через несколько минут.' Yellow }
     if ($Script:Root -match "[^\x21-\x7E]|'") { Write-BoxRow '  ! В пути к папке пробелы, апостроф или русские буквы - надёжнее перенести в C:\zapret' Yellow }
     $foreign = @(Get-ForeignBypass)
     if ($foreign.Count) { Write-BoxRow ('  ! Запущен другой обход: ' + ($foreign -join ', ') + '. Пункт 1 предложит его остановить.') Yellow }
-    foreach ($b in @(Get-GameBoosters)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
-    $conf = @(Get-SystemConflicts)
+    foreach ($b in @(Get-GameBoosters -Cached)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
+    $conf = @(Get-SystemConflicts -Cached)
     if ($conf.Count) { Write-BoxRow ('  ! Мешает обходу: ' + (($conf | ForEach-Object { ($_.Text -split '[:(]')[0].Trim() }) -join ', ') + ' - подробно в пункте 5.') Yellow }
-    $stuck = @(Get-ProxyStuckApps)
+    $stuck = @(Get-ProxyStuckApps -Cached)
     if ($stuck.Count) { Write-BoxRow ('  ! ' + ($stuck -join ' и ') + ' ходит через выключенный прокси и сидит без сети (в Доте нет цен, не работает "Играть"). Перезапуск - пункт 5.') Yellow }
     $hs = Get-HostsStatus
     if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 5.' Yellow }
