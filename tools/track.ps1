@@ -252,6 +252,19 @@ $matchHistory = New-Object System.Collections.Generic.List[string]
 $matchStats = [ordered]@{}   # "ip|port" -> скорости по интервалам для итога
 
 # Итог: серверы матча с их статистикой и все адреса. $Final = $false - промежуточный (трекер ещё работает).
+# Паузы между пакетами (мс) по отметкам времени журнала сети: самая длинная и сколько было длиннее 100 мс.
+# У сервера матча 2K пакеты идут каждые ~50 мс, поэтому пауза больше 100 мс - это рывок.
+function Get-Gaps($Recs) {
+    $t = @($Recs | ForEach-Object { $_.Time } | Sort-Object)
+    $max = 0.0; $n = 0
+    for ($i = 1; $i -lt $t.Count; $i++) {
+        $g = ($t[$i] - $t[$i - 1]).TotalMilliseconds
+        if ($g -gt $max) { $max = $g }
+        if ($g -gt 100) { $n++ }
+    }
+    return New-Object PSObject -Property @{ Max = [math]::Round($max); Over100 = $n }
+}
+
 function Get-SummaryLines([bool]$Final) {
     $s = New-Object System.Collections.Generic.List[string]
     $s.Add('')
@@ -283,6 +296,9 @@ function Get-SummaryLines([bool]$Final) {
                 (Format-Endpoint $ms.Ip $ms.Port 46), (Get-GeoText $ms.Ip 50), $ms.First, $ms.Last, ($ms.Last - $ms.First),
                 ($ms.Out / [math]::Max($ms.Sec, 1)), ($ms.InTotal / [math]::Max($ms.Sec, 1)),
                 $(if ($sorted.Count) { $sorted[0] } else { 0 }), $med, $(if ($sorted.Count) { $sorted[-1] } else { 0 }), $dips, (Get-PingText $ms.Ip)))
+            $why = if ($ms.InGaps -gt 2 * [math]::Max($ms.OutGaps, 1)) { 'рывки только в приходящих: пакеты матча теряет или придерживает сеть' }
+                elseif ($ms.OutGaps -gt 0) { 'паузы и в исходящих: подвисает сама игра' } else { 'рывков нет' }
+            $s.Add(('  паузы между пакетами (больше 100 мс) вых/вх: {0}/{1}, самая длинная вых/вх: {2}/{3} мс - {4}' -f $ms.OutGaps, $ms.InGaps, $ms.OutGapMax, $ms.InGapMax, $why))
         }
     } else { $s.Add('Активный UDP-сервер (матч / голос) не обнаружен.') }
     $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход):')
@@ -409,13 +425,21 @@ try {
             }
             if (-not $matchStats.Contains($mk)) {
                 $matchStats[$mk] = @{ Ip = $m.Ip; Port = $m.Port; First = $now; Last = $now; Sec = 0.0; Out = 0; InTotal = 0
-                    In = (New-Object System.Collections.Generic.List[double]) }
+                    In = (New-Object System.Collections.Generic.List[double]); InGapMax = 0; InGaps = 0; OutGapMax = 0; OutGaps = 0 }
             }
             $ms = $matchStats[$mk]
             $ms.Last = $now; $ms.Sec += $chunkSec; $ms.Out += $m.IOut; $ms.InTotal += $m.IIn
             $ms.In.Add([math]::Round($m.IIn / $chunkSec, 1))
-            Write-Log ('{0:HH:mm:ss} матч   {1} пак/с {2:N1}/{3:N1} (вых/вх), {4:N0} кбит/с, интервал {5:N1} с, пинг {6}' -f $now, (Format-Endpoint $m.Ip $m.Port 44),
-                ($m.IOut / $chunkSec), ($m.IIn / $chunkSec), ($m.IBytes * 8 / 1000 / $chunkSec), $chunkSec, (Get-PingText $m.Ip))
+            # рывки: пауза только в приходящих (исходящие ровные) - пакеты теряет или придерживает сеть;
+            # пауза и в исходящих - подвисла сама игра (в это время она ничего не отправляла)
+            $mRecs = @($recs | Where-Object { $_.Proto -eq 'udp' -and $_.Ip -eq $m.Ip -and $_.Port -eq $m.Port })
+            $gIn = Get-Gaps @($mRecs | Where-Object { $_.Dir -eq 'in' })
+            $gOut = Get-Gaps @($mRecs | Where-Object { $_.Dir -eq 'out' })
+            if ($gIn.Max -gt $ms.InGapMax) { $ms.InGapMax = $gIn.Max }
+            if ($gOut.Max -gt $ms.OutGapMax) { $ms.OutGapMax = $gOut.Max }
+            $ms.InGaps += $gIn.Over100; $ms.OutGaps += $gOut.Over100
+            Write-Log ('{0:HH:mm:ss} матч   {1} пак/с {2:N1}/{3:N1} (вых/вх), {4:N0} кбит/с, интервал {5:N1} с, пинг {6} | паузы вых/вх: макс {7}/{8} мс, больше 100 мс: {9}/{10}' -f $now, (Format-Endpoint $m.Ip $m.Port 44),
+                ($m.IOut / $chunkSec), ($m.IIn / $chunkSec), ($m.IBytes * 8 / 1000 / $chunkSec), $chunkSec, (Get-PingText $m.Ip), $gOut.Max, $gIn.Max, $gOut.Over100, $gIn.Over100)
         }
         # программа ходит через локальный прокси? (проверяем каждый круг, порты прокси - раз в минуту)
         if (-not $Replay) {
