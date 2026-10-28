@@ -151,7 +151,6 @@ function Get-PingText([string]$Ip) {
 $settings = Get-Settings
 function Get-BypassText([string]$Owner, [string]$Proto, [int]$Port) {
     if ($Owner -eq 'Take-Two') { return 'нет (2K)' }
-    if ($Owner -eq 'Valve') { return 'нет (Valve)' }
     if ($Owner -eq 'исключено') { return 'нет (исключено вами)' }
     # голос Discord: отдельный профиль по портам и распознаванию протокола, списки не нужны
     if ($Proto -eq 'udp' -and (($Port -ge 19294 -and $Port -le 19344) -or ($Port -ge 50000 -and $Port -le 50100))) { return 'да (голос)' }

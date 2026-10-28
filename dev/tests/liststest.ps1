@@ -22,8 +22,6 @@ Check 'list-general content = original' ((@(Get-ListLines $lg) -join "`n") -eq (
 $gg = $res | Where-Object { $_.Name -eq 'list-google.txt' }
 Check 'unchanged list touched mtime' ($gg.Ok -and -not $gg.Changed -and ((Get-Date) - (Get-Item (Join-Path $Script:Lists 'list-google.txt')).LastWriteTime).TotalMinutes -lt 5)
 Check 'all ok' (@($res | Where-Object { -not $_.Ok }).Count -eq 0)
-$v = $res | Where-Object { $_.Name -eq 'ipset-valve.txt' }
-Check 'valve list: nets and relays' ($v.Ok -and @(Get-ListLines (Join-Path $Script:Lists 'ipset-valve.txt')).Count -gt 100)
 
 # плохой адрес - старый файл остаётся
 $Script:FlowsealRaw = 'https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/refs/heads/main/nonexistent/'

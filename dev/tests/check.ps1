@@ -36,7 +36,6 @@ foreach ($c in $cases) {
 $list = New-BypassArgList -Settings $base
 'profiles: ' + ((@($list | Where-Object { $_ -match '^--(name|new)=' }) | ForEach-Object { $_ -replace '^--(name|new)=', '' }) -join ', ')
 if (@($list | Where-Object { $_ -match '^--ipset-exclude=.*taketwo' }).Count -lt 8) { 'FAIL серверы Take-Two исключены не во всех профилях'; $fails++ }
-if (@($list | Where-Object { $_ -match '^--ipset-exclude=.*valve' }).Count -lt 8) { 'FAIL серверы Valve исключены не во всех профилях'; $fails++ }
 $len = (ConvertTo-WinCmdLine $list).Length
 'cmdline length: ' + $len
 if ($len -gt 30000) { 'FAIL командная строка близко к пределу Windows'; $fails++ }
