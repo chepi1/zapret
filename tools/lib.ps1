@@ -764,6 +764,14 @@ function Get-StartFailureHints([string]$Text) {
     if ($Text -match '(?i)access is denied|отказано в доступе') { $h += 'Отказано в доступе: антивирус блокирует winws2.exe или WinDivert64.sys - добавьте папку в исключения антивируса.' }
     if ($Text -match '(?i)\b1053\b|timely|своевременно') { $h += 'Служба не ответила Windows вовремя: обычно её держит проверка антивирусом. Добавьте папку в исключения антивируса.' }
     if ($Text -match '(?i)cannot find the file|не удается найти указанный файл') { $h += 'Не найден файл: антивирус удалил winws2.exe или WinDivert64.sys. Добавьте папку в исключения и распакуйте архив заново.' }
+    # FWP_E_IN_USE (0x8032000A): у Windows остались фильтры прошлого запуска. Было при перезапуске обхода посреди игры с античитом
+    if ($Text -match '(?i)referenced by other objects|0x8032000A|ссылаются другие объекты') {
+        $games = @(Get-Process -Name $Script:GameProcessNames -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+        $msg = 'Драйвер WinDivert не смог поставить фильтры: Windows держит фильтры прошлого запуска (0x8032000A).'
+        if ($games.Count) { $msg += ' Так бывает, если перезапускать обход при открытой игре с античитом, а сейчас открыто: ' + ($games -join ', ') + '. Закройте игру, запустите обход (пункт 1), потом игру. Не поможет - перезагрузите ПК.' }
+        else { $msg += ' Перезагрузите ПК и запускайте обход до игры.' }
+        $h += $msg
+    }
     return $h
 }
 
@@ -778,10 +786,14 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
     if ($StartError) { $lines.Add('Windows: ' + $StartError) }
     $svc = $null
     try { $svc = Get-CimInstance Win32_Service -Filter ("Name='" + $Script:ServiceName + "'") -ErrorAction Stop } catch { }
-    # 1077 - службу с загрузки ещё не запускали
-    if ($svc -and @(0, 1077) -notcontains [int]$svc.ExitCode) {
-        $code = if ([int]$svc.ExitCode -eq 1066) { 'winws2 вернул код ' + $svc.ServiceSpecificExitCode }
-        else { '{0} - {1}' -f $svc.ExitCode, (New-Object System.ComponentModel.Win32Exception([int]$svc.ExitCode)).Message }
+    # 1077 - службу с загрузки ещё не запускали. Коды WFP (0x8032....) больше Int32: в Win32Exception - как отрицательное число
+    $ec = if ($svc) { [int64]$svc.ExitCode } else { 0 }
+    if ($svc -and @(0, 1077) -notcontains $ec) {
+        $code = if ($ec -eq 1066) { 'winws2 вернул код ' + $svc.ServiceSpecificExitCode }
+        else {
+            $num = if ($ec -gt 0xFFFF) { '0x{0:X8}' -f $ec } else { [string]$ec }
+            '{0} - {1}' -f $num, (New-Object System.ComponentModel.Win32Exception([BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$ec), 0))).Message
+        }
         $lines.Add('служба завершилась: ' + $code)
     }
     foreach ($e in @(Get-ServiceEvents $Since)) { $lines.Add('журнал Windows: ' + $e) }
