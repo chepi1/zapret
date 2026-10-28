@@ -12,11 +12,12 @@
 
 `strategies\*.txt` — стратегии Flowseal и примеры из документации zapret2, переведённые в формат этой сборки.
 
-По кнопке (Инструменты → 8) сборка скачивает [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) © Flowseal (MIT) с его страницы релизов в `runtime\tg-ws-proxy`. В архиве и репозитории его нет.
+`tools\tgbridge.cs` — мост Telegram: перенос на C# основной логики [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) © Flowseal (обфускация MTProto, WebSocket к веб-версии Telegram, пул соединений). MIT — [LICENSE-tg-ws-proxy.txt](LICENSE-tg-ws-proxy.txt).
 
 SHA-256 файлов zapret2 — в [CHECKSUMS.txt](CHECKSUMS.txt): их можно сверить с официальным релизом zapret2.
 
 Внешние сервисы, к которым обращаются скрипты, все по HTTPS:
 - **ipwho.is**, запасной **ipinfo.io** — провайдер и страна при проверке подключения, где находятся серверы в трекере;
 - **GitHub** — свежие списки Flowseal и номера новых версий;
+- **web.telegram.org** — веб-вход Telegram, если включён мост Telegram;
 - **hyperion-cs.github.io** — актуальный набор хостингов для проверки 16–20 КБ.

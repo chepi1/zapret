@@ -87,6 +87,9 @@ if ($sites) {
 
 Add-File 'Параметры winws2 (последний запуск)' (Join-Path $Script:Runtime 'args-active.txt')
 Add-File 'Последний сбой запуска обхода' (Join-Path $Script:Runtime 'start-error.txt')
+Add-Section 'Telegram'
+$r.Add('Мост Telegram: ' + $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' } } else { 'выключен' }))
+Add-File 'Журнал моста Telegram (последние строки)' (Join-Path $Script:Runtime 'tgbridge.log') 40
 Add-File 'Последний автоподбор' (Join-Path $Script:Runtime 'test-last.txt') -StopAt 'Подробно'
 Add-File 'Журнал автонастройки' (Join-Path $Script:Runtime 'autotune.log') 30
 Add-File 'Последний сканер' (Join-Path $Script:Runtime 'scan-last.txt')
