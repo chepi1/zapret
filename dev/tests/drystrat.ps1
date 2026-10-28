@@ -27,6 +27,11 @@ try {
     Write-TextNoBom $rankPath (($lines -join "`r`n") + "`r`n")
     $s = Get-Settings; $s.alt = '7'; $s.auto = 'on'
     Write-Host ('ring general: ' + ((Get-RotationOrder '7' 'general' | ForEach-Object { $_.Name }) -join ' > '))
+    # круг игры от рейтинга не зависит: основная и RotationPref
+    $game = (@(Get-RotationOrder '7' 'game_tcp' | ForEach-Object { $_.Id })) -join ','
+    $want = (@('7') + @($Script:RotationPref)) -join ','
+    if ($game -eq $want) { Write-Host ('ring game: ' + $game) -ForegroundColor Green }
+    else { Write-Host ('FAIL ring game: ' + $game + ', ждали ' + $want) -ForegroundColor Red; $fails++ }
     $r = Test-ConfigDry $s
     $cmd = Get-BypassCmdLine -Settings $s -Name 'devring'
     Write-Host ('ring dry-run: ' + $(if ($r.Ok) { 'OK' } else { 'FAIL ' + $r.Output })) -ForegroundColor $(if ($r.Ok) { 'Green' } else { 'Red' })
