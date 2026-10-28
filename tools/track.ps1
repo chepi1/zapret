@@ -265,6 +265,44 @@ function Get-Gaps($Recs) {
     return New-Object PSObject -Property @{ Max = [math]::Round($max); Over100 = $n }
 }
 
+# Рывки игры по отдельности: паузы в исходящих пакетах матча от $MinMs - начало, конец, длительность
+function Get-GapList($Recs, [int]$MinMs) {
+    $t = @($Recs | ForEach-Object { $_.Time } | Sort-Object)
+    $list = @()
+    for ($i = 1; $i -lt $t.Count; $i++) {
+        $g = ($t[$i] - $t[$i - 1]).TotalMilliseconds
+        if ($g -ge $MinMs) { $list += New-Object PSObject -Property @{ Start = $t[$i - 1]; End = $t[$i]; Ms = [math]::Round($g) } }
+    }
+    return $list
+}
+
+# Что игра и EAC делали в сети вокруг рывка: соединения с пакетами за 1,5 с до него и во время него.
+# Wait - самое долгое ожидание ответа по соединению (от отправки до следующего приёма), если оно накрывает рывок:
+# так видно, не стояла ли игра, ожидая ответа сервера. -1 - ответа не было до конца куска журнала.
+$gapKeep = 1500
+function Get-GapContext($Recs, $Gap, [string]$SkipKey) {
+    $from = $Gap.Start.AddMilliseconds(-$gapKeep)
+    $near = @($Recs | Where-Object { $_.Time -ge $from -and $_.Time -le $Gap.End -and $_.Dir -ne 'ctl' -and ('{0}|{1}|{2}' -f $_.Proto, $_.Ip, $_.Port) -ne $SkipKey })
+    $res = @()
+    foreach ($grp in @($near | Group-Object { '{0}|{1}|{2}' -f $_.Proto, $_.Ip, $_.Port })) {
+        $f = $grp.Group[0]
+        $ins = @($Recs | Where-Object { $_.Dir -eq 'in' -and $_.Proto -eq $f.Proto -and $_.Ip -eq $f.Ip -and $_.Port -eq $f.Port } | ForEach-Object { $_.Time } | Sort-Object)
+        $wait = 0
+        foreach ($s in @($grp.Group | Where-Object { $_.Dir -eq 'out' })) {
+            $resp = $ins | Where-Object { $_ -gt $s.Time } | Select-Object -First 1
+            if (-not $resp) { $wait = -1; break }
+            if ($resp -lt $Gap.Start) { continue }
+            $w = [math]::Round(($resp - $s.Time).TotalMilliseconds)
+            if ($w -gt $wait) { $wait = $w }
+        }
+        $res += New-Object PSObject -Property @{ Key = $grp.Name; Proto = $f.Proto; Ip = $f.Ip; Port = $f.Port; Proc = $f.Proc
+            Out = @($grp.Group | Where-Object { $_.Dir -eq 'out' }).Count; In = @($grp.Group | Where-Object { $_.Dir -eq 'in' }).Count
+            Retx = @($grp.Group | Where-Object { $_.Dir -eq 'retx' }).Count; Wait = $wait }
+    }
+    return @($res | Sort-Object @{ Expression = { if ($_.Wait -lt 0) { 1e9 } else { $_.Wait } }; Descending = $true }, @{ Expression = { $_.Out + $_.In }; Descending = $true })
+}
+$gapStats = @{ Total = 0; Quiet = 0; Flows = @{} }   # для итога: сколько рывков и какие соединения чаще всего были рядом
+
 function Get-SummaryLines([bool]$Final) {
     $s = New-Object System.Collections.Generic.List[string]
     $s.Add('')
@@ -299,6 +337,16 @@ function Get-SummaryLines([bool]$Final) {
             $why = if ($ms.InGaps -gt 2 * [math]::Max($ms.OutGaps, 1)) { 'рывки только в приходящих: пакеты матча теряет или придерживает сеть' }
                 elseif ($ms.OutGaps -gt 0) { 'паузы и в исходящих: подвисает сама игра' } else { 'рывков нет' }
             $s.Add(('  паузы между пакетами (больше 100 мс) вых/вх: {0}/{1}, самая длинная вых/вх: {2}/{3} мс - {4}' -f $ms.OutGaps, $ms.InGaps, $ms.OutGapMax, $ms.InGapMax, $why))
+        }
+        if ($gapStats.Total) {
+            $s.Add(('Рывки игры (не отправляла пакеты матча 250 мс и дольше): {0}, из них без сети игры рядом: {1}.' -f $gapStats.Total, $gapStats.Quiet))
+            $top = @($gapStats.Flows.Values | Sort-Object @{ Expression = { $_.Waits }; Descending = $true }, @{ Expression = { $_.Count }; Descending = $true } | Select-Object -First 5)
+            if ($top.Count) { $s.Add('  чаще всего рядом с рывками (за 1,5 с до рывка и во время него):') }
+            foreach ($t in $top) {
+                $f = $t.Flow; $x = $ep[$f.Key]
+                $s.Add(('  {0} {1} {2} | рядом с {3} из {4} рывков, ждала ответа в {5} | {6} | обход: {7}' -f $f.Proto.ToUpper(), (Format-Endpoint $f.Ip $f.Port 40), $f.Proc,
+                    $t.Count, $gapStats.Total, $t.Waits, (Get-GeoText $f.Ip 50), $(if ($x) { Get-BypassText $x.Owner $f.Proto ([int]$f.Port) } else { '?' })))
+            }
         }
     } else { $s.Add('Активный UDP-сервер (матч / голос) не обнаружен.') }
     $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход):')
@@ -440,6 +488,29 @@ try {
             $ms.InGaps += $gIn.Over100; $ms.OutGaps += $gOut.Over100
             Write-Log ('{0:HH:mm:ss} матч   {1} пак/с {2:N1}/{3:N1} (вых/вх), {4:N0} кбит/с, интервал {5:N1} с, пинг {6} | паузы вых/вх: макс {7}/{8} мс, больше 100 мс: {9}/{10}' -f $now, (Format-Endpoint $m.Ip $m.Port 44),
                 ($m.IOut / $chunkSec), ($m.IIn / $chunkSec), ($m.IBytes * 8 / 1000 / $chunkSec), $chunkSec, (Get-PingText $m.Ip), $gOut.Max, $gIn.Max, $gOut.Over100, $gIn.Over100)
+            # каждый рывок от 250 мс (пакеты матча идут каждые ~50 мс) - и что в это время было в сети у игры и EAC
+            $sorted = @($recs | Sort-Object Time)
+            $nGap = 0
+            foreach ($gap in @(Get-GapList @($mRecs | Where-Object { $_.Dir -eq 'out' }) 250)) {
+                $gapStats.Total++
+                $ctx = @(Get-GapContext $sorted $gap ('udp|{0}|{1}' -f $m.Ip, $m.Port))
+                if (-not $ctx.Count) { $gapStats.Quiet++ }
+                foreach ($c in $ctx) {
+                    if (-not $gapStats.Flows.ContainsKey($c.Key)) { $gapStats.Flows[$c.Key] = @{ Flow = $c; Count = 0; Waits = 0 } }
+                    $gapStats.Flows[$c.Key].Count++
+                    if ($c.Wait -lt 0 -or $c.Wait -ge 200) { $gapStats.Flows[$c.Key].Waits++ }
+                }
+                if (++$nGap -gt 5) { continue }
+                $what = if (-not $ctx.Count) { 'сеть игры рядом молчала: подвисание не из-за ожидания сети' } else {
+                    (@($ctx | Select-Object -First 4 | ForEach-Object {
+                        $x = $ep[$_.Key]
+                        '{0} {1} {2} вых/вх {3}/{4}{5}{6} (обход: {7})' -f $_.Proto.ToUpper(), (Format-Endpoint $_.Ip $_.Port 40), $_.Proc, $_.Out, $_.In,
+                            $(if ($_.Retx) { ', retx ' + $_.Retx } else { '' }),
+                            $(if ($_.Wait -lt 0) { ', ответа не было' } elseif ($_.Wait -ge 200) { ', ждала ответа ' + $_.Wait + ' мс' } else { '' }),
+                            $(if ($x) { Get-BypassText $x.Owner $_.Proto ([int]$_.Port) } else { '?' })
+                    })) -join '; ' }
+                Write-Log ('{0:HH:mm:ss.fff} рывок  игра не отправляла {1} мс | рядом: {2}' -f $gap.Start, $gap.Ms, $what)
+            }
         }
         # программа ходит через локальный прокси? (проверяем каждый круг, порты прокси - раз в минуту)
         if (-not $Replay) {
