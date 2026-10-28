@@ -190,19 +190,19 @@ function Get-AllStrategiesOrdered {
 # ---------- рейтинг стратегий по последнему автоподбору (runtime\test-rank.txt) ----------
 # Строки: "id score ok total harm freeze ГРУППА=ok/total ...", score = пробито - вред;
 # строка "base ok total ГРУППА=ok/total ..." - прогон без обхода.
-# У каждого профиля обхода свой круг автосмены, по своим группам теста (SectionGroups):
-# YouTube - по группе YouTube, Discord - по Discord, сайты - по общему "пробито минус вред".
-# В круг попадают только стратегии, которые дают хотя бы RankMinShare прироста лучшей относительно
-# прогона без обхода. Слабые остаются в strategies\ и в автоподборе.
-# У игры (FixedRings) круг всегда стандартный: автоподбор не проверяет игру в матче. 2K и EAC открываются почти
-# со всеми стратегиями, и круг игры выбирался по сайтам: в него попадала GENERAL (только разрезка, без фейков),
-# и NBA 2K27 подвисала посреди матча.
+# Круги автосмены YouTube и Discord - по своим группам теста (SectionGroups). В круг попадают только стратегии,
+# которые дают хотя бы RankMinShare прироста лучшей относительно прогона без обхода. Слабые остаются
+# в strategies\ и в автоподборе.
+# У сайтов и игры (FixedRings) круг всегда стандартный: через профили сайтов (сети ipset-all, cloudfront.net)
+# и игровые профили ходят игры, а игру в матче автоподбор не проверяет. По его рейтингу в эти круги попадали
+# стратегии из одних фейков или одной разрезки (ALT10, SIMPLE FAKE ALT2, GENERAL), и NBA 2K27 подвисала
+# посреди матча; со стандартными кругами - нет.
 $Script:RankFile = 'runtime/test-rank.txt'
 $Script:RankMinShare = 0.6
 # В группах на 3-4 адреса почти все стратегии набирают максимум; дальше пятой по кругу всё равно не уйдёт
 $Script:RingMax = 5
 $Script:SectionGroups = @{ google = @('YouTube'); discord_media = @('Discord') }
-$Script:FixedRings = @('game_tcp')
+$Script:FixedRings = @('general', 'ipset_tcp', 'game_tcp')
 $Script:SectionTitles = [ordered]@{ general = 'сайты'; google = 'YouTube'; discord_media = 'Discord'; game_tcp = 'игра' }
 
 # Баллы автоподбора бывают дробными: адрес, открывшийся только со второй попытки, даёт полбалла.
@@ -234,7 +234,7 @@ function Get-TestRank {
 }
 
 # Стратегии, достаточно сильные для профиля, от лучшей к худшей (Id). $null - по этому профилю различать нечего
-# (группа у провайдера не блокируется или рейтинг старого формата): тогда берётся круг сайтов.
+# (группа у провайдера не блокируется или рейтинг старого формата): тогда круг стандартный.
 function Get-SectionRank($Rank, [string]$Section) {
     $groups = $Script:SectionGroups[$Section]
     $score = @{}
@@ -266,16 +266,15 @@ function Save-TestRank($Base, $Alts) {
     Write-TextNoBom (Get-PkgPath $Script:RankFile) (($lines -join "`r`n") + "`r`n")
 }
 
-# Круг автосмены профиля $Section (general - сайты, google - YouTube, discord_media, game_tcp).
-# С рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные сильные.
-# Без рейтинга (автоподбор ещё не запускали) и у игры - основная и основные стратегии в порядке RotationPref.
+# Круг автосмены профиля $Section (general - сайты, ipset_tcp, google - YouTube, discord_media, game_tcp).
+# YouTube и Discord с рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные
+# сильные. Сайты и игра (FixedRings), а без рейтинга все - основная и основные стратегии в порядке RotationPref.
 function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
     $all = @(Get-Strategies | Where-Object { $_.Missing.Count -eq 0 })
     $primary = @($all | Where-Object { $_.Id -eq $PrimaryId })
     $rank = if ($Script:FixedRings -contains $Section) { $null } else { Get-TestRank }
     if ($rank) {
         $ids = Get-SectionRank $rank $Section
-        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' }
         if ($null -ne $ids) {
             $order = @()
             if ($ids -contains $PrimaryId) { $order += $primary }
