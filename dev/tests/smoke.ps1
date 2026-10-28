@@ -52,6 +52,10 @@ $t2 = [System.IO.File]::ReadAllText($errFile)
 ${function:Invoke-Native} = $origInvoke; ${function:Stop-Bypass} = $origStop; Remove-Item function:Start-Process
 $Script:ServiceName = $realService
 $okFail = ($sf1 -eq $false) -and $t1.Contains('Access is denied') -and $t1.Contains('антивирус блокирует') -and $t1.Contains('не ответила Windows вовремя') -and -not $fb1
+# фильтры прошлого запуска (код службы 0x8032000A больше Int32 - меню на нём падало)
+$okFail = $okFail -and (@(Get-StartFailureHints 'windivert: error opening filter: The object is referenced by other objects so cannot be deleted.') -join ' ').Contains('0x8032000A')
+$wfp = [int64]2150760458
+$okFail = $okFail -and ((New-Object System.ComponentModel.Win32Exception([BitConverter]::ToInt32([BitConverter]::GetBytes([uint32]$wfp), 0))).Message -match 'referenced')
 $okSvc = ($sf2 -eq $false) -and $t2.Contains('сбой только у службы') -and $script:fallbackStarted
 if ($okFail -and $okSvc) { Write-Host 'ok   причина сбоя запуска' -ForegroundColor Green }
 else { Write-Host ('FAIL причина сбоя запуска: sf1={0} sf2={1} fallback={2} | {3} || {4}' -f $sf1, $sf2, $script:fallbackStarted, $t1, $t2) -ForegroundColor Red; $fails++ }
