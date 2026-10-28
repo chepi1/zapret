@@ -75,13 +75,13 @@ $trackLog = Join-Path $tmpDir 'track.txt'
 $tb = Get-TrackBypassedNets $trackLog
 $trackOk = $tb.App -eq 'dota2' -and (@($tb.Nets) -join ',') -eq '185.25.182.0/24,2a01:bc80:4::/64'
 $src = Join-Path $tmpDir 'new\zapret'; $dst = Join-Path $tmpDir 'old'
-foreach ($p in @('tools\lib.ps1', 'lists\ipset-user.txt', 'lists\ipset-all.txt', 'lists\ipset-valve.txt', 'lists\new-list.txt', 'runtime\.keep', 'bin\same.bin')) {
+foreach ($p in @('tools\lib.ps1', 'lists\ipset-user.txt', 'lists\ipset-all.txt', 'lists\ipset-taketwo.txt', 'lists\new-list.txt', 'runtime\.keep', 'bin\same.bin')) {
     foreach ($base in @($src, $dst)) { New-Item -ItemType Directory (Split-Path -Parent (Join-Path $base $p)) -Force | Out-Null }
     [System.IO.File]::WriteAllText((Join-Path $src $p), 'new ' + $p)
     if ($p -ne 'lists\new-list.txt') { [System.IO.File]::WriteAllText((Join-Path $dst $p), $(if ($p -eq 'bin\same.bin') { 'new ' + $p } else { 'old ' + $p })) }
 }
 $plan = @(Get-UpdatePlan $src $dst | Sort-Object)
-$planOk = ($plan -join ',') -eq 'lists\ipset-valve.txt,lists\new-list.txt,tools\lib.ps1'
+$planOk = ($plan -join ',') -eq 'lists\ipset-taketwo.txt,lists\new-list.txt,tools\lib.ps1'
 $rules = @(Get-DirectRulesText)
 $rulesOk = ($rules -contains 'domain:steampowered.com') -and ($rules -contains '155.133.224.0/21') -and -not ($rules -match 'steamcommunity')
 $stuckOk = $true

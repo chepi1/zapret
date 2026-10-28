@@ -15,7 +15,7 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 - 27 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites.
 - **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm.
 - Per-server strategy rotation (`circular`), with separate rings for sites, YouTube, Discord and games.
-- Game servers that are not blocked are never touched: Take-Two (2K, EAC) and Valve (Steam, Dota 2 and CS2 relays).
+- 2K's own servers (Take-Two) are never touched: desync there breaks Easy Anti-Cheat.
 - Tools: match tracker, game address scanner, ISP check report, one-file report, diagnostics, excluding a game from the bypass by the tracker log, "direct" routing rules for proxy clients (Happ etc.).
 - Checks the PC for VPN, proxies, game boosters (ExitLag…), another bypass, broken IPv6, Flowseal hosts entries; warns when Steam or Discord got stuck on a proxy that was turned off.
 - Scheduled autotune, list updates, Windows notifications, in-menu update from GitHub releases (SHA-256 verified).
@@ -31,7 +31,7 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 ## Security and privacy
 
 - zapret2 files are verified against the official release SHA-256 before every start; code folders are locked to Administrators and SYSTEM.
-- No telemetry. Network requests (HTTPS only): ipwho.is / ipinfo.io (ISP and country), GitHub (Flowseal lists, new versions, updates), Steam API (Valve relay addresses), hyperion-cs.github.io (test hosting set), the autotest targets.
+- No telemetry. Network requests (HTTPS only): ipwho.is / ipinfo.io (ISP and country), GitHub (Flowseal lists, new versions, updates), web.telegram.org (when the Telegram bridge is on), hyperion-cs.github.io (test hosting set), the autotest targets.
 - Reports hide the last octet of your IP and your Windows user name.
 
 ## License

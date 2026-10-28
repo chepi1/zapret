@@ -126,7 +126,6 @@ $sets = Get-OwnerSets
 $ownerText = @{
     'ipset-all'    = 'ipset-all (обход работает)'
     'Take-Two'     = 'сервер 2K (не трогаем: не заблокирован, нужен EAC)'
-    'Valve'        = 'сервер Valve (не трогаем: не заблокирован)'
     'исключено'    = 'исключено вами (ipset-exclude-user.txt)'
     'найден ранее' = 'ipset-user (обход работает)'
     'AWS'          = 'AWS, но НЕТ в ipset-all (обход не трогает)'
@@ -147,7 +146,7 @@ $report = New-Object System.Collections.Generic.List[string]
 $report.Add('zapret v' + $Script:Version + ' - сканер ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ', процессы: ' + (@($procName.Values | Select-Object -Unique) -join ', '))
 Write-Color 'Адреса, с которыми общались игра и EAC:' Cyan
 foreach ($r in ($rows | Sort-Object Proto, Owner, Ip, Port)) {
-    $col = switch ($r.Owner) { 'ipset-all' { 'Gray' } 'найден ранее' { 'Gray' } 'Take-Two' { 'DarkCyan' } 'Valve' { 'DarkCyan' } default { 'Yellow' } }
+    $col = switch ($r.Owner) { 'ipset-all' { 'Gray' } 'найден ранее' { 'Gray' } 'Take-Two' { 'DarkCyan' } default { 'Yellow' } }
     $line = '  {0}  {1,-40} порт {2,-5}  {3,-22} {4}' -f $r.Proto.ToUpper(), $r.Ip, $r.Port, $r.Proc, $ownerText[$r.Owner]
     Write-Color $line $col
     $report.Add($line)
@@ -155,8 +154,8 @@ foreach ($r in ($rows | Sort-Object Proto, Owner, Ip, Port)) {
 
 $s = Get-Settings
 # порт из журнала, который не удалось разобрать, бывает не числом - такие пропускаем
-$lowUdp = @($rows | Where-Object { $_.Proto -eq 'udp' -and $_.Port -match '^\d+$' -and [int]$_.Port -lt 1024 -and @('53', '443') -notcontains $_.Port -and @('Take-Two', 'Valve') -notcontains $_.Owner })
-$lowTcp = @($rows | Where-Object { $_.Proto -eq 'tcp' -and $_.Port -match '^\d+$' -and [int]$_.Port -lt 1024 -and @('80', '443') -notcontains $_.Port -and @('Take-Two', 'Valve') -notcontains $_.Owner })
+$lowUdp = @($rows | Where-Object { $_.Proto -eq 'udp' -and $_.Port -match '^\d+$' -and [int]$_.Port -lt 1024 -and @('53', '443') -notcontains $_.Port -and $_.Owner -ne 'Take-Two' })
+$lowTcp = @($rows | Where-Object { $_.Proto -eq 'tcp' -and $_.Port -match '^\d+$' -and [int]$_.Port -lt 1024 -and @('80', '443') -notcontains $_.Port -and $_.Owner -ne 'Take-Two' })
 if ($lowUdp.Count) {
     $line = 'Внимание: игра использует UDP-порты ниже 1024 (' + (($lowUdp | ForEach-Object { $_.Port } | Select-Object -Unique) -join ', ') + '), Game Filter их не покрывает.'
     Write-Color $line Yellow; $report.Add($line)
