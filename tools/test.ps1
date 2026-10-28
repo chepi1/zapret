@@ -445,6 +445,12 @@ try {
         Write-Color ('{0} уже основная.' -f $best.Name) Green
         $apply = $false
     } elseif (-not $NoPrompt) {
+        # автоподбор проверяет сайты, а игру в матче - нет: NBA 2K27 лагала после того, как он сменил ALT12
+        # на ALT11 мягкую (лучшую для сайтов), и переставала, когда вернули ALT12
+        if ($settings.game -ne 'off') {
+            $cur = Get-Strategy $settings.alt
+            Write-Color ('Автоподбор проверяет сайты, а игру в матче проверить не может. Если игра с {0} идёт без статтеров, основную лучше не менять.' -f $(if ($cur) { $cur.Name } else { 'текущей' })) Yellow
+        }
         $apply = Read-YesNo ("Сделать {0} основной?" -f $best.Name)
     }
     if ($apply) {
