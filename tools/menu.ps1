@@ -66,13 +66,23 @@ function Write-BoxRow([string]$Text, [string]$Color = 'Gray', [int[]]$Rgb = @())
     }
 }
 
+# Сколько работает обход: " 3 ч 12 мин" (пусто, если время старта процесса не прочитать)
+function Get-UptimeText($Proc) {
+    try { $up = (Get-Date) - $Proc.StartTime } catch { return '' }
+    if ($up.TotalMinutes -lt 1) { return ' (только что)' }
+    if ($up.TotalHours -lt 1) { return (' ({0} мин)' -f [int][math]::Floor($up.TotalMinutes)) }
+    if ($up.TotalDays -lt 1) { return (' ({0} ч {1} мин)' -f [int][math]::Floor($up.TotalHours), $up.Minutes) }
+    return (' ({0} дн {1} ч)' -f [int][math]::Floor($up.TotalDays), $up.Hours)
+}
+
 # Шапка: одна строка состояния и только то, что требует действия. Прокси и VPN - в проверке обходов (пункт 5): клиент
 # прокси для браузера многие держат включённым постоянно, и строки о нём только мешали.
 function Show-Header {
     Clear-Host
     $s = Get-Settings
     $st = Get-Strategy $s.alt
-    $state = @($(if (@(Get-OurProcesses).Count) { 'Обход: РАБОТАЕТ' } else { 'Обход: остановлен' }),
+    $procs = @(Get-OurProcesses)
+    $state = @($(if ($procs.Count) { 'Обход: РАБОТАЕТ' + (Get-UptimeText $procs[0]) } else { 'Обход: остановлен' }),
         $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }),
         $(if (Get-OurService) { 'автозапуск с Windows' }),
         $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'Telegram' } else { 'Telegram: не запущен' } }))
@@ -111,7 +121,7 @@ function Show-Main {
     Write-BoxRow '  5. Проверка обходов'
     Write-BoxSep
     Write-BoxRow '  6. Настройки'
-    Write-BoxRow '  7. Инструменты: трекер, сканер, отчёты'
+    Write-BoxRow '  7. Инструменты: трекер, пинг, отчёты'
     Write-BoxRow '  0. Выход'
     Write-BoxBottom
 }
@@ -163,12 +173,13 @@ function Show-ToolsMenu {
         Write-BoxRow '  7. Правила "напрямую" для Happ (Steam, Discord, игры)'
         Write-BoxRow '  8. Telegram: встроенный мост (без VPN и программ)'
         Write-BoxRow '  9. Discord не запускается: очистить кэш'
+        Write-BoxRow '  10. Пинг до игровых серверов'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
-        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag'; '6' = 'exclude'; '7' = 'direct'; '8' = 'telegram'; '9' = 'discordcache' }
+        $map = @{ '1' = 'tracker'; '2' = 'scanner'; '3' = 'provider'; '4' = 'report'; '5' = 'diag'; '6' = 'exclude'; '7' = 'direct'; '8' = 'telegram'; '9' = 'discordcache'; '10' = 'ping' }
         if ($map.ContainsKey($c)) { Invoke-MenuAction $map[$c] } elseif ($Script:LetterKeys.ContainsKey($c)) { Invoke-MenuAction $Script:LetterKeys[$c] }
     }
 }
@@ -795,7 +806,21 @@ function Invoke-MenuAction([string]$Name) {
         'discordcache' { Clear-DiscordMenu }
         'notify' { Toggle-Notify }
         'uninstall' { Remove-ZapretFromWindows }
+        'ping' { Show-GamePing; Pause-Menu }
     }
+}
+
+# Пинг до игровых серверов: время TCP-подключения, по минимуму из четырёх попыток
+function Show-GamePing {
+    Write-Host ''
+    Write-Color 'Пинг до игровых серверов (время подключения, лучшее из 4 попыток)' White
+    $r = Measure-TcpRtt @($Script:GamePingTargets.Values)
+    foreach ($k in $Script:GamePingTargets.Keys) {
+        $ms = $r[$Script:GamePingTargets[$k]]
+        $color = if ($ms -lt 0) { 'Red' } elseif ($ms -le 80) { 'Green' } elseif ($ms -le 150) { 'Gray' } else { 'Yellow' }
+        Write-Color ('  {0,-46} {1}' -f $k, $(if ($ms -lt 0) { 'не отвечает' } else { [string]$ms + ' мс' })) $color
+    }
+    Write-Color '  Пинг в самой игре выше на время обработки сервером. Франкфурт до 60 мс из Москвы - хорошо.' Gray
 }
 
 # Всё, что сборка ставила в Windows, - одним пунктом. После этого папку можно просто удалить.
@@ -836,7 +861,9 @@ $updFlag = Join-Path $Script:Runtime 'update-restart.txt'
 if (Test-Path $updFlag) {
     $wasOn = ([System.IO.File]::ReadAllText($updFlag).Trim() -eq 'start')
     Remove-Item $updFlag -Force
-    Write-Color ('zapret обновлён до ' + $Script:Version + '.') Green
+    Write-Color ('zapret обновлён до ' + $Script:Version + '. Что нового:') Green
+    foreach ($l in @(Get-ChangelogSection $Script:Version | Select-Object -First 25)) { Write-Color ('  ' + $l) Gray }
+    Write-Color '  Полностью - CHANGELOG.md в папке сборки.' Gray
     if ($wasOn) { Start-WithChecks; Pause-Menu }
 }
 
