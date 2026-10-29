@@ -14,7 +14,7 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 
 - 27 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites.
 - **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm.
-- Per-server strategy rotation (`circular`), with YouTube and Discord rings picked by autotune; sites and games always use the standard ring.
+- Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring.
 - 2K's own servers (Take-Two) are never touched: desync there breaks Easy Anti-Cheat.
 - Tools: match tracker, game address scanner, ISP check report, one-file report, diagnostics, excluding a game from the bypass by the tracker log, "direct" routing rules for proxy clients (Happ etc.).
 - Checks the PC for VPN, proxies, game boosters (ExitLag…), another bypass, broken IPv6, Flowseal hosts entries; warns when Steam or Discord got stuck on a proxy that was turned off.

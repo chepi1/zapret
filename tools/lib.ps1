@@ -190,18 +190,20 @@ function Get-AllStrategiesOrdered {
 # ---------- рейтинг стратегий по последнему автоподбору (runtime\test-rank.txt) ----------
 # Строки: "id score ok total harm freeze ГРУППА=ok/total ...", score = пробито - вред;
 # строка "base ok total ГРУППА=ok/total ..." - прогон без обхода.
-# Круги автосмены YouTube и Discord - по своим группам теста (SectionGroups). В круг попадают только стратегии,
-# которые дают хотя бы RankMinShare прироста лучшей относительно прогона без обхода. Слабые остаются
-# в strategies\ и в автоподборе.
-# У сайтов и игры (FixedRings) круг всегда стандартный: через профили сайтов (сети ipset-all, cloudfront.net)
-# и игровые профили ходят игры, а игру в матче автоподбор не проверяет. По его рейтингу в эти круги попадали
-# стратегии из одних фейков или одной разрезки (ALT10, SIMPLE FAKE ALT2, GENERAL), которые в игре не проверены.
+# У каждого профиля обхода свой круг автосмены, по своим группам теста (SectionGroups):
+# YouTube - по группе YouTube, Discord - по Discord, сайты - по общему "пробито минус вред".
+# В круг попадают только стратегии, которые дают хотя бы RankMinShare прироста лучшей относительно
+# прогона без обхода. Слабые и вредные для обычных сайтов (seqovl ломает серверы Akamai) остаются
+# в strategies\ и в автоподборе. Стандартный круг сайтов в 1.4 пускал по кругу ALT11/ALT12, и сайты Akamai
+# (Bing, Adobe, Sony) висели на TLS.
+# У игры (FixedRings) круг стандартный: автоподбор не проверяет игру в матче, 2K и EAC открываются почти со всеми
+# стратегиями, и круг игры выбирался бы по сайтам.
 $Script:RankFile = 'runtime/test-rank.txt'
 $Script:RankMinShare = 0.6
 # В группах на 3-4 адреса почти все стратегии набирают максимум; дальше пятой по кругу всё равно не уйдёт
 $Script:RingMax = 5
 $Script:SectionGroups = @{ google = @('YouTube'); discord_media = @('Discord') }
-$Script:FixedRings = @('general', 'ipset_tcp', 'game_tcp')
+$Script:FixedRings = @('game_tcp')
 $Script:SectionTitles = [ordered]@{ general = 'сайты'; google = 'YouTube'; discord_media = 'Discord'; game_tcp = 'игра' }
 
 # Баллы автоподбора бывают дробными: адрес, открывшийся только со второй попытки, даёт полбалла.
@@ -233,7 +235,7 @@ function Get-TestRank {
 }
 
 # Стратегии, достаточно сильные для профиля, от лучшей к худшей (Id). $null - по этому профилю различать нечего
-# (группа у провайдера не блокируется или рейтинг старого формата): тогда круг стандартный.
+# (группа у провайдера не блокируется или рейтинг старого формата): тогда берётся круг сайтов.
 function Get-SectionRank($Rank, [string]$Section) {
     $groups = $Script:SectionGroups[$Section]
     $score = @{}
@@ -266,14 +268,15 @@ function Save-TestRank($Base, $Alts) {
 }
 
 # Круг автосмены профиля $Section (general - сайты, ipset_tcp, google - YouTube, discord_media, game_tcp).
-# YouTube и Discord с рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные
-# сильные. Сайты и игра (FixedRings), а без рейтинга все - основная и основные стратегии в порядке RotationPref.
+# С рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные сильные.
+# Без рейтинга (автоподбор ещё не запускали) и у игры (FixedRings) - основная и основные стратегии в порядке RotationPref.
 function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
     $all = @(Get-Strategies | Where-Object { $_.Missing.Count -eq 0 })
     $primary = @($all | Where-Object { $_.Id -eq $PrimaryId })
     $rank = if ($Script:FixedRings -contains $Section) { $null } else { Get-TestRank }
     if ($rank) {
         $ids = Get-SectionRank $rank $Section
+        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' }
         if ($null -ne $ids) {
             $order = @()
             if ($ids -contains $PrimaryId) { $order += $primary }
@@ -602,8 +605,24 @@ function Stop-Bypass([switch]$Unload) {
     foreach ($p in (Get-OurProcesses)) {
         try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
     }
-    Start-Sleep -Milliseconds 500
+    # ждём, пока процессы действительно завершатся (обычно сразу), а не фиксированные полсекунды
+    for ($i = 0; $i -lt 30 -and @(Get-OurProcesses).Count; $i++) { Start-Sleep -Milliseconds 100 }
     if ($Unload) { return (Remove-WinDivertDriver) }
+}
+
+# winws2 (cygwin) изредка падает сразу после старта, а с ошибкой WinDivert выходит за доли секунды. Запуск удачный,
+# когда процесс проработал $AliveMs подряд; раньше ждали фиксированные 3 секунды при каждом запуске.
+function Wait-BypassAlive([int]$TimeoutMs = 4000, [int]$AliveMs = 1200) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $since = -1
+    while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
+        if (@(Get-OurProcesses).Count) {
+            if ($since -lt 0) { $since = $sw.ElapsedMilliseconds }
+            elseif ($sw.ElapsedMilliseconds - $since -ge $AliveMs) { return $true }
+        } else { $since = -1 }
+        Start-Sleep -Milliseconds 150
+    }
+    return (@(Get-OurProcesses).Count -gt 0)
 }
 
 # ---------- драйвер WinDivert ----------
@@ -708,13 +727,11 @@ function Start-Bypass([switch]$Quiet) {
         # без окна: ошибки запуска видны через Инструменты -> 5 (диагностика)
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
     }
-    Start-Sleep -Seconds 3
-    $alive = @(Get-OurProcesses).Count -gt 0
+    $alive = Wait-BypassAlive
     if (-not $alive -and -not $svc) {
         # winws2 (cygwin) изредка падает при старте без причины - ещё одна попытка (у службы есть свой перезапуск)
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
-        Start-Sleep -Seconds 3
-        $alive = @(Get-OurProcesses).Count -gt 0
+        $alive = Wait-BypassAlive
     }
     if (-not $alive) {
         Write-Color $(if ($svc) { 'Служба обхода не запустилась.' } else { 'winws2 завершился сразу после запуска.' }) Red
@@ -862,8 +879,7 @@ function Install-BypassService {
         -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic | Out-Null
     & sc.exe failure $Script:ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
     $err = Start-OurService
-    Start-Sleep -Seconds 3
-    if (@(Get-OurProcesses).Count -gt 0) { Set-HighPriority; return $true }
+    if (Wait-BypassAlive) { Set-HighPriority; return $true }
     Write-Color 'Служба не запустилась и удалена.' Red
     Show-StartFailure $err $since -RemoveService | Out-Null
     return $false
@@ -2002,6 +2018,19 @@ function Update-UpstreamCheck([int]$Days = 7, [switch]$Force) {
     if ($self) { $lines += ('zapret={0}' -f $self) }
     Write-TextNoBom $f (($lines -join "`r`n") + "`r`n")
     return $true
+}
+
+# То же в фоне, отдельным скрытым процессом: до четырёх запросов к GitHub по 5 с задерживали открытие меню.
+# Новости появятся в шапке при следующей перерисовке. Процесс запускается, только когда проверка уже нужна.
+function Start-UpstreamCheck([int]$Days = 7) {
+    $f = Get-PkgPath $Script:UpdatesFile
+    if ((Test-Path $f) -and ((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays -lt $Days) { return }
+    $cmd = ". '" + (Join-Path $Script:Root 'tools\lib.ps1').Replace("'", "''") + "'; Update-UpstreamCheck -Days $Days | Out-Null"
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
+    try {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden `
+            -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ' + $enc) | Out-Null
+    } catch { }
 }
 
 # Новее ли тег релиза, чем версия в сборке. По числам: 1.10.4 новее 1.9, v1.0 и 1.0 - одно и то же.

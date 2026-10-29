@@ -25,8 +25,8 @@ Update-LegacyNames
 
 function Pause-Menu { Read-Host 'Enter - назад в меню' | Out-Null }
 
-# новые версии zapret, zapret2 и Flowseal - раз в 3 дня при открытии меню (ответ GitHub запоминается в runtime\updates.txt)
-try { Update-UpstreamCheck -Days 3 | Out-Null } catch { }
+# новые версии zapret, zapret2 и Flowseal - раз в 3 дня, в фоне (ответ GitHub запоминается в runtime\updates.txt)
+Start-UpstreamCheck -Days 3
 
 function Test-Running { return ((@(Get-OurProcesses).Count -gt 0) -or [bool](Get-OurService)) }
 
