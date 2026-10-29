@@ -1,5 +1,5 @@
-# name: WL GOSUSLUGI
-# desc: Как ALT11 мягкая, но фейк ClientHello - со SNI gosuslugi.ru вместо sferum.ru.
+# name: ALT11 белый 3
+# desc: Как ALT11 белый 1, но в фейке имя gosuslugi.ru.
 # origin: zapret 1.6, на основе ALT11 мягкой; YouTube, Discord и игра - как в ней
 # since: 1.6
 [quic]

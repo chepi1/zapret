@@ -34,14 +34,20 @@ try {
         if ($got -eq $want[$sec]) { Write-Host ('ring ' + $sec + ': ' + $got) -ForegroundColor Green }
         else { Write-Host ('FAIL ring ' + $sec + ': ' + $got + ', ждали ' + $want[$sec]) -ForegroundColor Red; $fails++ }
     }
-    # новые стратегии ("# since: 1.6") - в быстром автоподборе, пока рейтинг сделан более старой версией
-    $newIds = @(Get-Strategies | Where-Object { $_.Since } | ForEach-Object { $_.Id })
+    # новые стратегии ("# since:") - в быстром автоподборе, пока их нет в списке проверенных на этом ПК
+    $testedPath = Get-PkgPath $Script:TestedFile
+    $testedBackup = if (Test-Path $testedPath) { [System.IO.File]::ReadAllText($testedPath) } else { $null }
+    Remove-Item $testedPath -ErrorAction SilentlyContinue
+    $newSt = @(Get-Strategies | Where-Object { $_.Since })
+    $newIds = @($newSt | ForEach-Object { $_.Id })
     $qp = @(Get-TestStrategies | ForEach-Object { $_.Id })
     $okOld = $newIds.Count -gt 0 -and @($newIds | Where-Object { $qp -notcontains $_ }).Count -eq 0
-    Write-TextNoBom $rankPath ((@($lines[0], '# version: 99.0') + $lines[1..($lines.Count - 1)] -join "`r`n") + "`r`n")
+    Write-TextNoBom $testedPath ((@($newSt | ForEach-Object { $_.Id + '|' + $_.Name }) -join "`r`n") + "`r`n")
     $qp2 = @(Get-TestStrategies | ForEach-Object { $_.Id })
-    $okNew = @($newIds | Where-Object { $qp2 -contains $_ }).Count -eq 0
-    Write-TextNoBom $rankPath (($lines -join "`r`n") + "`r`n")
+    # основная стратегия этого ПК проверяется всегда, даже если она новая
+    $primaryId = (Get-Settings).alt
+    $okNew = @($newIds | Where-Object { $_ -ne $primaryId -and $qp2 -contains $_ }).Count -eq 0
+    if ($null -ne $testedBackup) { [System.IO.File]::WriteAllText($testedPath, $testedBackup) } else { Remove-Item $testedPath -ErrorAction SilentlyContinue }
     if ($okOld -and $okNew) { Write-Host ('new strategies in quick pool until re-ranked: ' + ($newIds -join ',')) -ForegroundColor Green }
     else { Write-Host ('FAIL new strategies in quick pool: old rank {0}, new rank {1}' -f $okOld, $okNew) -ForegroundColor Red; $fails++ }
     $r = Test-ConfigDry $s

@@ -1,5 +1,5 @@
-# name: AUTOTTL
-# desc: Как ALT11 мягкая, но фейки портятся не устаревшим timestamp, а TTL: доходят до DPI провайдера и умирают, не дойдя до сервера (число узлов до сервера узнаётся по ответу на подключение). Помогает там, где DPI отбрасывает фейки со странным timestamp.
+# name: ALT11 белый 1+3
+# desc: Как ALT11 белый 1, но фейков два: с именами max.ru и gosuslugi.ru. В автоподборе у них были разные пробитые хостинги - вместе могут пробивать больше.
 # origin: zapret 1.6, на основе ALT11 мягкой; YouTube, Discord и игра - как в ней
 # since: 1.6
 [quic]
@@ -25,11 +25,12 @@
 [general]
 --out-range=-d10
 --payload=tls_client_hello
---lua-desync=fake:blob=stun2:ip_autottl=-2,3-20:repeats=8
---lua-desync=fake:blob=tls_sferum:ip_autottl=-2,3-20:repeats=8:tls_mod=rnd,dupsid
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=fake:blob=fake_default_tls:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:tls_mod=rnd,dupsid,sni=max.ru
+--lua-desync=fake:blob=fake_default_tls:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:tls_mod=rnd,dupsid,sni=gosuslugi.ru
 --lua-desync=multisplit:pos=1
 --payload=http_req
---lua-desync=fake:blob=tls_sferum:ip_autottl=-2,3-20:repeats=8
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
 --lua-desync=multisplit:pos=1
 [game_tcp]
 --out-range=<n4

@@ -293,6 +293,18 @@ function Save-TestRank($Base, $Alts) {
         $lines += ('{0} {1} {2} {3} {4} {5} {6}' -f $r.Id, (Format-Points $r.Score), (Format-Points $r.Ok), $r.Total, $r.Harm, $r.Freeze, (Format-Groups $r))
     }
     Write-TextNoBom (Get-PkgPath $Script:RankFile) (($lines -join "`r`n") + "`r`n")
+    # какие стратегии на этом ПК уже проверялись хоть раз (номер и имя: номер могли отдать другой стратегии)
+    $tested = @(@(Get-ListLines (Get-PkgPath $Script:TestedFile)) + @($Alts | ForEach-Object { $_.Id + '|' + $_.Name }) | Select-Object -Unique)
+    Write-TextNoBom (Get-PkgPath $Script:TestedFile) (($tested -join "`r`n") + "`r`n")
+}
+
+$Script:TestedFile = 'runtime/tested-strategies.txt'
+
+# Проверялась ли стратегия на этом ПК. Пока файла нет (автоподбор был до 1.6) - смотрим номера в рейтинге
+function Test-StrategyTested($St, $Rank) {
+    $lines = @(Get-ListLines (Get-PkgPath $Script:TestedFile))
+    if ($lines.Count) { return ($lines -contains ($St.Id + '|' + $St.Name)) }
+    return [bool]($Rank -and @($Rank.Rows | Where-Object { $_.Id -eq $St.Id }).Count)
 }
 
 # Круг автосмены профиля $Section (general - сайты, ipset_tcp, google - YouTube, discord_media, game_tcp).
@@ -319,8 +331,8 @@ function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
 
 # Что проверяет автоподбор. Полный - все стратегии. Быстрый - основные (RotationPref), основная и все, кто сейчас
 # в кругах автосмены: так стратегия, найденная полным автоподбором, не выпадает из круга после быстрого.
-# Плюс новые стратегии ("# since:" новее версии, которой сделан рейтинг): пришедшие с обновлением сборки проверяются
-# первым же быстрым автоподбором, а дальше остаются в нём, только если попали в круги.
+# Плюс новые стратегии (с "# since:"), которые на этом ПК ещё не проверялись: пришедшие с обновлением сборки
+# проверяются первым же быстрым автоподбором, а дальше остаются в нём, только если попали в круги.
 function Get-TestStrategies([switch]$Full) {
     $all = @(Get-AllStrategiesOrdered)
     if ($Full) { return $all }
@@ -328,7 +340,7 @@ function Get-TestStrategies([switch]$Full) {
     $keep = @($Script:RotationPref) + @($s.alt)
     foreach ($sec in $Script:SectionTitles.Keys) { $keep += @(Get-RotationOrder $s.alt $sec | ForEach-Object { $_.Id }) }
     $rank = Get-TestRank
-    if ($rank) { $keep += @($all | Where-Object { $_.Since -and (Test-NewerVersion $_.Since $rank.Version) } | ForEach-Object { $_.Id }) }
+    if ($rank) { $keep += @($all | Where-Object { $_.Since -and -not (Test-StrategyTested $_ $rank) } | ForEach-Object { $_.Id }) }
     return @($all | Where-Object { $keep -contains $_.Id })
 }
 
