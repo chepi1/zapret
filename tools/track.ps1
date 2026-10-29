@@ -51,7 +51,7 @@ function Read-TraceFile([string]$Etl, $Local) {
         $out.Add((New-Object PSObject -Property @{
             Proto = $(if ($Script:EtwUdpIds -contains $e.Id) { 'udp' } else { 'tcp' })
             Ip = $rip; Port = (Swap16 ([int]$rport)); Dir = $dir; Size = [int]$e.Properties[1].Value
-            Proc = $procName[$evPid]; Time = $e.TimeCreated
+            Proc = $procName[$evPid]; Time = $e.TimeCreated; Ev = $e.Id
         }))
     }
     return $out
@@ -279,10 +279,13 @@ function Get-GapList($Recs, [int]$MinMs) {
 # Что игра и EAC делали в сети вокруг рывка: соединения с пакетами за 1,5 с до него и во время него.
 # Wait - самое долгое ожидание ответа по соединению (от отправки до следующего приёма), если оно накрывает рывок:
 # так видно, не стояла ли игра, ожидая ответа сервера. -1 - ответа не было до конца куска журнала.
+# Syn - попытки подключения (событие "connection attempted" и повторы SYN "reconnect attempted"): если ответа нет,
+# игра ждёт подключения, а в журнале нет ни одного пакета данных.
 $gapKeep = 1500
+$synIds = @(12, 16, 28, 32)
 function Get-GapContext($Recs, $Gap, [string]$SkipKey) {
     $from = $Gap.Start.AddMilliseconds(-$gapKeep)
-    $near = @($Recs | Where-Object { $_.Time -ge $from -and $_.Time -le $Gap.End -and $_.Dir -ne 'ctl' -and ('{0}|{1}|{2}' -f $_.Proto, $_.Ip, $_.Port) -ne $SkipKey })
+    $near = @($Recs | Where-Object { $_.Time -ge $from -and $_.Time -le $Gap.End -and ('{0}|{1}|{2}' -f $_.Proto, $_.Ip, $_.Port) -ne $SkipKey })
     $res = @()
     foreach ($grp in @($near | Group-Object { '{0}|{1}|{2}' -f $_.Proto, $_.Ip, $_.Port })) {
         $f = $grp.Group[0]
@@ -297,10 +300,20 @@ function Get-GapContext($Recs, $Gap, [string]$SkipKey) {
         }
         $res += New-Object PSObject -Property @{ Key = $grp.Name; Proto = $f.Proto; Ip = $f.Ip; Port = $f.Port; Proc = $f.Proc
             Out = @($grp.Group | Where-Object { $_.Dir -eq 'out' }).Count; In = @($grp.Group | Where-Object { $_.Dir -eq 'in' }).Count
-            Retx = @($grp.Group | Where-Object { $_.Dir -eq 'retx' }).Count; Wait = $wait }
+            Retx = @($grp.Group | Where-Object { $_.Dir -eq 'retx' }).Count; Wait = $wait
+            Syn = @($grp.Group | Where-Object { $synIds -contains $_.Ev }).Count }
     }
-    return @($res | Sort-Object @{ Expression = { if ($_.Wait -lt 0) { 1e9 } else { $_.Wait } }; Descending = $true }, @{ Expression = { $_.Out + $_.In }; Descending = $true })
+    return @($res | Sort-Object @{ Expression = { if ($_.Syn -and -not $_.In) { 2e9 } elseif ($_.Wait -lt 0) { 1e9 } else { $_.Wait } }; Descending = $true }, @{ Expression = { $_.Out + $_.In }; Descending = $true })
 }
+
+# Имена серверов из кэша DNS Windows: так видно, что за сервер стоит за адресом (имя запрашивает игра, кэш общий)
+$hostOf = @{}
+function Update-DnsNames {
+    foreach ($c in @(Get-DnsClientCache -ErrorAction SilentlyContinue)) {
+        if (($c.Type -eq 1 -or $c.Type -eq 28) -and $c.Data) { $hostOf[[string]$c.Data] = [string]$c.Entry }
+    }
+}
+function Get-NameText([string]$Ip) { if ($hostOf.ContainsKey($Ip)) { return ' ' + $hostOf[$Ip] } else { return '' } }
 $gapStats = @{ Total = 0; Quiet = 0; Flows = @{} }   # для итога: сколько рывков и какие соединения чаще всего были рядом
 
 function Get-SummaryLines([bool]$Final) {
@@ -344,16 +357,27 @@ function Get-SummaryLines([bool]$Final) {
             if ($top.Count) { $s.Add('  чаще всего рядом с рывками (за 1,5 с до рывка и во время него):') }
             foreach ($t in $top) {
                 $f = $t.Flow; $x = $ep[$f.Key]
-                $s.Add(('  {0} {1} {2} | рядом с {3} из {4} рывков, ждала ответа в {5} | {6} | обход: {7}' -f $f.Proto.ToUpper(), (Format-Endpoint $f.Ip $f.Port 40), $f.Proc,
-                    $t.Count, $gapStats.Total, $t.Waits, (Get-GeoText $f.Ip 50), $(if ($x) { Get-BypassText $x.Owner $f.Proto ([int]$f.Port) } else { '?' })))
+                $s.Add(('  {0} {1}{8} {2} | рядом с {3} из {4} рывков, ждала ответа в {5} | {6} | обход: {7}' -f $f.Proto.ToUpper(), (Format-Endpoint $f.Ip $f.Port 40), $f.Proc,
+                    $t.Count, $gapStats.Total, $t.Waits, (Get-GeoText $f.Ip 50), $(if ($x) { Get-BypassText $x.Owner $f.Proto ([int]$f.Port) } else { '?' }), (Get-NameText $f.Ip)))
             }
         }
     } else { $s.Add('Активный UDP-сервер (матч / голос) не обнаружен.') }
-    $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход):')
+    # TCP-серверы, к которым игра подключалась, а данных не было ни в одну сторону: сервер не принял подключение.
+    # Обычно это блокировка по IP: её обход (DPI) не снимает, через VPN такой сервер работает.
+    $dead = @($ep.Values | Where-Object { $_.Proto -eq 'tcp' -and $_.Syn -gt 0 -and $_.Out -eq 0 -and $_.In -eq 0 })
+    if ($dead.Count) {
+        $s.Add('Не подключились (сервер не принял подключение - обычно блокировка по IP, обход её не снимает, через VPN работает):')
+        foreach ($x in $dead) {
+            $s.Add(('  TCP {0}{1} {2} | попыток подключения {3} | {4} | обход: {5}' -f (Format-Endpoint $x.Ip $x.Port 40), (Get-NameText $x.Ip), $x.Proc, $x.Syn,
+                (Get-GeoText $x.Ip 50), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))))
+        }
+    }
+    $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход, имя):')
     foreach ($x in ($ep.Values | Sort-Object @{ Expression = { $_.Out + $_.In }; Descending = $true })) {
         $dist = Get-DistanceKm $geo[$x.Ip]
-        $s.Add(('  {0} {1,-46} {2,-10} {3,6}/{4,-6} retx {5,-3} пинг {6,-7} {7}{8} | обход: {9}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 46), $x.Proc,
-            $x.Out, $x.In, $x.Retx, (Get-PingText $x.Ip), (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))))
+        $s.Add(('  {0} {1,-46} {2,-10} {3,6}/{4,-6} retx {5,-3} пинг {6,-7} {7}{8} | обход: {9}{10}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 46), $x.Proc,
+            $x.Out, $x.In, $x.Retx, (Get-PingText $x.Ip), (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port)),
+            $(if ($hostOf.ContainsKey($x.Ip)) { ' | ' + $hostOf[$x.Ip] } else { '' })))
     }
     $touched = @($ep.Values | Where-Object { (Get-BypassText $_.Owner $_.Proto ([int]$_.Port)) -match '^да($| \((any|user)\))' })
     if ($touched.Count) { $s.Add(('Если {0} с обходом работает хуже, чем без него, адреса, которые обход трогает, можно исключить: Инструменты -> 6.' -f $AppName)) }
@@ -422,7 +446,7 @@ try {
             $key = "$($r.Proto)|$($r.Ip)|$($r.Port)"
             if (-not $ep.ContainsKey($key)) {
                 $ep[$key] = @{ Proto = $r.Proto; Ip = $r.Ip; Port = $r.Port; Proc = $r.Proc; First = $now; Last = $now
-                    Out = 0; In = 0; Bytes = 0; Retx = 0; IOut = 0; IIn = 0; IBytes = 0; IRetx = 0; Owner = (Get-Owner $r.Ip $sets); Logged = $false }
+                    Out = 0; In = 0; Bytes = 0; Retx = 0; IOut = 0; IIn = 0; IBytes = 0; IRetx = 0; Syn = 0; Owner = (Get-Owner $r.Ip $sets); Logged = $false }
             }
             $x = $ep[$key]
             $x.Last = $now
@@ -431,6 +455,7 @@ try {
                 'in'   { $x.In++; $x.IIn++; $x.Bytes += $r.Size; $x.IBytes += $r.Size }
                 'retx' { $x.Retx++; $x.IRetx++ }
             }
+            if ($synIds -contains $r.Ev) { $x.Syn++ }
         }
 
         $active = @($ep.Values | Where-Object { ($now - $_.Last).TotalSeconds -le 30 } |
@@ -446,13 +471,15 @@ try {
         }
 
         # новые адреса - в лог
+        if (-not $Replay) { Update-DnsNames }
         foreach ($x in $ep.Values) {
             if ($x.Logged -or $null -eq $geo[$x.Ip]) { continue }
             $x.Logged = $true
             $g = $geo[$x.Ip]
             $dist = Get-DistanceKm $g
-            Write-Log (('{0:HH:mm:ss} новый  {1} {2,-44} {3,-10} {4}{5} | обход: {6}' -f $x.First, $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 44), $x.Proc,
-                (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))))
+            Write-Log (('{0:HH:mm:ss} новый  {1} {2,-44} {3,-10} {4}{5} | обход: {6}{7}' -f $x.First, $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 44), $x.Proc,
+                (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port)),
+                $(if ($hostOf.ContainsKey($x.Ip)) { ' | ' + $hostOf[$x.Ip] } else { '' })))
         }
 
         # повторные отправки TCP - в лог сразу (признак потерь или блока)
@@ -504,10 +531,11 @@ try {
                 $what = if (-not $ctx.Count) { 'сеть игры рядом молчала: подвисание не из-за ожидания сети' } else {
                     (@($ctx | Select-Object -First 4 | ForEach-Object {
                         $x = $ep[$_.Key]
-                        '{0} {1} {2} вых/вх {3}/{4}{5}{6} (обход: {7})' -f $_.Proto.ToUpper(), (Format-Endpoint $_.Ip $_.Port 40), $_.Proc, $_.Out, $_.In,
+                        '{0} {1}{8} {2} вых/вх {3}/{4}{5}{9}{6} (обход: {7})' -f $_.Proto.ToUpper(), (Format-Endpoint $_.Ip $_.Port 40), $_.Proc, $_.Out, $_.In,
                             $(if ($_.Retx) { ', retx ' + $_.Retx } else { '' }),
                             $(if ($_.Wait -lt 0) { ', ответа не было' } elseif ($_.Wait -ge 200) { ', ждала ответа ' + $_.Wait + ' мс' } else { '' }),
-                            $(if ($x) { Get-BypassText $x.Owner $_.Proto ([int]$_.Port) } else { '?' })
+                            $(if ($x) { Get-BypassText $x.Owner $_.Proto ([int]$_.Port) } else { '?' }), (Get-NameText $_.Ip),
+                            $(if ($_.Syn -and -not $_.In) { ', подключалась без ответа (SYN x' + $_.Syn + ')' } elseif ($_.Syn) { ', новое подключение' } else { '' })
                     })) -join '; ' }
                 Write-Log ('{0:HH:mm:ss.fff} рывок  игра не отправляла {1} мс | рядом: {2}' -f $gap.Start, $gap.Ms, $what)
             }
