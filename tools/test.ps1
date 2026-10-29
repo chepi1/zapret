@@ -24,6 +24,8 @@ $HarmSlowMs = 500   # насколько медленнее рукопожати
 # Если заблокированных адресов не открылось больше этого, сбои у стратегии не случайные: повторяем только
 # незаблокированные сайты (вред), иначе слабые стратегии добавили бы к тесту по 15-20 секунд без пользы
 $RetryMax = 16
+# Адрес, который не открылся ни разу за столько стратегий подряд, второй раз не проверяем (Get-RetryTargets)
+$HopelessRuns = 3
 
 function Read-Targets {
     $list = @()
@@ -166,8 +168,10 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0) {
 function Get-RowKey($R) { return ($R.Group + '|' + $R.Name + '|' + $R.Url) }
 
 # Что проверить второй раз: не открывшееся (FAIL/FREEZE) и незаблокированные сайты с медленным TLS.
-function Get-RetryTargets($Targets, $Rows, $CleanBase) {
-    $blocked = @($Rows | Where-Object { $_.Group -ne 'Clean' -and ($_.State -eq 'FAIL' -or $_.State -eq 'FREEZE') })
+# $Hopeless - адреса, которые не открылись ни без обхода, ни несколькими стратегиями подряд: вторая попытка им не
+# поможет, а каждая стоила стратегии лишних секунд ожидания. Первая попытка у них остаётся.
+function Get-RetryTargets($Targets, $Rows, $CleanBase, $Hopeless = @{}) {
+    $blocked = @($Rows | Where-Object { $_.Group -ne 'Clean' -and ($_.State -eq 'FAIL' -or $_.State -eq 'FREEZE') -and -not $Hopeless.ContainsKey((Get-RowKey $_)) })
     $keys = @{}
     if ($blocked.Count -le $RetryMax) { foreach ($r in $blocked) { $keys[(Get-RowKey $r)] = $true } }
     foreach ($r in @($Rows | Where-Object { $_.Group -eq 'Clean' })) {
@@ -345,6 +349,7 @@ try {
 
     $table = @{}
     $ipSkip = @{}   # группа|имя -> строка прогона без обхода: адреса, заблокированные по IP
+    $failRuns = @{}; $everOk = @{}   # адрес -> сколько стратегий подряд он не открылся / открылся ли хоть раз
     $mode = if ($Full) { 'полный автоподбор' } else { 'быстрый автоподбор' }
     $report.Add(('{0}: {1} стратегий' -f $mode, $strategies.Count))
     Write-Color ("{0}: проверяю {1} адресов без обхода и с {2} стратегиями, раундов: {3}. Около {4} мин." -f $mode, $targets.Count, $strategies.Count, $Rounds, [math]::Ceiling(($strategies.Count + 1) * 15 * $Rounds / 60)) Cyan
@@ -368,13 +373,22 @@ try {
             # в каждом прогоне, а сразу записываем им тот же провал, что без обхода: баллы от этого не меняются
             $runTargets = if ($run.Id -ne '0' -and $ipSkip.Count) { @($targets | Where-Object { -not $ipSkip.ContainsKey($_.Group + '|' + $_.Name) }) } else { $targets }
             $res = @(Invoke-CurlBatch $runTargets $postFile)
-            # вторая попытка той же стратегией, пока winws2 ещё работает; почти все повторы помещаются в одну волну
-            $again = @(Get-RetryTargets $runTargets $res $(if ($run.Id -ne '0') { $cleanBase }))
+            # вторая попытка той же стратегией, пока winws2 ещё работает; почти все повторы помещаются в одну волну.
+            # Безнадёжные (не открылись ни разу за $HopelessRuns стратегий подряд) второй раз не проверяем
+            $hopeless = @{}
+            foreach ($k in @($failRuns.Keys)) { if ($failRuns[$k] -ge $HopelessRuns -and -not $everOk.ContainsKey($k)) { $hopeless[$k] = $true } }
+            $again = @(Get-RetryTargets $runTargets $res $(if ($run.Id -ne '0') { $cleanBase }) $hopeless)
             if ($again.Count) {
                 Write-Host -NoNewline (' повтор {0}...' -f $again.Count)
                 $res = @(Merge-Retry $res @(Invoke-CurlBatch $again $postFile ($Parallel * 2)))
             }
-            if ($run.Id -ne '0') { foreach ($k in $ipSkip.Keys) { $res += $ipSkip[$k].PSObject.Copy() } }
+            if ($run.Id -ne '0') {
+                foreach ($r in $res) {
+                    $k = Get-RowKey $r
+                    if ($r.State -eq 'OK') { $everOk[$k] = $true } elseif (-not $everOk.ContainsKey($k)) { $failRuns[$k] = 1 + [int]$failRuns[$k] }
+                }
+                foreach ($k in $ipSkip.Keys) { $res += $ipSkip[$k].PSObject.Copy() }
+            }
             elseif (-not $ipSkip.Count) {
                 foreach ($n in @(Get-IpBlocked @{ '0' = $res })) {
                     $row = $res | Where-Object { $_.Name -eq $n } | Select-Object -First 1
