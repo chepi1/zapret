@@ -1886,6 +1886,55 @@ function Test-HostsPins([int]$TimeoutSec = 6, $Pending = $null) {
     return $rows
 }
 
+# ---------- пинг до игровых серверов ----------
+# Серверы матчей отвечают только игре, поэтому пинг - временем TCP-подключения к адресу в том же дата-центре
+# (по минимуму из нескольких попыток: это и есть сетевая задержка без очередей). Все цели параллельно.
+$Script:GamePingTargets = [ordered]@{
+    'NBA 2K27: серверы матча (Amazon, Франкфурт)'  = 'ec2.eu-central-1.amazonaws.com'
+    'NBA 2K27: запись матча (Amazon, Вирджиния)'  = 'api.quago.io'
+    'NBA 2K27: вход и сервисы 2K (Cloudflare)'     = 'api.epicgames.dev'
+    'Amazon, Стокгольм'                             = 'ec2.eu-north-1.amazonaws.com'
+    'Amazon, Лондон'                                = 'ec2.eu-west-2.amazonaws.com'
+    'Steam (магазин и загрузки)'                    = 'store.steampowered.com'
+    'Discord'                                       = 'discord.com'
+}
+
+# Имя -> минимальное время TCP-подключения в мс из $Tries попыток (-1 - не подключилось ни разу)
+function Measure-TcpRtt([string[]]$Hosts, [int]$Tries = 4, [int]$TimeoutMs = 2000) {
+    $ips = @{}
+    foreach ($h in $Hosts) {
+        try { $ips[$h] = @([System.Net.Dns]::GetHostAddresses($h) | Where-Object { $_.AddressFamily -eq 'InterNetwork' })[0] } catch { $ips[$h] = $null }
+    }
+    $best = @{}
+    foreach ($h in $Hosts) { $best[$h] = -1 }
+    for ($t = 0; $t -lt $Tries; $t++) {
+        $jobs = @(foreach ($h in $Hosts) {
+            if (-not $ips[$h]) { continue }
+            $tc = New-Object System.Net.Sockets.TcpClient ([System.Net.Sockets.AddressFamily]::InterNetwork)
+            $sw = [Diagnostics.Stopwatch]::StartNew()
+            $task = $null
+            try { $task = $tc.ConnectAsync($ips[$h], 443) } catch { }
+            New-Object PSObject -Property @{ Host = $h; Tc = $tc; Task = $task; Sw = $sw }
+        })
+        # время каждого подключения - в момент, когда оно завершилось, а не когда до него дошла очередь ожидания
+        $clock = [Diagnostics.Stopwatch]::StartNew()
+        $pending = @($jobs | Where-Object { $_.Task })
+        while ($pending.Count -and $clock.ElapsedMilliseconds -lt $TimeoutMs) {
+            foreach ($j in $pending) {
+                if (-not $j.Task.IsCompleted) { continue }
+                if ($j.Task.Status -eq 'RanToCompletion') {
+                    $ms = [math]::Round($j.Sw.Elapsed.TotalMilliseconds)
+                    if ($best[$j.Host] -lt 0 -or $ms -lt $best[$j.Host]) { $best[$j.Host] = $ms }
+                }
+            }
+            $pending = @($pending | Where-Object { -not $_.Task.IsCompleted })
+            if ($pending.Count) { Start-Sleep -Milliseconds 2 }
+        }
+        foreach ($j in $jobs) { try { $j.Tc.Close() } catch { } }
+    }
+    return $best
+}
+
 # ---------- работают ли сервисы прямо сейчас ----------
 # Главный вопрос проверки обходов: открывается ли то, ради чего стоит обход. Запрос - как у браузера и игр: напрямую,
 # мимо прокси, через обход, если он запущен. Любой HTTP-ответ, даже 404, - сервис доступен: TLS прошёл, данные пришли.
@@ -2244,6 +2293,18 @@ function Update-UpstreamCheck([int]$Days = 7, [switch]$Force) {
     if ($self) { $lines += ('zapret={0}' -f $self) }
     Write-TextNoBom $f (($lines -join "`r`n") + "`r`n")
     return $true
+}
+
+# Раздел CHANGELOG.md про версию $Version - без заголовка и разметки (меню показывает его после обновления)
+function Get-ChangelogSection([string]$Version) {
+    $f = Join-Path $Script:Root 'CHANGELOG.md'
+    if (-not (Test-Path $f)) { return @() }
+    $out = @(); $in = $false
+    foreach ($l in [System.IO.File]::ReadAllLines($f, [System.Text.Encoding]::UTF8)) {
+        if ($l -match '^## ') { if ($in) { break }; $in = ($l -eq '## zapret ' + $Version); continue }
+        if ($in -and $l.Trim()) { $out += ($l -replace '^#+\s*', '' -replace '\*\*', '' -replace '`', '') }
+    }
+    return $out
 }
 
 # Сколько дней не обновлялись списки Flowseal: по времени ipset-all (оно меняется и когда списки не изменились)
