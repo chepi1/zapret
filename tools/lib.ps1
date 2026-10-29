@@ -1082,6 +1082,20 @@ function Get-SystemConflicts([switch]$Cached) {
     return $found
 }
 
+# Российские корневые сертификаты (Минцифры, "Russian Trusted Root CA" и выпущенные ими): их просят поставить для
+# госсайтов, а с ними в системе HTTPS-соединения можно подменять незаметно. Сборка их не ставит - только предупреждает.
+function Get-RussianRootCerts {
+    $res = @()
+    foreach ($store in 'Cert:\LocalMachine\Root', 'Cert:\LocalMachine\CA', 'Cert:\CurrentUser\Root', 'Cert:\CurrentUser\CA') {
+        foreach ($c in @(Get-ChildItem $store -ErrorAction SilentlyContinue)) {
+            if (($c.Subject + ' ' + $c.Issuer) -match '(?i)Russian Trusted|Минцифр|Mincifr|Ministry of Digital Development') {
+                $res += New-Object PSObject -Property @{ Store = $store; Subject = $c.Subject; Thumbprint = $c.Thumbprint }
+            }
+        }
+    }
+    return $res
+}
+
 function Repair-Bfe {
     try { Set-Service -Name 'BFE' -StartupType Automatic -ErrorAction Stop; Start-Service -Name 'BFE' -ErrorAction Stop } catch { return $false }
     $Script:ConflictsCache = $null

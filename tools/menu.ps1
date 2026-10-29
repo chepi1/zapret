@@ -610,6 +610,11 @@ function Show-PcCheck {
         Write-Color ('  ! ' + $c.Text) Yellow
         if ($c.Key -eq 'bfe') { Add-Fix 'Включить службу Base Filtering Engine: без неё WinDivert не работает' { Repair-Bfe } }
     }
+    $ruCerts = @(Get-RussianRootCerts)
+    if ($ruCerts.Count) {
+        Write-Color ('  ! В Windows установлен российский корневой сертификат (' + (@($ruCerts | ForEach-Object { ($_.Subject -split ',')[0] } | Select-Object -Unique) -join '; ') + ').') Yellow
+        Write-Color '    С ним HTTPS-соединения можно подменять незаметно. Если ставили не сами: certmgr.msc -> Доверенные корневые центры -> удалить.' Yellow
+    }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
     $tgOn = (Get-Settings).telegram -eq 'on'
     if ($tgOn -and -not (Test-TgBridgeRunning)) {
