@@ -1,6 +1,6 @@
 ﻿# Автонастройка по расписанию: её запускает задача планировщика "zapret autotune" (Настройки -> 7 в меню)
 # каждый день в 4:00 или позже, когда ПК простаивает. Решает сама, пора ли:
-#  - раз в месяц скачивает свежие списки Flowseal (ipset-all, ipset-exclude, list-general, list-google, list-exclude);
+#  - раз в неделю скачивает свежие списки Flowseal (ipset-all, ipset-exclude, list-general, list-google, list-exclude);
 #  - раз в неделю узнаёт, не вышли ли новые версии zapret2 и Flowseal (видно в шапке меню);
 #  - раз в неделю (ручной автоподбор тоже считается) - полный автоподбор (все стратегии) без вопросов: обновляет
 #    рейтинг, по которому строятся круги автосмены. Основную стратегию не меняет. Обход на время теста выключается и включается обратно.
@@ -13,7 +13,7 @@ param([switch]$Force)
 
 if (-not (Test-Admin)) { exit 1 }
 
-# списки - раз в месяц, по времени ipset-all (оно обновляется и когда списки не изменились)
+# списки - раз в неделю, по времени ipset-all (оно обновляется и когда списки не изменились)
 $ipsetFile = Join-Path $Script:Lists 'ipset-all.txt'
 if ($Force -or -not (Test-Path $ipsetFile) -or ((Get-Date) - (Get-Item $ipsetFile).LastWriteTime).TotalDays -ge $Script:IpsetDays) {
     Add-AutotuneLog ('списки Flowseal: ' + ((@(Update-FlowsealLists) | ForEach-Object { $_.Text }) -join '; '))

@@ -73,6 +73,33 @@ function Get-PostFile {
     return $f
 }
 
+# Адреса, которые не открылись ни без обхода, ни с одной стратегией, и к которым не проходит даже TCP-подключение:
+# провайдер режет их по IP. Обход тут ничего не сделает - нужен VPN; так и пишем, а не "стратегия не пробила".
+function Get-IpBlocked($Table, [int]$TimeoutMs = 3000) {
+    $byName = @{}
+    foreach ($id in $Table.Keys) {
+        foreach ($r in $Table[$id]) {
+            $k = $r.Group + '|' + $r.Name
+            if (-not $byName.ContainsKey($k)) { $byName[$k] = @{ Row = $r; Ok = $false } }
+            if ($r.State -eq 'OK' -or $r.State -eq 'NA') { $byName[$k].Ok = $true }
+        }
+    }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $jobs = @(foreach ($x in @($byName.Values | Where-Object { -not $_.Ok -and $_.Row.Group -ne 'Clean' })) {
+        $ip = $null
+        try { $ip = @([System.Net.Dns]::GetHostAddresses(([uri]$x.Row.Url).Host) | Where-Object { $_.AddressFamily -eq 'InterNetwork' })[0] } catch { }
+        if (-not $ip) { continue }
+        $tc = New-Object System.Net.Sockets.TcpClient ([System.Net.Sockets.AddressFamily]::InterNetwork)
+        $task = $null
+        try { $task = $tc.ConnectAsync($ip, 443) } catch { }
+        New-Object PSObject -Property @{ Name = $x.Row.Name; Tc = $tc; Task = $task }
+    })
+    foreach ($j in $jobs) { if ($j.Task) { try { [void]$j.Task.Wait([math]::Max(0, $TimeoutMs - $sw.ElapsedMilliseconds)) } catch { } } }
+    $res = @($jobs | Where-Object { -not $_.Task -or $_.Task.Status -ne 'RanToCompletion' } | ForEach-Object { $_.Name } | Sort-Object)
+    foreach ($j in $jobs) { try { $j.Tc.Close() } catch { } }
+    return $res
+}
+
 function Convert-CurlResult($Item) {
     $parts = @($Item.Out.Result.Trim() -split '\s+')
     $code = '000'; $up = 0.0; $down = 0.0; $conn = 0.0; $tls = 0.0
@@ -429,11 +456,18 @@ try {
         $freezeLine = 'Без обхода провайдер заморозил {0} из {1} проверочных хостингов: это тот блок, из-за которого вылетают игры.' -f $base.Groups['DPI'].Freeze, $base.Groups['DPI'].Total
         Write-Color $freezeLine Gray
     }
+    $ipLine = $null
+    $ipBlocked = @(Get-IpBlocked $table)
+    if ($ipBlocked.Count) {
+        $ipLine = 'Заблокированы по IP (не подключаются вовсе, ни одна стратегия их не откроет - только VPN): ' + ($ipBlocked -join ', ')
+        Write-Color $ipLine Gray
+    }
     # лучший результат - и в файл отчёта (он уже записан выше вместе с подробностями)
     $report.Insert(1, $bestLine)
     $at = 2
     if ($why) { $report.Insert($at, $why); $at++ }
-    if ($freezeLine) { $report.Insert($at, $freezeLine) }
+    if ($freezeLine) { $report.Insert($at, $freezeLine); $at++ }
+    if ($ipLine) { $report.Insert($at, $ipLine) }
     Write-TextNoBom $repFile (($report -join "`r`n") + "`r`n")
     Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
     Write-TextNoBom (Join-Path $Script:Runtime 'test-best.txt') ($best.Id + "`r`n")

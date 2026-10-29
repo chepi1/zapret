@@ -123,7 +123,26 @@ function Test-PortList([string]$Text) {
     return $true
 }
 
+# Входит ли порт в список вида '1024-2000,3000'
+function Test-PortInList([int]$Port, [string]$List) {
+    foreach ($x in ($List -split ',')) {
+        if ($x -notmatch '^(\d{1,5})(-(\d{1,5}))?$') { continue }
+        $a = [int]$matches[1]
+        $b = if ($matches[3]) { [int]$matches[3] } else { $a }
+        if ($Port -ge $a -and $Port -le $b) { return $true }
+    }
+    return $false
+}
+
+# Game Filter "только порты игр": вместо всех портов 1024-65535 через winws2 идут только порты, на которых ходят
+# NBA 2K27 (TCP 20000-26000 к её серверам на Cloudflare, UDP 30000-30100 к серверам матча) и игры Steam и Valve
+# (ретрансляторы UDP 27015-27200). Торренты, звонки и прочие программы на остальных портах обход больше не пропускает
+# через себя. Другие игры с иными портами так не обходятся - для них все порты.
+$Script:GamePortsPreset = @{ tcp = '20000-27200'; udp = '27000-27200,30000-30100' }
+
 function Get-GameText([hashtable]$Settings) {
+    $preset = $Settings.gametcp -eq $Script:GamePortsPreset.tcp -and $Settings.gameudp -eq $Script:GamePortsPreset.udp
+    if ($preset -and $Settings.game -eq 'all') { return ('TCP и UDP, только порты игр (TCP {0}, UDP {1})' -f $Settings.gametcp, $Settings.gameudp) }
     switch ($Settings.game) {
         'all' { return ('TCP и UDP (TCP {0}, UDP {1})' -f $Settings.gametcp, $Settings.gameudp) }
         'tcp' { return ('только TCP {0}' -f $Settings.gametcp) }
@@ -2152,6 +2171,26 @@ function Update-UpstreamCheck([int]$Days = 7, [switch]$Force) {
     return $true
 }
 
+# Сколько дней не обновлялись списки Flowseal: по времени ipset-all (оно меняется и когда списки не изменились)
+function Get-ListsAgeDays {
+    $f = Join-Path $Script:Lists 'ipset-all.txt'
+    if (-not (Test-Path $f)) { return 999 }
+    return [int][math]::Floor(((Get-Date) - (Get-Item $f).LastWriteTime).TotalDays)
+}
+
+# Свежие списки Flowseal - в фоне при открытии меню, если им $Days дней и больше: без автонастройки по расписанию
+# они не обновлялись бы вовсе. Новые адреса провайдер блокирует постоянно, а winws2 перечитывает изменённые списки сам.
+function Start-ListsUpdate([int]$Days = 7) {
+    # в рабочей копии разработки списки лежат в git - их обновляют вручную (Настройки -> 8), а не фоном
+    if ((Test-DevCheckout) -or (Get-ListsAgeDays) -lt $Days) { return }
+    $cmd = ". '" + (Join-Path $Script:Root 'tools\lib.ps1').Replace("'", "''") + "'; Update-FlowsealLists | Out-Null"
+    $enc = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($cmd))
+    try {
+        Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') -WindowStyle Hidden `
+            -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand ' + $enc) | Out-Null
+    } catch { }
+}
+
 # То же в фоне, отдельным скрытым процессом: до четырёх запросов к GitHub по 5 с задерживали открытие меню.
 # Новости появятся в шапке при следующей перерисовке. Процесс запускается, только когда проверка уже нужна.
 function Start-UpstreamCheck([int]$Days = 7) {
@@ -2317,7 +2356,7 @@ function Get-AllNews {
 # раз в $IpsetDays дней. От SYSTEM, чтобы не мелькало окно и не нужен был вход пользователя.
 $Script:AutotuneTask = 'zapret autotune'
 $Script:AutotuneDays = 7
-$Script:IpsetDays = 30
+$Script:IpsetDays = 7
 # Игры и античиты: пока они запущены, обход на время теста не выключаем
 $Script:GameProcessNames = @('NBA2K*', 'dota2', 'cs2', 'csgo', 'EasyAntiCheat*', 'BEService*', 'FortniteClient*', 'r5apex*',
     'RocketLeague', 'GTA5*', 'TslGame*', 'VALORANT*', 'eldenring', 'FC2*', 'Overwatch', 'destiny2')

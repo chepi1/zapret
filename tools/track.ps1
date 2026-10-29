@@ -154,8 +154,9 @@ function Get-BypassText([string]$Owner, [string]$Proto, [int]$Port) {
     if ($Owner -eq 'исключено') { return 'нет (исключено вами)' }
     # голос Discord: отдельный профиль по портам и распознаванию протокола, списки не нужны
     if ($Proto -eq 'udp' -and (($Port -ge 19294 -and $Port -le 19344) -or ($Port -ge 50000 -and $Port -le 50100))) { return 'да (голос)' }
-    $gameOn = ($Proto -eq 'tcp' -and @('all', 'tcp') -contains $settings.game) -or ($Proto -eq 'udp' -and @('all', 'udp') -contains $settings.game)
-    $portOk = ($Port -ge 1024 -and $gameOn) -or ($Proto -eq 'tcp' -and @(80, 443, 8443) -contains $Port) -or ($Proto -eq 'udp' -and $Port -eq 443)
+    $gameOn = ($Proto -eq 'tcp' -and @('all', 'tcp') -contains $settings.game -and (Test-PortInList $Port $settings.gametcp)) -or
+        ($Proto -eq 'udp' -and @('all', 'udp') -contains $settings.game -and (Test-PortInList $Port $settings.gameudp))
+    $portOk = $gameOn -or ($Proto -eq 'tcp' -and @(80, 443, 8443) -contains $Port) -or ($Proto -eq 'udp' -and $Port -eq 443)
     if (-not $portOk) { return 'нет (порт)' }
     if ($settings.ipset -eq 'any') { return 'да (any)' }
     if ($Owner -eq 'найден ранее') { return 'да (user)' }
