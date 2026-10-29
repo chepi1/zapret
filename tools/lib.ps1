@@ -1141,7 +1141,7 @@ $Script:TgRunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 
 # Порт и secret моста (runtime\telegram.txt). Первый раз - из настроек tg-ws-proxy, если он стоял: тогда Telegram,
 # уже настроенный на него, перенастраивать не нужно. Иначе - порт 1443 и новый случайный secret.
-# $File и $Import - для проверок (dev	ests): чужие пути вместо runtime и настроек tg-ws-proxy
+# $File и $Import - для проверок (dev\tests): чужие пути вместо runtime и настроек tg-ws-proxy
 function Get-TgConfig([string]$File = '', [string[]]$Import = @()) {
     $f = if ($File) { $File } else { Get-PkgPath $Script:TgConfigFile }
     if (-not $Import.Count) { $Import = @((Join-Path (Get-PkgPath $Script:TgDir) 'TgWsProxy_data\config.json'), (Join-Path $env:APPDATA 'TgWsProxy\config.json')) }
