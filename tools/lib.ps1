@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.4.1'
+$Script:Version     = '1.5'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -1886,6 +1886,51 @@ function Test-HostsPins([int]$TimeoutSec = 6, $Pending = $null) {
     return $rows
 }
 
+# ---------- работают ли сервисы прямо сейчас ----------
+# Главный вопрос проверки обходов: открывается ли то, ради чего стоит обход. Запрос - как у браузера и игр: напрямую,
+# мимо прокси, через обход, если он запущен. Любой HTTP-ответ, даже 404, - сервис доступен: TLS прошёл, данные пришли.
+$Script:ServiceProbes = [ordered]@{
+    'YouTube'                 = 'https://www.youtube.com/generate_204'
+    'видео YouTube'           = 'https://redirector.googlevideo.com/report_mapping'
+    'Discord'                 = 'https://discord.com/api/v9/gateway'
+    'Steam'                   = 'https://store.steampowered.com/'
+    'GitHub'                  = 'https://github.com/'
+    'NBA 2K27: вход (Epic)'   = 'https://api.epicgames.dev/'
+    'NBA 2K27: запись матча'  = 'https://api.quago.io/'
+}
+
+function Start-ServiceProbes([int]$TimeoutSec = 8) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
+    $run = @()
+    foreach ($name in $Script:ServiceProbes.Keys) {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $curl
+        $psi.Arguments = '-s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' -w "%{http_code} %{time_appconnect}" "' + $Script:ServiceProbes[$name] + '"'
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardOutput = $true
+        $p = [System.Diagnostics.Process]::Start($psi)
+        $run += New-Object PSObject -Property @{ Name = $name; P = $p; Out = $p.StandardOutput.ReadToEndAsync(); TimeoutSec = $TimeoutSec }
+    }
+    return $run
+}
+
+# Name, Ok, Ms (время установки TLS)
+function Get-ServiceProbeResults($Run) {
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $rows = @()
+    foreach ($j in @($Run)) {
+        if (-not $j.P.WaitForExit(($j.TimeoutSec + 5) * 1000)) { try { $j.P.Kill() } catch { } ; $j.P.WaitForExit() }
+        $parts = @($j.Out.Result.Trim() -split '\s+')
+        $ok = $j.P.ExitCode -eq 0 -and $parts.Count -ge 2 -and $parts[0] -ne '000'
+        $ms = 0
+        if ($ok) { try { $ms = [math]::Round([double]::Parse($parts[1], $inv) * 1000) } catch { } }
+        $rows += New-Object PSObject -Property @{ Name = $j.Name; Ok = $ok; Ms = $ms }
+    }
+    return $rows
+}
+
 # Какие службы держать в hosts: где адрес Flowseal помогает; где разницы нет или проверить не вышло - как сейчас
 function Get-HostsAdvice($Rows, $Status) {
     return @($Rows | Where-Object { $_.Verdict -eq 'helps' -or (@('same', 'down', 'none') -contains $_.Verdict -and $Status[$_.Group].Present) } | ForEach-Object { $_.Group })
@@ -1937,6 +1982,35 @@ $Script:GamePinHosts = @('api.quago.io')
 $Script:GamePinsBegin = '# zapret: серверы игр - начало (меню: Проверка обходов)'
 $Script:GamePinsEnd = '# zapret: серверы игр - конец'
 $Script:GamePinsMax = 6
+# свои имена: те, что трекер увидел недоступными, а проверка обходов предложила закрепить
+$Script:GamePinsUserFile = 'runtime/gamepins-user.txt'
+# серверы, к которым программа под трекером не подключилась (имя, адрес, когда): их разбирает проверка обходов
+$Script:BlockedHostsFile = 'runtime/blocked-hosts.txt'
+
+function Get-GamePinHosts {
+    $user = @(Get-ListLines (Get-PkgPath $Script:GamePinsUserFile) | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ -match '^[a-z0-9][a-z0-9\.\-]+$' })
+    return @(@($Script:GamePinHosts) + $user | Select-Object -Unique)
+}
+
+function Add-GamePinHost([string]$Name) {
+    $f = Get-PkgPath $Script:GamePinsUserFile
+    $have = @(Get-ListLines $f)
+    if ($have -contains $Name.ToLower()) { return }
+    Write-TextNoBom $f ((@($have) + $Name.ToLower() | ForEach-Object { $_ + "`r`n" }) -join '')
+}
+
+# Записи трекера о серверах без ответа: имя -> адреса. Пустые имена и уже закреплённые - пропускаются
+function Get-BlockedHosts {
+    $res = [ordered]@{}
+    $pinned = @(Get-GamePinHosts)
+    foreach ($l in @(Get-ListLines (Get-PkgPath $Script:BlockedHostsFile))) {
+        $p = @($l -split '\s+')
+        if ($p.Count -lt 2 -or $pinned -contains $p[0]) { continue }
+        if (-not $res.Contains($p[0])) { $res[$p[0]] = @() }
+        if ($res[$p[0]] -notcontains $p[1]) { $res[$p[0]] += $p[1] }
+    }
+    return $res
+}
 
 # TLS к имени $Name по каждому адресу, все адреса параллельно, с проверкой сертификата этого имени
 function Test-TlsIps([string]$Name, [string[]]$Ips, [int]$TimeoutMs = 2000) {
@@ -1967,7 +2041,7 @@ function Test-TlsIps([string]$Name, [string[]]$Ips, [int]$TimeoutMs = 2000) {
 function Get-GamePinsState {
     $hosts = @(Read-HostsEntries $Script:HostsFile)
     $res = @()
-    foreach ($h in $Script:GamePinHosts) {
+    foreach ($h in @(Get-GamePinHosts)) {
         $dns = @()
         try { $dns = @(Resolve-DnsName $h -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
         $pinned = @($hosts | Where-Object { $_.Host -eq $h } | ForEach-Object { $_.Ip })
@@ -1987,6 +2061,7 @@ function Set-GamePins($Pins) {
     $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
     $out = New-Object System.Collections.Generic.List[string]
     $inBlock = $false
+    $ours = @(Get-GamePinHosts)
     foreach ($line in ($text -split "`r?`n")) {
         if ($line -eq $Script:GamePinsBegin) { $inBlock = $true; continue }
         if ($line -eq $Script:GamePinsEnd) { $inBlock = $false; continue }
@@ -1994,7 +2069,7 @@ function Set-GamePins($Pins) {
         $t = ($line -replace '#.*', '').Trim()
         if ($t) {
             $names = @($t -split '\s+' | Select-Object -Skip 1)
-            if ($names.Count -and @($names | Where-Object { $Script:GamePinHosts -contains $_.ToLower() }).Count -eq $names.Count) { continue }
+            if ($names.Count -and @($names | Where-Object { $ours -contains $_.ToLower() }).Count -eq $names.Count) { continue }
         }
         $out.Add($line)
     }
