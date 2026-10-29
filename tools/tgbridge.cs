@@ -534,8 +534,11 @@ namespace ZapretTg
         // Адреса дата-центров для прямого подключения (если у провайдера их не режут), как у tg-ws-proxy
         private static readonly Dictionary<int, string> DcIps = new Dictionary<int, string> {
             { 1, "149.154.175.50" }, { 2, "149.154.167.51" }, { 3, "149.154.175.100" }, { 4, "149.154.167.91" }, { 5, "149.154.171.5" } };
-        // Дата-центр, до которого не достучались никак, - не пробуем минуту: иначе Telegram ждал бы по 10 секунд на каждое соединение
+        // Дата-центр, до которого не достучались никак, какое-то время не пробуем: иначе Telegram ждал бы по 10 секунд
+        // на каждое соединение. Срок растёт с каждым провалом подряд: 1, 2, 4, 8, 15 минут. У провайдеров, что режут
+        // DC1/DC3/DC5 наглухо, мост больше не тратит на них по 5-13 секунд каждую минуту. Удачное подключение сбрасывает счёт.
         private static readonly Dictionary<string, DateTime> DeadUntil = new Dictionary<string, DateTime>();
+        private static readonly Dictionary<string, int> DeadCount = new Dictionary<string, int>();
 
         public static bool IsFront(int dc) { return dc == 2 || dc == 4 || dc == 203; }
 
@@ -606,9 +609,23 @@ namespace ZapretTg
             lock (DeadUntil) { DateTime t; return DeadUntil.TryGetValue(key, out t) && t > DateTime.Now; }
         }
 
-        private static void SetDead(string key, bool dead)
+        // Возвращает срок в минутах, на который дата-центр отложен (0 - снят)
+        private static int SetDead(string key, bool dead)
         {
-            lock (DeadUntil) { if (dead) DeadUntil[key] = DateTime.Now.AddMinutes(1); else DeadUntil.Remove(key); }
+            lock (DeadUntil)
+            {
+                if (!dead) { DeadUntil.Remove(key); DeadCount.Remove(key); return 0; }
+                int n;
+                DeadCount.TryGetValue(key, out n);
+                // соединения, начатые до отметки, проваливаются следом - не удлиняем срок за каждое из них
+                DateTime until;
+                if (DeadUntil.TryGetValue(key, out until) && until > DateTime.Now) return (int)Math.Ceiling((until - DateTime.Now).TotalMinutes);
+                n++;
+                DeadCount[key] = n;
+                int minutes = Math.Min(15, 1 << Math.Min(n - 1, 4));
+                DeadUntil[key] = DateTime.Now.AddMinutes(minutes);
+                return minutes;
+            }
         }
 
         // Клиент <-> дата-центр напрямую по TCP: та же перешифровка, без деления на кадры
@@ -673,8 +690,9 @@ namespace ZapretTg
                     if (tg == null)
                     {
                         // DC2 и DC4 не "хороним": провайдер отбрасывает подключения через раз, следующее может пройти
-                        if (!IsFront(ctx.Dc)) SetDead(key, true);
-                        Log(label + " DC" + ctx.Dc + (ctx.Media ? " media" : "") + ": недоступен ни через WebSocket, ни напрямую - минуту не пробую");
+                        int minutes = IsFront(ctx.Dc) ? 0 : SetDead(key, true);
+                        Log(label + " DC" + ctx.Dc + (ctx.Media ? " media" : "") + ": недоступен ни через WebSocket, ни напрямую" +
+                            (minutes > 0 ? " - не пробую " + minutes + " мин" : ""));
                         return;
                     }
                     await BridgeTcp(cs, tg, ctx);
@@ -819,6 +837,16 @@ namespace ZapretTg
             ctx.CltEnc.Process(b2, 0, b2.Length);
             cDec.Process(b2, 0, b2.Length);
             for (int i = 0; i < back.Length; i++) if (b2[i] != back[i]) return "клиент получил не то, что отправил сервер";
+            // срок для мёртвого дата-центра: 1, 2, 4... минут; соединения, проваленные внутри срока, его не удлиняют
+            string dk = "selftest";
+            int d1 = SetDead(dk, true), d1again = SetDead(dk, true);
+            lock (DeadUntil) DeadUntil[dk] = DateTime.Now.AddSeconds(-1);
+            int d2 = SetDead(dk, true);
+            lock (DeadUntil) DeadUntil[dk] = DateTime.Now.AddSeconds(-1);
+            int d3 = SetDead(dk, true);
+            bool dead = IsDead(dk);
+            SetDead(dk, false);
+            if (d1 != 1 || d1again != 1 || d2 != 2 || d3 != 4 || !dead || IsDead(dk)) return "срок мёртвого дата-центра: " + d1 + "," + d1again + "," + d2 + "," + d3;
             return "ok";
         }
 

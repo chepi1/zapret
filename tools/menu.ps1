@@ -25,8 +25,9 @@ Update-LegacyNames
 
 function Pause-Menu { Read-Host 'Enter - назад в меню' | Out-Null }
 
-# новые версии zapret, zapret2 и Flowseal - раз в 3 дня, в фоне (ответ GitHub запоминается в runtime\updates.txt)
+# новые версии zapret, zapret2 и Flowseal - раз в 3 дня, свежие списки сайтов - раз в неделю; оба в фоне
 Start-UpstreamCheck -Days 3
+Start-ListsUpdate -Days $Script:IpsetDays
 
 function Test-Running { return ((@(Get-OurProcesses).Count -gt 0) -or [bool](Get-OurService)) }
 
@@ -92,6 +93,9 @@ function Show-Header {
     if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 5.' Yellow }
     $upd = Get-ZapretUpdate
     if ($upd) { Write-BoxRow ('  ! Вышла новая версия zapret ' + $upd + ' - обновить: Настройки -> 9.') Yellow }
+    # меню обновляет списки само раз в неделю: старше трёх недель - значит, GitHub не отвечает
+    $age = Get-ListsAgeDays
+    if ($age -ge 21) { Write-BoxRow ('  ! Списки сайтов не обновлялись ' + $age + ' дн.: новые блокировки в них не попали. Обновить: Настройки -> 8.') Yellow }
     $news = @(Get-UpstreamNews)
     if ($news.Count) { Write-BoxRow ('  ! Вышли новые версии основы: ' + ($news -join ', ') + ' - сборку стоит обновить.') Yellow }
     Write-BoxSep
@@ -119,7 +123,9 @@ function Show-SettingsMenu {
         $st = Get-Strategy $s.alt
         $svc = Get-OurService
         $game = switch ($s.game) { 'all' { 'TCP и UDP' } 'tcp' { 'только TCP' } 'udp' { 'только UDP' } default { 'выкл' } }
-        if ($s.game -ne 'off' -and ($s.gametcp -ne '1024-65535' -or $s.gameudp -ne '1024-65535')) { $game += ', свои порты' }
+        if ($s.game -ne 'off' -and ($s.gametcp -ne '1024-65535' -or $s.gameudp -ne '1024-65535')) {
+            $game += $(if ($s.gametcp -eq $Script:GamePortsPreset.tcp -and $s.gameudp -eq $Script:GamePortsPreset.udp) { ', только порты игр' } else { ', свои порты' })
+        }
         $tune = if (-not (Get-AutotuneTask)) { 'выкл' } elseif ((Get-AutotuneText) -match 'другой папки') { '! задача от другой папки' } else { 'раз в неделю' }
         Write-BoxRow ' Настройки' Cyan
         Write-BoxRow ('  1. Стратегия: ' + $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }))
@@ -257,6 +263,8 @@ function Select-GameFilter {
     Write-Host '  4. выключить'
     Write-Host ('  5. диапазон портов TCP (сейчас {0})' -f $s.gametcp)
     Write-Host ('  6. диапазон портов UDP (сейчас {0})' -f $s.gameudp)
+    Write-Host ('  7. только порты игр: NBA 2K27 и игры Steam/Valve (TCP {0}, UDP {1}) - меньше чужого трафика через обход' -f $Script:GamePortsPreset.tcp, $Script:GamePortsPreset.udp)
+    Write-Host '  8. все порты 1024-65535 (как у Flowseal)'
     $c = Read-Host 'Выбор (Enter - не менять)'
     switch ($c) {
         '1' { $s.game = 'all' }
@@ -265,6 +273,8 @@ function Select-GameFilter {
         '4' { $s.game = 'off' }
         '5' { $v = (Read-Host 'Порты TCP, например 1024-65535').Trim(); if (Test-PortList $v) { $s.gametcp = $v } else { Write-Color 'Неверный формат.' Red } }
         '6' { $v = (Read-Host 'Порты UDP, например 1024-65535').Trim(); if (Test-PortList $v) { $s.gameudp = $v } else { Write-Color 'Неверный формат.' Red } }
+        '7' { $s.game = 'all'; $s.gametcp = $Script:GamePortsPreset.tcp; $s.gameudp = $Script:GamePortsPreset.udp }
+        '8' { $s.gametcp = '1024-65535'; $s.gameudp = '1024-65535' }
         default { return }
     }
     Save-Settings $s
