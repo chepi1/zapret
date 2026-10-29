@@ -53,6 +53,22 @@ $s4 = Get-HostsStatus
 Check 'all like Flowseal' ($s4['GitHub'].Present -and $s4['GitHub'].Missing -eq 0 -and $s4['GitHub'].Dups -eq 0)
 Write-Host '  --- tail of written copy:'
 Get-Content $Script:HostsFile -Tail 4 | ForEach-Object { '    ' + $_ }
+
+# серверы игр: TLS с проверкой имени (чужой сертификат - не годится), запись блока рядом с блоком Flowseal
+$tls = @(Test-TlsIps 'api.quago.io' @('104.18.124.108'))
+Check 'game pins: foreign certificate rejected' ($tls.Count -eq 1 -and -not $tls[0].Ok)
+$u = Update-GamePins
+Write-Host ('  game pins: ' + (Get-GamePinsText $u))
+$gp = [System.IO.File]::ReadAllText($Script:HostsFile)
+Check 'game pins: block written, Flowseal kept' ($gp -match [regex]::Escape($Script:GamePinsBegin) -and $gp -match [regex]::Escape($Script:HostsBegin))
+$bak = @(Get-ChildItem $Script:Runtime -Filter 'hosts-*.bak').Count
+Set-GamePins $u.Pins | Out-Null
+Check 'game pins: unchanged - no rewrite' (@(Get-ChildItem $Script:Runtime -Filter 'hosts-*.bak').Count -eq $bak)
+Set-HostsFlowseal @($Script:HostsGroups.Keys) | Out-Null
+Check 'game pins: survive Flowseal rewrite' ([System.IO.File]::ReadAllText($Script:HostsFile) -match [regex]::Escape($Script:GamePinsBegin))
+Set-GamePins @{} | Out-Null
+$gp0 = [System.IO.File]::ReadAllText($Script:HostsFile)
+Check 'game pins: removed, Flowseal kept' ($gp0 -notmatch 'quago' -and $gp0 -match [regex]::Escape($Script:HostsBegin))
 Check 'real hosts untouched' ([Convert]::ToBase64String([System.IO.File]::ReadAllBytes($real)) -eq [Convert]::ToBase64String($origBytes))
 Remove-Item $Script:HostsFile, $Script:Runtime -Recurse -Force
 if ($fails) { Write-Host "$fails FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'all ok' -ForegroundColor Green }

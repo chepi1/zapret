@@ -87,7 +87,8 @@ function Read-YesNo([string]$Question) {
 
 function Get-Settings {
     # telegram, notify: on / off / пусто (ещё не выбирали - см. Test-NotifyEnabled и первый запуск обхода)
-    $s = @{ alt = '12'; auto = 'on'; game = 'all'; ipset = 'loaded'; gametcp = '1024-65535'; gameudp = '1024-65535'; autolist = 'on'; telegram = ''; notify = '' }
+    # gamepins: on - рабочие адреса серверов игр закреплены в hosts и перепроверяются при запуске (Update-GamePins)
+    $s = @{ alt = '12'; auto = 'on'; game = 'all'; ipset = 'loaded'; gametcp = '1024-65535'; gameudp = '1024-65535'; autolist = 'on'; telegram = ''; notify = ''; gamepins = '' }
     $f = Join-Path $Script:Runtime 'settings.ini'
     if (Test-Path $f) {
         foreach ($line in [System.IO.File]::ReadAllLines($f)) {
@@ -99,6 +100,7 @@ function Get-Settings {
     if (@('on', 'off') -notcontains $s.autolist) { $s.autolist = 'on' }
     if (@('on', 'off', '') -notcontains $s.telegram) { $s.telegram = '' }
     if (@('on', 'off', '') -notcontains $s.notify) { $s.notify = '' }
+    if (@('on', 'off', '') -notcontains $s.gamepins) { $s.gamepins = '' }
     if (-not (Test-PortList $s.gametcp)) { $s.gametcp = '1024-65535' }
     if (-not (Test-PortList $s.gameudp)) { $s.gameudp = '1024-65535' }
     return $s
@@ -745,7 +747,10 @@ function Start-Bypass([switch]$Quiet) {
     }
     if ($alive) {
         Set-HighPriority
+        # адреса серверов игр - уже через обход, как их увидит игра
+        $gp = if ($settings.gamepins -eq 'on') { Update-GamePins } else { $null }
         if (-not $Quiet) {
+            if ($gp) { Write-Color ('Серверы игр в hosts: ' + (Get-GamePinsText $gp)) Gray }
             Write-Color ('Обход запущен: ' + (Get-AltText $settings)) Green
             foreach ($x in @(Get-RingsText $settings)) { Write-Color ('  свой круг - ' + $x) Gray }
             Write-Color ('Game Filter: ' + (Get-GameText $settings) + '. IPSet: ' + $settings.ipset) Gray
@@ -1901,6 +1906,112 @@ function Set-HostsFlowseal([string[]]$Groups) {
     catch { return $false }
     & ipconfig.exe /flushdns | Out-Null
     return $true
+}
+
+# ---------- серверы игр в hosts ----------
+# Часть адресов серверов игр провайдер режет по IP, а это обход не снимает. NBA 2K27 во время матча шлёт запись
+# поведения игрока на api.quago.io (Quago, Amazon): DNS отдаёт то рабочие его адреса, то заблокированные
+# (3.216.81.164 отвечает как api.quago.io только через VPN), и на заблокированном игра ждёт подключения - похоже,
+# отсюда рывки посреди матча. Закрепляем в hosts только адреса, которые отвечают с сертификатом этого имени,
+# и перепроверяем их при каждом запуске обхода: адреса Amazon со временем меняются.
+$Script:GamePinHosts = @('api.quago.io')
+$Script:GamePinsBegin = '# zapret: серверы игр - начало (меню: Проверка обходов)'
+$Script:GamePinsEnd = '# zapret: серверы игр - конец'
+$Script:GamePinsMax = 6
+
+# TLS к имени $Name по каждому адресу, все адреса параллельно, с проверкой сертификата этого имени
+function Test-TlsIps([string]$Name, [string[]]$Ips, [int]$TimeoutMs = 2000) {
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $jobs = @(foreach ($ip in $Ips) {
+        $tc = New-Object System.Net.Sockets.TcpClient ([System.Net.Sockets.AddressFamily]::InterNetwork)
+        $conn = $null
+        try { $conn = $tc.ConnectAsync([System.Net.IPAddress]::Parse($ip), 443) } catch { }
+        New-Object PSObject -Property @{ Ip = $ip; Tc = $tc; Conn = $conn; Tls = $null }
+    })
+    foreach ($j in $jobs) { if ($j.Conn) { try { [void]$j.Conn.Wait([math]::Max(0, $TimeoutMs - $sw.ElapsedMilliseconds)) } catch { } } }
+    foreach ($j in $jobs) {
+        if ($j.Conn -and $j.Conn.Status -eq 'RanToCompletion') {
+            try { $j.Tls = (New-Object System.Net.Security.SslStream($j.Tc.GetStream(), $false)).AuthenticateAsClientAsync($Name) } catch { }
+        }
+    }
+    $res = @()
+    foreach ($j in $jobs) {
+        $ok = $false
+        if ($j.Tls) { try { $ok = $j.Tls.Wait([math]::Max(0, 2 * $TimeoutMs - $sw.ElapsedMilliseconds)) -and $j.Tls.Status -eq 'RanToCompletion' } catch { } }
+        $res += New-Object PSObject -Property @{ Ip = $j.Ip; Ok = $ok }
+        try { $j.Tc.Close() } catch { }
+    }
+    return $res
+}
+
+# По каждому имени: адреса из DNS (мимо hosts), закреплённые сейчас, и какие из них отвечают
+function Get-GamePinsState {
+    $hosts = @(Read-HostsEntries $Script:HostsFile)
+    $res = @()
+    foreach ($h in $Script:GamePinHosts) {
+        $dns = @()
+        try { $dns = @(Resolve-DnsName $h -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
+        $pinned = @($hosts | Where-Object { $_.Host -eq $h } | ForEach-Object { $_.Ip })
+        $t = @(Test-TlsIps $h @(@($dns) + @($pinned) | Select-Object -Unique))
+        $res += New-Object PSObject -Property @{ Host = $h; Dns = $dns; Pinned = $pinned
+            Good = @($t | Where-Object { $_.Ok } | ForEach-Object { $_.Ip }); Bad = @($t | Where-Object { -not $_.Ok } | ForEach-Object { $_.Ip }) }
+    }
+    return $res
+}
+
+# Блок закреплённых адресов в hosts. $Pins - имя -> адреса; пустой - блок убирается. Записи этих имён вне блока
+# тоже убираются, остальные строки hosts (и блок Flowseal) остаются. Файл переписывается, только если что-то изменилось.
+function Set-GamePins($Pins) {
+    $bytes = [System.IO.File]::ReadAllBytes($Script:HostsFile)
+    $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $text = [System.Text.Encoding]::UTF8.GetString($bytes).TrimStart([char]0xFEFF)
+    $nl = if ($text.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $out = New-Object System.Collections.Generic.List[string]
+    $inBlock = $false
+    foreach ($line in ($text -split "`r?`n")) {
+        if ($line -eq $Script:GamePinsBegin) { $inBlock = $true; continue }
+        if ($line -eq $Script:GamePinsEnd) { $inBlock = $false; continue }
+        if ($inBlock) { continue }
+        $t = ($line -replace '#.*', '').Trim()
+        if ($t) {
+            $names = @($t -split '\s+' | Select-Object -Skip 1)
+            if ($names.Count -and @($names | Where-Object { $Script:GamePinHosts -contains $_.ToLower() }).Count -eq $names.Count) { continue }
+        }
+        $out.Add($line)
+    }
+    while ($out.Count -and -not $out[$out.Count - 1].Trim()) { $out.RemoveAt($out.Count - 1) }
+    $add = @(foreach ($h in @($Pins.Keys)) { foreach ($ip in @($Pins[$h])) { $ip + ' ' + $h } })
+    if ($add.Count) {
+        $out.Add('')
+        $out.Add($Script:GamePinsBegin)
+        foreach ($l in $add) { $out.Add($l) }
+        $out.Add($Script:GamePinsEnd)
+    }
+    $new = ($out -join $nl) + $nl
+    if ($new -eq $text) { return $true }
+    Copy-Item $Script:HostsFile (Join-Path $Script:Runtime ('hosts-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.bak')) -Force
+    try { [System.IO.File]::WriteAllText($Script:HostsFile, $new, (New-Object System.Text.UTF8Encoding($bom))) }
+    catch { return $false }
+    & ipconfig.exe /flushdns | Out-Null
+    return $true
+}
+
+# Перепроверить адреса и записать в hosts рабочие (при запуске обхода, если закрепление включено).
+# Имя, у которого не ответил ни один адрес, не закрепляется: пусть идёт по DNS.
+function Update-GamePins {
+    $state = @(Get-GamePinsState)
+    $pins = [ordered]@{}
+    foreach ($s in $state) { if ($s.Good.Count) { $pins[$s.Host] = @($s.Good | Select-Object -First $Script:GamePinsMax) } }
+    $ok = Set-GamePins $pins
+    return New-Object PSObject -Property @{ Ok = $ok; State = $state; Pins = $pins }
+}
+
+function Get-GamePinsText($Update) {
+    return (@(foreach ($s in $Update.State) {
+        $n = if ($Update.Pins.Contains($s.Host)) { @($Update.Pins[$s.Host]).Count } else { 0 }
+        $bad = if ($s.Bad.Count) { ', не отвечают: ' + ($s.Bad -join ', ') } else { '' }
+        '{0} - закреплено адресов: {1}{2}' -f $s.Host, $n, $bad
+    }) -join '; ')
 }
 
 # Что сейчас в hosts по службам - коротко, без сети (шапка меню, отчёт R)
