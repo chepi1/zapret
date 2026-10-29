@@ -635,6 +635,20 @@ function Show-PcCheck {
     }
     $yt = @(Get-HostsYoutube)
     if ($yt.Count) { Write-Color ('  ! В hosts есть записи YouTube (' + ($yt -join ', ') + '): они мешают YouTube. Удалите их из ' + $Script:HostsFile) Yellow }
+    # серверы игр, часть адресов которых провайдер режет по IP (см. lib.ps1, GamePinHosts)
+    $pinsOn = (Get-Settings).gamepins -eq 'on'
+    foreach ($x in @(Get-GamePinsState)) {
+        $tested = @($x.Good).Count + @($x.Bad).Count
+        $now = if (@($x.Pinned).Count) { 'в hosts закреплено ' + @($x.Pinned).Count } else { 'в hosts нет' }
+        $bad = if (@($x.Bad).Count) { ', не отвечают: ' + ($x.Bad -join ', ') } else { '' }
+        Write-Color ('  Сервер игры {0}: отвечают {1} из {2} адресов{3}; {4}' -f $x.Host, @($x.Good).Count, $tested, $bad, $now) $(if (@($x.Bad).Count) { 'Yellow' } else { 'Gray' })
+    }
+    if (-not $pinsOn) {
+        Add-Fix 'hosts: закрепить рабочие адреса серверов игр (api.quago.io - запись матча NBA 2K27). Часть их адресов провайдер режет по IP, и игра на них подвисает; адреса перепроверяются при каждом запуске обхода' {
+            $s = Get-Settings; $s.gamepins = 'on'; Save-Settings $s
+            $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
+        }
+    }
 
     Write-Color '4/4 Автосписок сайтов' Cyan
     $ips = @(Get-AutolistIps)
@@ -682,11 +696,16 @@ function Invoke-MenuAction([string]$Name) {
             if (Get-NotifyTask) { Write-Color 'Перед удалением папки выключите и уведомления (Настройки -> 10).' Gray }
             # перед удалением - вернуть то, что сборка меняла в Windows по проверке обходов
             $hostsSet = @((Get-HostsStatus).Values | Where-Object { $_.Present }).Count -gt 0
-            if ($hostsSet -or (Get-PreferIpv4)) {
-                $changed = @($(if ($hostsSet) { 'записи hosts Flowseal' }), $(if (Get-PreferIpv4) { '"предпочитать IPv4"' }) | Where-Object { $_ })
+            $pinsSet = @(Read-HostsEntries $Script:HostsFile | Where-Object { $Script:GamePinHosts -contains $_.Host }).Count -gt 0
+            if ($hostsSet -or $pinsSet -or (Get-PreferIpv4)) {
+                $changed = @($(if ($hostsSet) { 'записи hosts Flowseal' }), $(if ($pinsSet) { 'адреса серверов игр в hosts' }), $(if (Get-PreferIpv4) { '"предпочитать IPv4"' }) | Where-Object { $_ })
                 Write-Color ('Сборка (проверка обходов) меняла в Windows: ' + ($changed -join ', ') + '.') Gray
                 if (Read-YesNo 'Если удаляете сборку - вернуть как было?') {
                     if ($hostsSet) { if (Set-HostsFlowseal @()) { Write-Color 'Записи hosts Flowseal убраны.' Green } }
+                    if ($pinsSet) {
+                        $s = Get-Settings; $s.gamepins = 'off'; Save-Settings $s
+                        if (Set-GamePins @{}) { Write-Color 'Адреса серверов игр из hosts убраны.' Green }
+                    }
                     if (Get-PreferIpv4) { if (Set-PreferIpv4 $false) { Write-Color 'Стандартный порядок IPv6/IPv4 возвращён.' Green } }
                 }
             }
