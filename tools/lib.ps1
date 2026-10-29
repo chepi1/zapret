@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.5'
+$Script:Version     = '1.6'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -161,6 +161,8 @@ function Get-IpsetText([string]$Mode) {
 
 # ---------- стратегии ----------
 # Файл strategies\altNN.txt: заголовок "# name:", "# desc:", затем секции [quic], [discord_udp] ... с параметрами winws2.
+# Необязательный "# since: 1.6" - версия сборки, в которой стратегия появилась: быстрый автоподбор проверяет её, пока
+# рейтинг сделан более старой версией (Get-TestStrategies).
 
 # Разбор 27 файлов стратегий - заметная часть времени шапки меню и сборки командной строки (Get-RotationOrder
 # зовёт его для каждого профиля), поэтому результат хранится, пока не изменился ни один файл strategies\alt*.txt.
@@ -175,19 +177,21 @@ function Get-Strategies {
         $id = $matches[1]
         $name = 'ALT' + $id
         $desc = ''
+        $since = ''
         $sec = @{}
         $cur = $null
         foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
             $t = $line.Trim()
             if ($t -match '^#\s*name:\s*(.+)$') { $name = $matches[1]; continue }
             if ($t -match '^#\s*desc:\s*(.+)$') { $desc = $matches[1]; continue }
+            if ($t -match '^#\s*since:\s*(.+)$') { $since = $matches[1].Trim(); continue }
             if ($t -eq '' -or $t.StartsWith('#')) { continue }
             if ($t -match '^\[([a-z_]+)\]$') { $cur = $matches[1]; $sec[$cur] = @(); continue }
             if ($cur) { $sec[$cur] += $t }
         }
         $missing = @($Script:Sections | Where-Object { -not $sec.ContainsKey($_) })
         $result += New-Object PSObject -Property @{
-            Id = $id; Name = $name; Desc = $desc; File = $file.FullName; Sections = $sec; Missing = $missing
+            Id = $id; Name = $name; Desc = $desc; Since = $since; File = $file.FullName; Sections = $sec; Missing = $missing
         }
     }
     $Script:StrategiesCache = New-Object PSObject -Property @{ Sig = $sig; Items = $result }
@@ -241,10 +245,12 @@ function Read-RankGroups([string]$Text) {
 function Get-TestRank {
     $f = Get-PkgPath $Script:RankFile
     if (-not (Test-Path $f)) { return $null }
-    $rows = @(); $baseOk = $null; $baseGroups = @{}; $date = $null
+    # рейтинг без строки version сделан версией до 1.6, где её ещё не писали
+    $rows = @(); $baseOk = $null; $baseGroups = @{}; $date = $null; $ver = '1.5'
     $n = '(-?\d+(?:\.\d+)?)'
     foreach ($line in [System.IO.File]::ReadAllLines($f)) {
         if ($line -match '^#\s*date:\s*(.+)$') { $date = $matches[1].Trim(); continue }
+        if ($line -match '^#\s*version:\s*(.+)$') { $ver = $matches[1].Trim(); continue }
         if ($line -match ('^base\s+' + $n + '\s+(\d+)(.*)$')) { $baseOk = ConvertFrom-Points $matches[1]; $baseGroups = Read-RankGroups $matches[3]; continue }
         if ($line -match ('^(\d+)\s+' + $n + '\s+' + $n + '\s+(\d+)\s+(\d+)\s+(\d+)(.*)$')) {
             $rows += New-Object PSObject -Property @{ Id = $matches[1]; Score = (ConvertFrom-Points $matches[2]); Ok = (ConvertFrom-Points $matches[3])
@@ -252,7 +258,7 @@ function Get-TestRank {
         }
     }
     if ($null -eq $baseOk -or $rows.Count -eq 0) { return $null }
-    return New-Object PSObject -Property @{ Date = $date; BaseOk = $baseOk; BaseGroups = $baseGroups; Rows = $rows }
+    return New-Object PSObject -Property @{ Date = $date; Version = $ver; BaseOk = $baseOk; BaseGroups = $baseGroups; Rows = $rows }
 }
 
 # Стратегии, достаточно сильные для профиля, от лучшей к худшей (Id). $null - по этому профилю различать нечего
@@ -280,6 +286,7 @@ function Save-TestRank($Base, $Alts) {
     function Format-Groups($S) { return (@($S.Groups.Keys | ForEach-Object { '{0}={1}/{2}' -f $_, (Format-Points $S.Groups[$_].Ok), $S.Groups[$_].Total }) -join ' ') }
     $lines = @('# Рейтинг стратегий по автоподбору: порядок и состав кругов автосмены. Удалите файл - вернётся стандартный порядок.',
         ('# date: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm')),
+        ('# version: ' + $Script:Version),
         '# id score(пробито-вред) ok total harm freeze группы; .5 - адрес открылся только со второй попытки',
         ('base {0} {1} {2}' -f (Format-Points $Base.Ok), $Base.Total, (Format-Groups $Base)))
     foreach ($r in $Alts) {
@@ -312,12 +319,16 @@ function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
 
 # Что проверяет автоподбор. Полный - все стратегии. Быстрый - основные (RotationPref), основная и все, кто сейчас
 # в кругах автосмены: так стратегия, найденная полным автоподбором, не выпадает из круга после быстрого.
+# Плюс новые стратегии ("# since:" новее версии, которой сделан рейтинг): пришедшие с обновлением сборки проверяются
+# первым же быстрым автоподбором, а дальше остаются в нём, только если попали в круги.
 function Get-TestStrategies([switch]$Full) {
     $all = @(Get-AllStrategiesOrdered)
     if ($Full) { return $all }
     $s = Get-Settings
     $keep = @($Script:RotationPref) + @($s.alt)
     foreach ($sec in $Script:SectionTitles.Keys) { $keep += @(Get-RotationOrder $s.alt $sec | ForEach-Object { $_.Id }) }
+    $rank = Get-TestRank
+    if ($rank) { $keep += @($all | Where-Object { $_.Since -and (Test-NewerVersion $_.Since $rank.Version) } | ForEach-Object { $_.Id }) }
     return @($all | Where-Object { $keep -contains $_.Id })
 }
 
