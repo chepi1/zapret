@@ -23,6 +23,10 @@ $again = @(Get-RetryTargets $targets $rows $base)
 Check 'retry picks fail/freeze/slow clean' ((($again | ForEach-Object { $_.Name }) -join ',') -eq 'b,yt,bing,adobe,apple')
 $again0 = @(Get-RetryTargets $targets $rows $null)
 Check 'base run: no slow check' ((($again0 | ForEach-Object { $_.Name }) -join ',') -eq 'b,yt,bing,apple')
+# безнадёжный заблокированный адрес не перепроверяется, незаблокированные сайты (вред) - всегда
+$hb = @{ (Get-RowKey ($rows | Where-Object { $_.Name -eq 'b' })) = $true; (Get-RowKey ($rows | Where-Object { $_.Name -eq 'bing' })) = $true }
+$againH = @(Get-RetryTargets $targets $rows $base $hb)
+Check 'hopeless blocked skipped, clean kept' ((($againH | ForEach-Object { $_.Name }) -join ',') -eq 'yt,bing,adobe,apple')
 
 $retry = @((Row DPI b FREEZE), (Row YouTube yt OK 200), (Row Clean bing OK 110), (Row Clean adobe OK 700), (Row Clean apple FAIL))
 $m = @(Merge-Retry $rows $retry)
