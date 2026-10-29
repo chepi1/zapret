@@ -139,12 +139,13 @@ function Show-SettingsMenu {
         $upd = Get-ZapretUpdate
         Write-BoxRow ('  9. Обновить zapret: у вас ' + $Script:Version + $(if ($upd) { ', вышла ' + $upd } else { '' }))
         Write-BoxRow ('  10. Уведомления Windows: ' + $(if (Test-NotifyEnabled $s) { 'вкл' } else { 'выкл' }))
+        Write-BoxRow '  11. Удалить zapret из Windows (перед удалением папки)'
         Write-BoxSep
         Write-BoxRow '  0. Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
-        $map = @{ '1' = 'strategy'; '2' = 'auto'; '3' = 'game'; '4' = 'ipset'; '5' = 'autolist'; '6' = 'service'; '7' = 'autotune'; '8' = 'lists'; '9' = 'update'; '10' = 'notify' }
+        $map = @{ '1' = 'strategy'; '2' = 'auto'; '3' = 'game'; '4' = 'ipset'; '5' = 'autolist'; '6' = 'service'; '7' = 'autotune'; '8' = 'lists'; '9' = 'update'; '10' = 'notify'; '11' = 'uninstall' }
         if ($map.ContainsKey($c)) { Invoke-MenuAction $map[$c] } elseif ($Script:LetterKeys.ContainsKey($c)) { Invoke-MenuAction $Script:LetterKeys[$c] }
     }
 }
@@ -577,15 +578,17 @@ function Start-Diagnostics {
 # hosts Flowseal и автосписок. В конце - список того, что можно исправить, и выбор, что исправлять.
 function Show-PcCheck {
     $fixes = New-Object System.Collections.Generic.List[object]
-    # блоки исправлений выполняются здесь же, в конце функции, и видят её переменные ($want и т.п.)
-    function Add-Fix([string]$Text, [scriptblock]$Do) { $fixes.Add((New-Object PSObject -Property @{ Text = $Text; Do = $Do })) }
+    # блоки исправлений выполняются здесь же, в конце функции, и видят её переменные ($want и т.п.);
+    # $Arg - для исправлений в цикле: блок получает его параметром, а не последнее значение переменной цикла
+    function Add-Fix([string]$Text, [scriptblock]$Do, $Arg = $null) { $fixes.Add((New-Object PSObject -Property @{ Text = $Text; Do = $Do; Arg = $Arg })) }
 
     Write-Host ''
     Write-Color 'Проверка обходов' White
     # сетевые пробы IPv6 и hosts - сразу и одновременно, пока идут быстрые проверки (раньше ~6 + ~12 с подряд)
     $v6Jobs = if (@(Get-Ipv6Addresses).Count) { Start-Ipv6Probes } else { $null }
     $pinJobs = Start-HostsPinProbes
-    Write-Color '1/4 Подключение' Cyan
+    $svcJobs = Start-ServiceProbes
+    Write-Color '1/5 Подключение' Cyan
     Show-ConnectionCheck | Out-Null
     $foreign = @(Get-ForeignBypass)
     if ($foreign.Count) {
@@ -614,7 +617,19 @@ function Show-PcCheck {
         if ($via.Count) { Write-Color ('  ' + ($via -join ' и ') + ' сейчас ходит через прокси. Выключите прокси - перезапустите ' + $(if ($via.Count -gt 1) { 'их' } else { 'его' }) + ', иначе останется без сети.') Gray }
     }
 
-    Write-Color '2/4 IPv6 (~6 с)' Cyan
+    Write-Color '2/5 Сервисы - открываются ли прямо сейчас' Cyan
+    $svcOn = @(Get-OurProcesses).Count -gt 0
+    if (-not $svcOn) { Write-Color '  (обход остановлен - проверка без него)' Gray }
+    $svcRows = @(Get-ServiceProbeResults $svcJobs)
+    foreach ($x in $svcRows) {
+        $txt = if ($x.Ok) { 'работает, TLS {0} мс' -f $x.Ms } else { 'не открылся' }
+        Write-Color ('  {0,-24} {1}' -f $x.Name, $txt) $(if ($x.Ok) { 'Green' } else { 'Yellow' })
+    }
+    $svcBad = @($svcRows | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
+    if ($svcBad.Count -and $svcOn) { Write-Color ('  ! Не открываются: ' + ($svcBad -join ', ') + '. Провайдер мог сменить блокировку - автоподбор (пункт 3) найдёт стратегию, которая пробивает.') Yellow }
+    elseif ($svcBad.Count) { Write-Color '  Обход остановлен: включите его пунктом 1.' Yellow }
+
+    Write-Color '3/5 IPv6 (~6 с)' Cyan
     $v6 = Get-Ipv6Report $v6Jobs
     $v6Bad = $v6.Broken.Count -and -not $v6.PreferV4
     Write-Color ('  ' + $v6.Text) $(if ($v6Bad) { 'Yellow' } else { 'Gray' })
@@ -623,7 +638,7 @@ function Show-PcCheck {
         Add-Fix 'Вернуть стандартный порядок Windows (сначала IPv6): сейчас IPv6 везде отвечает, "предпочитать IPv4" не нужно' { Set-PreferIpv4 $false }
     }
 
-    Write-Color '3/4 hosts Flowseal: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal' Cyan
+    Write-Color '4/5 hosts: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal, серверы игр' Cyan
     $status = Get-HostsStatus
     $rows = @(Test-HostsPins -Pending $pinJobs)
     foreach ($x in $rows) {
@@ -659,8 +674,27 @@ function Show-PcCheck {
             $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
         }
     }
+    # серверы, к которым программа под трекером не подключилась: часть адресов режут - закрепляем рабочие; режут все - только VPN
+    foreach ($kv in @((Get-BlockedHosts).GetEnumerator())) {
+        $name = $kv.Key
+        $dns = @()
+        try { $dns = @(Resolve-DnsName $name -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
+        $t = @(Test-TlsIps $name @(@($dns) + @($kv.Value) | Select-Object -Unique))
+        $good = @($t | Where-Object { $_.Ok })
+        if ($good.Count) {
+            Write-Color ('  ! Сервер {0}: трекер видел, что к нему не подключиться ({1}); сейчас отвечают {2} из {3} адресов' -f $name, ($kv.Value -join ', '), $good.Count, $t.Count) Yellow
+            Add-Fix ('hosts: закрепить рабочие адреса ' + $name + ' - часть его адресов провайдер режет по IP') {
+                param($n)
+                Add-GamePinHost $n
+                $s = Get-Settings; $s.gamepins = 'on'; Save-Settings $s
+                $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
+            } $name
+        } else {
+            Write-Color ('  Сервер {0} заблокирован по IP целиком (не отвечает ни один из {1} адресов): обход тут не поможет, только VPN' -f $name, $t.Count) Gray
+        }
+    }
 
-    Write-Color '4/4 Автосписок сайтов' Cyan
+    Write-Color '5/5 Автосписок сайтов' Cyan
     $ips = @(Get-AutolistIps)
     Write-Color ('  ' + (Get-AutolistText (Get-Settings))) Gray
     if ($ips.Count) {
@@ -678,7 +712,7 @@ function Show-PcCheck {
     foreach ($n in $pick) {
         if ($n -lt 1 -or $n -gt $fixes.Count) { continue }
         $f = $fixes[$n - 1]
-        $ok = & $f.Do
+        $ok = & $f.Do $f.Arg
         if ($ok -ne $false) { Write-Color ('Готово: ' + $f.Text) Green } else { Write-Color ('Не получилось: ' + $f.Text) Red }
     }
     if (@($pick | Where-Object { $fixes[$_ - 1].Text -like 'hosts*' }).Count) { Write-Color 'Копия прежнего hosts - runtime\hosts-<дата>.bak. Браузер и Telegram лучше перезапустить.' Gray }
@@ -706,7 +740,8 @@ function Invoke-MenuAction([string]$Name) {
             if (Get-NotifyTask) { Write-Color 'Перед удалением папки выключите и уведомления (Настройки -> 10).' Gray }
             # перед удалением - вернуть то, что сборка меняла в Windows по проверке обходов
             $hostsSet = @((Get-HostsStatus).Values | Where-Object { $_.Present }).Count -gt 0
-            $pinsSet = @(Read-HostsEntries $Script:HostsFile | Where-Object { $Script:GamePinHosts -contains $_.Host }).Count -gt 0
+            $pinNames = @(Get-GamePinHosts)
+            $pinsSet = @(Read-HostsEntries $Script:HostsFile | Where-Object { $pinNames -contains $_.Host }).Count -gt 0
             if ($hostsSet -or $pinsSet -or (Get-PreferIpv4)) {
                 $changed = @($(if ($hostsSet) { 'записи hosts Flowseal' }), $(if ($pinsSet) { 'адреса серверов игр в hosts' }), $(if (Get-PreferIpv4) { '"предпочитать IPv4"' }) | Where-Object { $_ })
                 Write-Color ('Сборка (проверка обходов) меняла в Windows: ' + ($changed -join ', ') + '.') Gray
@@ -759,7 +794,34 @@ function Invoke-MenuAction([string]$Name) {
         'telegram' { Show-TelegramMenu }
         'discordcache' { Clear-DiscordMenu }
         'notify' { Toggle-Notify }
+        'uninstall' { Remove-ZapretFromWindows }
     }
+}
+
+# Всё, что сборка ставила в Windows, - одним пунктом. После этого папку можно просто удалить.
+function Remove-ZapretFromWindows {
+    Write-Host ''
+    Write-Color 'Будет убрано: обход и драйвер WinDivert, служба автозапуска, задачи планировщика (автонастройка, уведомления,' Yellow
+    Write-Color 'мост Telegram), записи zapret в hosts и особые права на папки сборки. Настройки и отчёты в runtime останутся.' Yellow
+    if (-not (Read-YesNo 'Удалить zapret из Windows?')) { return }
+    $tg = ((Get-Settings).telegram -eq 'on') -or [bool](Get-TgTask)
+    Write-TextNoBom (Get-PkgPath $Script:ManualStopFile) (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    Remove-BypassService
+    if (-not (Stop-Bypass -Unload)) { Write-Color ('Драйвер WinDivert оставлен: им пользуется другой обход (' + (@(Get-ForeignBypass) -join ', ') + ').') Yellow }
+    Remove-AutotuneTask
+    Remove-NotifyTask
+    if ($tg) { Set-TelegramMode $false | Out-Null }
+    if (@((Get-HostsStatus).Values | Where-Object { $_.Present }).Count) { Set-HostsFlowseal @() | Out-Null }
+    $s = Get-Settings; $s.gamepins = 'off'; Save-Settings $s
+    $pinNames = @(Get-GamePinHosts)
+    if (@(Read-HostsEntries $Script:HostsFile | Where-Object { $pinNames -contains $_.Host }).Count) { Set-GamePins @{} | Out-Null }
+    if (Get-PreferIpv4) {
+        if (Read-YesNo 'Включено "предпочитать IPv4" (его ставит проверка обходов). Вернуть стандартный порядок Windows? Если включали сами - ответьте n') { Set-PreferIpv4 $false | Out-Null }
+    }
+    Unprotect-Package
+    Write-Color 'Готово: zapret убран из Windows. Папку можно удалить (сначала закройте это окно).' Green
+    if ($tg) { Write-Color 'В Telegram Desktop выключите прокси: Настройки -> Продвинутые настройки -> Тип соединения -> Системный. Иначе он останется без сети.' Yellow }
+    Pause-Menu
 }
 
 # Буквы версий до zapret 1.0 (NBA2K27-zapret2) работают с любого экрана - для тех, кто к ним привык. Русская раскладка - та же клавиша.

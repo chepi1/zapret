@@ -389,7 +389,19 @@ function Get-SummaryLines([bool]$Final) {
 function Save-Track([bool]$Final) {
     $all = @($log) + @(Get-SummaryLines $Final)
     [System.IO.File]::WriteAllText($logFile, (($all -join "`r`n") + "`r`n"), $Script:Utf8NoBom)
-    if (-not $Replay) { Copy-Item $logFile (Join-Path $Script:Runtime 'track-last.txt') -Force }
+    if (-not $Replay) { Copy-Item $logFile (Join-Path $Script:Runtime 'track-last.txt') -Force; Save-BlockedHosts }
+}
+
+# Серверы, к которым программа подключалась без ответа, с именами из кэша DNS - в runtime\blocked-hosts.txt.
+# Проверка обходов (пункт 5) проверит остальные их адреса и предложит закрепить рабочие в hosts.
+function Save-BlockedHosts {
+    $f = Get-PkgPath $Script:BlockedHostsFile
+    $lines = @(Get-ListLines $f)
+    foreach ($x in @($ep.Values | Where-Object { $_.Proto -eq 'tcp' -and $_.Syn -gt 0 -and $_.Out -eq 0 -and $_.In -eq 0 -and $hostOf.ContainsKey($_.Ip) })) {
+        $lines += ('{0} {1} {2:yyyy-MM-dd}' -f $hostOf[$x.Ip], $x.Ip, $x.First)
+    }
+    $lines = @($lines | Select-Object -Unique | Select-Object -Last 50)
+    if ($lines.Count) { Write-TextNoBom $f (($lines -join "`r`n") + "`r`n") }
 }
 $session = 'zapretTrack'
 $etlFiles = @((Join-Path $Script:Runtime 'track-a.etl'), (Join-Path $Script:Runtime 'track-b.etl'))
