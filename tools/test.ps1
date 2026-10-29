@@ -344,6 +344,7 @@ try {
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; exit 1 }
 
     $table = @{}
+    $ipSkip = @{}   # группа|имя -> строка прогона без обхода: адреса, заблокированные по IP
     $mode = if ($Full) { 'полный автоподбор' } else { 'быстрый автоподбор' }
     $report.Add(('{0}: {1} стратегий' -f $mode, $strategies.Count))
     Write-Color ("{0}: проверяю {1} адресов без обхода и с {2} стратегиями, раундов: {3}. Около {4} мин." -f $mode, $targets.Count, $strategies.Count, $Rounds, [math]::Ceiling(($strategies.Count + 1) * 15 * $Rounds / 60)) Cyan
@@ -356,19 +357,30 @@ try {
             $i++
             Write-Host ''
             Write-Color ('[{0,2}/{1}] {2}' -f $i, $runs.Count, $(if ($run.Id -eq '0') { 'без обхода (как режет провайдер)' } else { $run.Name })) Cyan
-            Write-Host -NoNewline ('        проверяю {0} адресов...' -f $targets.Count)
+            Write-Host -NoNewline ('        проверяю {0} адресов...' -f $(if ($run.Id -ne '0') { $targets.Count - $ipSkip.Count } else { $targets.Count }))
             $p = $null
             if ($run.Id -ne '0') {
                 $p = Start-TestInstance $settings $run.Id
                 if (-not $p) { Write-Color ' winws2 не запустился' Red; continue }
             }
             $cleanBase = if ($table.ContainsKey('0')) { Get-CleanBaseline $table['0'] } else { $null }
-            $res = @(Invoke-CurlBatch $targets $postFile)
+            # заблокированные по IP (найдены в прогоне без обхода) стратегиям не открыть - их не ждём до тайм-аута
+            # в каждом прогоне, а сразу записываем им тот же провал, что без обхода: баллы от этого не меняются
+            $runTargets = if ($run.Id -ne '0' -and $ipSkip.Count) { @($targets | Where-Object { -not $ipSkip.ContainsKey($_.Group + '|' + $_.Name) }) } else { $targets }
+            $res = @(Invoke-CurlBatch $runTargets $postFile)
             # вторая попытка той же стратегией, пока winws2 ещё работает; почти все повторы помещаются в одну волну
-            $again = @(Get-RetryTargets $targets $res $(if ($run.Id -ne '0') { $cleanBase }))
+            $again = @(Get-RetryTargets $runTargets $res $(if ($run.Id -ne '0') { $cleanBase }))
             if ($again.Count) {
                 Write-Host -NoNewline (' повтор {0}...' -f $again.Count)
                 $res = @(Merge-Retry $res @(Invoke-CurlBatch $again $postFile ($Parallel * 2)))
+            }
+            if ($run.Id -ne '0') { foreach ($k in $ipSkip.Keys) { $res += $ipSkip[$k].PSObject.Copy() } }
+            elseif (-not $ipSkip.Count) {
+                foreach ($n in @(Get-IpBlocked @{ '0' = $res })) {
+                    $row = $res | Where-Object { $_.Name -eq $n } | Select-Object -First 1
+                    if ($row) { $ipSkip[$row.Group + '|' + $row.Name] = $row }
+                }
+                if ($ipSkip.Count) { Write-Host -NoNewline (' заблокированы по IP: {0} - стратегиям их не проверяю...' -f (@($ipSkip.Values | ForEach-Object { $_.Name }) -join ', ')) }
             }
             if ($p) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } ; Start-Sleep -Milliseconds 700 }
             if (-not $table.ContainsKey($run.Id)) { $table[$run.Id] = @() }
