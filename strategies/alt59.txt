@@ -1,0 +1,50 @@
+# name: ALT11 белый 5
+# desc: Как ALT11 белый 1, но в фейке имя ozon.ru. Белые списки у узлов провайдеров разные.
+# origin: zapret 1.6, на основе ALT11 мягкой; YouTube, Discord и игра - как в ней
+# since: 1.6
+[quic]
+--out-range=-n10
+--payload=quic_initial
+--lua-desync=fake:blob=quic_google:repeats=11
+[discord_udp]
+--out-range=a
+--payload=discord_ip_discovery
+--lua-desync=fake:blob=discord_udp:repeats=6
+--payload=stun
+--lua-desync=fake:blob=discord_udp:repeats=6
+[discord_media]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_google:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:tls_mod=rnd,dupsid
+--lua-desync=multisplit:pos=1
+[google]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=tls_google:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:ip_id=zero:tls_mod=rnd,dupsid
+--lua-desync=multisplit:pos=1:ip_id=zero
+[general]
+--out-range=-d10
+--payload=tls_client_hello
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=fake:blob=fake_default_tls:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:tls_mod=rnd,dupsid,sni=ozon.ru
+--lua-desync=multisplit:pos=1
+--payload=http_req
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=multisplit:pos=1
+[game_tcp]
+--out-range=<n4
+--payload=tls_client_hello
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=multisplit:pos=1:seqovl=664:seqovl_pattern=tls_sferum
+--payload=http_req
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=multisplit:pos=1:seqovl=664:seqovl_pattern=tls_sferum
+--payload=unknown
+--lua-desync=fake:payload=unknown:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=fake:payload=unknown:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=multisplit:payload=unknown:pos=1:seqovl=664:seqovl_pattern=tls_sferum
+[game_udp]
+--out-range=<n4
+--payload=all
+--lua-desync=fake:payload=all:blob=game_udp:repeats=10
