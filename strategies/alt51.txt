@@ -1,5 +1,5 @@
-# name: WL VK
-# desc: Как ALT11 мягкая, но фейк ClientHello - со SNI vk.com вместо sferum.ru.
+# name: ALT11 белый 2
+# desc: Как ALT11 белый 1, но в фейке имя vk.com. Белые списки у узлов провайдеров разные.
 # origin: zapret 1.6, на основе ALT11 мягкой; YouTube, Discord и игра - как в ней
 # since: 1.6
 [quic]
