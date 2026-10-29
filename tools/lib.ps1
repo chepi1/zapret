@@ -679,9 +679,14 @@ function Invoke-Native([string]$File, [string]$Arguments, [string]$WorkDir, [int
 }
 
 # Проверка параметров без перехвата трафика (--dry-run)
-function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode) {
-    try { $cmd = Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun }
-    catch { return New-Object PSObject -Property @{ Ok = $false; Output = $_.Exception.Message } }
+# $CmdLine - уже собранная командная строка запуска (Start-Bypass): к ней только добавляется --dry-run,
+# а не собирается заново
+function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [string]$CmdLine) {
+    if ($CmdLine) { $cmd = (ConvertTo-WinArg '--dry-run') + ' ' + $CmdLine }
+    else {
+        try { $cmd = Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun }
+        catch { return New-Object PSObject -Property @{ Ok = $false; Output = $_.Exception.Message } }
+    }
     $r = Invoke-Native $Script:Exe $cmd $Script:Bin 60
     # изредка процесс cygwin падает при старте без единого слова - это не ошибка параметров, пробуем ещё раз
     if ($r.ExitCode -ne 0 -and -not $r.Output) {
@@ -708,14 +713,15 @@ function Start-Bypass([switch]$Quiet) {
     Enable-TcpTimestamps
     Update-RuntimeLists
 
-    $dry = Test-ConfigDry $settings
+    try { $cmd = Get-BypassCmdLine -Settings $settings }
+    catch { Write-Color $_.Exception.Message Red; return $false }
+    $dry = Test-ConfigDry $settings -CmdLine $cmd
     if (-not $dry.Ok) {
         Write-Color 'winws2 отклонил параметры:' Red
         Write-Host $dry.Output
         return $false
     }
 
-    $cmd = Get-BypassCmdLine -Settings $settings
     $svc = Get-OurService
     $since = Get-Date
     $err = ''
@@ -870,10 +876,12 @@ function Install-BypassService {
 
     Enable-TcpTimestamps
     Update-RuntimeLists | Out-Null
-    $dry = Test-ConfigDry $settings
+    try { $cmd = Get-BypassCmdLine -Settings $settings }
+    catch { Write-Color $_.Exception.Message Red; return $false }
+    $dry = Test-ConfigDry $settings -CmdLine $cmd
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; return $false }
 
-    $binPath = Get-ServiceBinPath (Get-BypassCmdLine -Settings $settings)
+    $binPath = Get-ServiceBinPath $cmd
     $since = Get-Date
     New-Service -Name $Script:ServiceName -BinaryPathName $binPath -DisplayName $Script:ServiceDisplayName `
         -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic | Out-Null
@@ -905,7 +913,9 @@ function Update-LegacyNames {
         }
     }
     $oldTask = $null
-    try { $oldTask = Get-ScheduledTask -TaskName $Script:LegacyAutotuneTask -ErrorAction Stop } catch { }
+    if ((Test-TaskExists $Script:LegacyAutotuneTask) -ne $false) {
+        try { $oldTask = Get-ScheduledTask -TaskName $Script:LegacyAutotuneTask -ErrorAction Stop } catch { }
+    }
     if ($oldTask) {
         try { Unregister-ScheduledTask -TaskName $Script:LegacyAutotuneTask -Confirm:$false -ErrorAction Stop } catch { }
         if (-not (Get-AutotuneTask)) {
@@ -1135,6 +1145,7 @@ function Get-PortOwnerName([int]$Port) {
 }
 
 function Get-TgTask {
+    if ((Test-TaskExists $Script:TgTask) -eq $false) { return $null }
     try { return Get-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { return $null }
 }
 
@@ -1385,7 +1396,9 @@ function Get-NotifyTask {
     $c = $Script:NotifyTaskCache
     if ($c -and ((Get-Date) - $c.Time).TotalSeconds -lt 60) { return $c.Task }
     $task = $null
-    try { $task = Get-ScheduledTask -TaskName $Script:NotifyTask -ErrorAction Stop } catch { }
+    if ((Test-TaskExists $Script:NotifyTask) -ne $false) {
+        try { $task = Get-ScheduledTask -TaskName $Script:NotifyTask -ErrorAction Stop } catch { }
+    }
     $Script:NotifyTaskCache = New-Object PSObject -Property @{ Time = Get-Date; Task = $task }
     return $task
 }
@@ -1476,12 +1489,15 @@ function Get-GameBoosters([switch]$Cached) {
     $procs = @(Get-Process -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
     $svcs = @(Get-Service -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Running' })
     $found = @()
+    # обычные циклы вместо вложенных Where-Object: сотни процессов на десяток шаблонов - было ~80 мс на каждый вызов
     foreach ($name in $Script:GameBoosters.Keys) {
-        $pats = $Script:GameBoosters[$name]
-        $p = @($procs | Where-Object { $n = $_; @($pats | Where-Object { $n -like $_ }).Count })
-        if ($p.Count) { $found += $name; continue }
-        $s = @($svcs | Where-Object { $sv = $_; @($pats | Where-Object { $sv.Name -like $_ -or $sv.DisplayName -like $_ }).Count })
-        if ($s.Count) { $found += ('{0} (служба {1})' -f $name, $s[0].Name) }
+        $pats = @($Script:GameBoosters[$name] | ForEach-Object { New-Object System.Management.Automation.WildcardPattern($_, 'IgnoreCase') })
+        $hit = $false
+        foreach ($n in $procs) { foreach ($w in $pats) { if ($w.IsMatch($n)) { $hit = $true; break } }; if ($hit) { break } }
+        if ($hit) { $found += $name; continue }
+        $svc = $null
+        foreach ($sv in $svcs) { foreach ($w in $pats) { if ($w.IsMatch($sv.Name) -or $w.IsMatch($sv.DisplayName)) { $svc = $sv; break } }; if ($svc) { break } }
+        if ($svc) { $found += ('{0} (служба {1})' -f $name, $svc.Name) }
     }
     $Script:BoostersCache = New-Object PSObject -Property @{ Time = Get-Date; Items = $found }
     return $found
@@ -1646,7 +1662,9 @@ function Set-PreferIpv4([bool]$On) {
 # TLS до $Script:Ipv6Hosts по IPv4 и по IPv6 напрямую (мимо прокси), все запросы параллельно - около $TimeoutSec секунд.
 # Verdict: ok; broken - по IPv4 открылся, по IPv6 нет; slow - по IPv6 заметно медленнее; none - у сайта нет IPv6;
 # down - не открылся ни так, ни так.
-function Test-Ipv6Paths([int]$TimeoutSec = 6) {
+# Пробы IPv6 запускаются отдельно от разбора: проверка обходов стартует их сразу, вместе с пробами hosts,
+# а результаты собирает потом - так обе проверки идут одновременно (было ~6 + ~12 с подряд)
+function Start-Ipv6Probes([int]$TimeoutSec = 6) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
     $jobs = @{}
@@ -1663,6 +1681,11 @@ function Test-Ipv6Paths([int]$TimeoutSec = 6) {
             $jobs[$name + '|' + $v] = New-Object PSObject -Property @{ P = $p; Out = $p.StandardOutput.ReadToEndAsync() }
         }
     }
+    return $jobs
+}
+
+function Test-Ipv6Paths([int]$TimeoutSec = 6, $Jobs = $null) {
+    $jobs = if ($Jobs) { $Jobs } else { Start-Ipv6Probes $TimeoutSec }
     $inv = [Globalization.CultureInfo]::InvariantCulture
     $rows = @()
     foreach ($name in $Script:Ipv6Hosts.Keys) {
@@ -1686,14 +1709,14 @@ function Test-Ipv6Paths([int]$TimeoutSec = 6) {
 }
 
 # Итог проверки IPv6 одной строкой для отчётов (Text) и подробно (Rows).
-function Get-Ipv6Report {
+function Get-Ipv6Report($Jobs = $null) {
     $prefer = Get-PreferIpv4
     $mode = if ($prefer) { 'Windows сначала пробует IPv4 (включено "предпочитать IPv4")' } else { 'Windows сначала пробует IPv6' }
     if (-not @(Get-Ipv6Addresses).Count) {
         return New-Object PSObject -Property @{ Has = $false; PreferV4 = $prefer; Rows = @(); Broken = @(); Slow = @()
             Text = 'IPv6: у ПК нет IPv6-адреса в интернете, всё идёт по IPv4 - проверять нечего' }
     }
-    $rows = @(Test-Ipv6Paths)
+    $rows = @(Test-Ipv6Paths -Jobs $Jobs)
     $broken = @($rows | Where-Object { $_.Verdict -eq 'broken' } | ForEach-Object { $_.Name })
     $slow = @($rows | Where-Object { $_.Verdict -eq 'slow' } | ForEach-Object { $_.Name })
     $tested = @($rows | Where-Object { @('ok', 'broken', 'slow') -contains $_.Verdict }).Count
@@ -1776,36 +1799,12 @@ function Get-HostsYoutube {
 # Открывается ли служба по адресу из DNS провайдера (мимо hosts) и по адресу Flowseal: TLS напрямую, мимо прокси.
 # Verdict: helps - по DNS не открывается, по адресу Flowseal да; worse - по адресу Flowseal не открывается или
 # заметно медленнее; same - разницы нет; down - не открывается никак.
-# Сайты Telegram даже по рабочему адресу открываются не каждый раз, поэтому сбой и "медленнее" перепроверяются
-# второй попыткой, в зачёт - лучшая.
-function Test-HostsPins([int]$TimeoutSec = 6) {
+# Сайты Telegram даже по рабочему адресу открываются не каждый раз, поэтому каждый адрес пробуется $Tries раз
+# одновременно, в зачёт - лучшая попытка (раньше повтор шёл вторым кругом и добавлял ещё 6 с).
+# Start-HostsPinProbes запускает пробы и сразу возвращается: проверка обходов стартует их вместе с пробами IPv6.
+function Start-HostsPinProbes([int]$TimeoutSec = 6, [int]$Tries = 2) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $inv = [Globalization.CultureInfo]::InvariantCulture
-    # все пробы пачки - параллельно; у каждой проставляет Ok и лучшее Ms
-    function Invoke-Probes($Items) {
-        $run = @()
-        foreach ($it in $Items) {
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = $curl
-            $psi.Arguments = '-s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --resolve "' + $it.Probe + ':443:' + $it.Ip +
-                '" -w "%{http_code} %{time_appconnect}" "https://' + $it.Probe + $it.Path + '"'
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $p = [System.Diagnostics.Process]::Start($psi)
-            $run += New-Object PSObject -Property @{ It = $it; P = $p; Out = $p.StandardOutput.ReadToEndAsync() }
-        }
-        foreach ($j in $run) {
-            if (-not $j.P.WaitForExit(($TimeoutSec + 5) * 1000)) { try { $j.P.Kill() } catch { } ; $j.P.WaitForExit() }
-            $parts = @($j.Out.Result.Trim() -split '\s+')
-            if ($j.P.ExitCode -ne 0 -or $parts[0] -eq '000' -or $parts.Count -lt 2) { continue }
-            $ms = 0
-            try { $ms = [math]::Round([double]::Parse($parts[1], $inv) * 1000) } catch { }
-            if (-not $j.It.Ok -or $ms -lt $j.It.Ms) { $j.It.Ms = $ms }
-            $j.It.Ok = $true
-        }
-    }
     $ref = @(Read-HostsEntries (Get-PkgPath $Script:HostsRef))
     $items = @()
     foreach ($g in $Script:HostsGroups.Keys) {
@@ -1818,15 +1817,37 @@ function Test-HostsPins([int]$TimeoutSec = 6) {
                 Probe = $probe; Path = $Script:HostsGroups[$g].Path; Ok = $false; Ms = 0 }
         }
     }
-    $withIp = @($items | Where-Object { $_.Ip })
-    Invoke-Probes $withIp
-    $again = @($withIp | Where-Object { -not $_.Ok })
-    foreach ($g in $Script:HostsGroups.Keys) {
-        $d = $items | Where-Object { $_.Group -eq $g -and $_.Kind -eq 'Dns' }
-        $p = $items | Where-Object { $_.Group -eq $g -and $_.Kind -eq 'Pin' }
-        if ($d.Ok -and $p.Ok -and $p.Ms -gt $d.Ms + 300) { $again += @($d, $p) }
+    $run = @()
+    foreach ($it in @($items | Where-Object { $_.Ip })) {
+        for ($t = 0; $t -lt $Tries; $t++) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $curl
+            $psi.Arguments = '-s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --resolve "' + $it.Probe + ':443:' + $it.Ip +
+                '" -w "%{http_code} %{time_appconnect}" "https://' + $it.Probe + $it.Path + '"'
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $run += New-Object PSObject -Property @{ It = $it; P = $p; Out = $p.StandardOutput.ReadToEndAsync() }
+        }
     }
-    if ($again.Count) { Invoke-Probes $again }
+    return New-Object PSObject -Property @{ Items = $items; Run = $run; TimeoutSec = $TimeoutSec }
+}
+
+function Test-HostsPins([int]$TimeoutSec = 6, $Pending = $null) {
+    $pd = if ($Pending) { $Pending } else { Start-HostsPinProbes $TimeoutSec }
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    # у каждого адреса - Ok и лучшее Ms из его попыток
+    foreach ($j in $pd.Run) {
+        if (-not $j.P.WaitForExit(($pd.TimeoutSec + 5) * 1000)) { try { $j.P.Kill() } catch { } ; $j.P.WaitForExit() }
+        $parts = @($j.Out.Result.Trim() -split '\s+')
+        if ($j.P.ExitCode -ne 0 -or $parts[0] -eq '000' -or $parts.Count -lt 2) { continue }
+        $ms = 0
+        try { $ms = [math]::Round([double]::Parse($parts[1], $inv) * 1000) } catch { }
+        if (-not $j.It.Ok -or $ms -lt $j.It.Ms) { $j.It.Ms = $ms }
+        $j.It.Ok = $true
+    }
+    $items = $pd.Items
     $rows = @()
     foreach ($g in $Script:HostsGroups.Keys) {
         $r = @{}
@@ -2197,9 +2218,21 @@ function Get-AutotuneTask {
     $c = $Script:AutotuneTaskCache
     if ($c -and ((Get-Date) - $c.Time).TotalSeconds -lt 60) { return $c.Task }
     $task = $null
-    try { $task = Get-ScheduledTask -TaskName $Script:AutotuneTask -ErrorAction Stop } catch { }
+    if ((Test-TaskExists $Script:AutotuneTask) -ne $false) {
+        try { $task = Get-ScheduledTask -TaskName $Script:AutotuneTask -ErrorAction Stop } catch { }
+    }
     $Script:AutotuneTaskCache = New-Object PSObject -Property @{ Time = Get-Date; Task = $task }
     return $task
+}
+
+# Есть ли задача планировщика - по его ключу в реестре, без модуля ScheduledTasks: первая загрузка модуля стоит ~0,4 с,
+# а задач часто нет вовсе. Без прав администратора ключ закрыт - тогда $null, и спрашиваем планировщик как обычно.
+function Test-TaskExists([string]$Name) {
+    try {
+        $k = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey('SOFTWARE\Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache\Tree\' + $Name)
+        if ($k) { $k.Close(); return $true }
+        return $false
+    } catch { return $null }
 }
 
 function Get-AutotuneScript { return (Join-Path $Script:Root 'tools\autotune.ps1') }

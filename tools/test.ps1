@@ -297,13 +297,16 @@ try {
     Enable-TcpTimestamps
     Update-RuntimeLists | Out-Null
 
-    # IPv6 провайдера (без обхода): у некоторых провайдеров часть сетей не отвечает, отсюда "Steam не качает"
-    $v6 = Get-Ipv6Report
+    # IPv6 провайдера (без обхода): у некоторых провайдеров часть сетей не отвечает, отсюда "Steam не качает".
+    # Пробы IPv6 и hosts идут одновременно
+    $v6Jobs = if (@(Get-Ipv6Addresses).Count) { Start-Ipv6Probes } else { $null }
+    $pinJobs = Start-HostsPinProbes
+    $v6 = Get-Ipv6Report $v6Jobs
     Write-Color $v6.Text $(if ($v6.Broken.Count -and -not $v6.PreferV4) { 'Yellow' } else { 'Gray' })
     if ($v6.Broken.Count -and -not $v6.PreferV4) { Write-Color '  Пункт 4 меню (проверка обходов) включит "предпочитать IPv4" (Steam перестанет ждать по 20 секунд).' Yellow }
     $report.Add($v6.Text)
     # hosts Flowseal: подменяет ли DNS провайдера адреса GitHub, Telegram и Discord (на некоторых провайдерах бывает)
-    $hostsText = Get-HostsReportText @(Test-HostsPins) (Get-HostsStatus)
+    $hostsText = Get-HostsReportText @(Test-HostsPins -Pending $pinJobs) (Get-HostsStatus)
     Write-Color $hostsText Gray
     $report.Add($hostsText)
 

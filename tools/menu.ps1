@@ -572,6 +572,9 @@ function Show-PcCheck {
 
     Write-Host ''
     Write-Color 'Проверка обходов' White
+    # сетевые пробы IPv6 и hosts - сразу и одновременно, пока идут быстрые проверки (раньше ~6 + ~12 с подряд)
+    $v6Jobs = if (@(Get-Ipv6Addresses).Count) { Start-Ipv6Probes } else { $null }
+    $pinJobs = Start-HostsPinProbes
     Write-Color '1/4 Подключение' Cyan
     Show-ConnectionCheck | Out-Null
     $foreign = @(Get-ForeignBypass)
@@ -602,7 +605,7 @@ function Show-PcCheck {
     }
 
     Write-Color '2/4 IPv6 (~6 с)' Cyan
-    $v6 = Get-Ipv6Report
+    $v6 = Get-Ipv6Report $v6Jobs
     $v6Bad = $v6.Broken.Count -and -not $v6.PreferV4
     Write-Color ('  ' + $v6.Text) $(if ($v6Bad) { 'Yellow' } else { 'Gray' })
     if ($v6Bad) { Add-Fix 'Включить "предпочитать IPv4": часть сетей IPv6 не отвечает, Steam и сайты ждут по 20 секунд' { Set-PreferIpv4 $true } }
@@ -610,9 +613,9 @@ function Show-PcCheck {
         Add-Fix 'Вернуть стандартный порядок Windows (сначала IPv6): сейчас IPv6 везде отвечает, "предпочитать IPv4" не нужно' { Set-PreferIpv4 $false }
     }
 
-    Write-Color '3/4 hosts Flowseal: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal (~10 с)' Cyan
+    Write-Color '3/4 hosts Flowseal: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal' Cyan
     $status = Get-HostsStatus
-    $rows = @(Test-HostsPins)
+    $rows = @(Test-HostsPins -Pending $pinJobs)
     foreach ($x in $rows) {
         $dns = if ($x.Dns.Ok) { '{0} мс' -f $x.Dns.Ms } elseif ($x.Dns.Ip) { 'не открылся' } else { 'нет адреса' }
         $pin = if ($x.Pin.Ok) { '{0} мс' -f $x.Pin.Ms } elseif ($x.Pin.Ip) { 'не открылся' } else { '-' }
