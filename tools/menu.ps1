@@ -840,6 +840,7 @@ function Show-GamePing {
         Write-Host ''
         Write-Color ('До роутера ({0}, {1}), 15 секунд:' -f $(if ($w.Wifi) { 'Wi-Fi' } else { 'кабель' }), $w.Speed) White
         $j = Measure-GatewayJitter $w.Gateway 15
+        if (-not $j.Count) { Write-Color '  роутер не отвечает на ping (так настроен) - замерить не получится' Gray; return }
         $bad = $j.Spikes -gt 0 -or $j.Lost -gt 0 -or $j.P99 -ge 20
         Write-Color ('  обычно {0} мс, 99% пакетов быстрее {1} мс, максимум {2} мс, всплесков от 30 мс: {3}, потерь: {4}' -f $j.Median, $j.P99, $j.Max, $j.Spikes, $j.Lost) $(if ($bad) { 'Yellow' } else { 'Green' })
         if ($w.Wifi) {

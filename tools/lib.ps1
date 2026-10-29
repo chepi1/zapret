@@ -2288,7 +2288,10 @@ function Update-FlowsealList([string]$Name) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
     if (Test-Path $tmp) { Remove-Item $tmp -Force }
-    $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 60 -o "' + $tmp + '" "' + $Script:FlowsealRaw + $Script:FlowsealLists[$Name] + '"') $Script:Runtime 90
+    $args0 = '-s -L -f --ssl-no-revoke --max-time 60 -o "' + $tmp + '" "' + $Script:FlowsealRaw + $Script:FlowsealLists[$Name] + '"'
+    $r = Invoke-Native $curl $args0 $Script:Runtime 90
+    # GitHub изредка отвечает ошибкой или не отвечает вовсе - вторая попытка через секунду
+    if ($r.ExitCode -ne 0) { Start-Sleep -Seconds 1; $r = Invoke-Native $curl $args0 $Script:Runtime 90 }
     function Result([bool]$Ok, [bool]$Changed, [string]$Text) {
         return New-Object PSObject -Property @{ Name = $Name; Ok = $Ok; Changed = $Changed; Text = ($Name + ': ' + $Text) }
     }
@@ -2343,8 +2346,12 @@ $Script:SelfRepo = 'chepi1/zapret'
 function Get-LatestRelease([string]$Repo) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $r = Invoke-Native $curl ('-s -o NUL --ssl-no-revoke --max-time 5 -w "%{redirect_url}" "https://github.com/' + $Repo + '/releases/latest"') $Script:Runtime 8
-    if ($r.ExitCode -eq 0 -and $r.Output -match '/releases/tag/([^/\s]+)$') { return [uri]::UnescapeDataString($matches[1]) }
+    # TLS с GitHub изредка занимает 4-5 секунд, а то и не проходит - до 10 секунд и вторая попытка (проверка идёт
+    # в фоне, меню её не ждёт)
+    for ($try = 0; $try -lt 2; $try++) {
+        $r = Invoke-Native $curl ('-s -o NUL --ssl-no-revoke --max-time 10 -w "%{redirect_url}" "https://github.com/' + $Repo + '/releases/latest"') $Script:Runtime 14
+        if ($r.ExitCode -eq 0 -and $r.Output -match '/releases/tag/([^/\s]+)$') { return [uri]::UnescapeDataString($matches[1]) }
+    }
     return $null
 }
 
