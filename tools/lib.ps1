@@ -1972,6 +1972,45 @@ function Measure-TcpRtt([string[]]$Hosts, [int]$Tries = 4, [int]$TimeoutMs = 200
     return $best
 }
 
+# ---------- Wi-Fi и задержка до роутера ----------
+# Обход маршрут не меняет: пинг до сервера задают провайдер и расстояние. Что можно поправить на ПК - участок до
+# роутера: по Wi-Fi адаптер раз в минуту-две уходит искать другие сети (агрессивность роуминга), и пакеты игры ждут
+# по 50-300 мс. Это видно по всплескам пинга до роутера.
+
+# Адаптер маршрута по умолчанию: Wi-Fi ли он, скорость, агрессивность роуминга (текущая и самая низкая из допустимых)
+function Get-WifiInfo {
+    $route = Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Sort-Object RouteMetric | Select-Object -First 1
+    if (-not $route) { return $null }
+    $a = Get-NetAdapter -InterfaceIndex $route.InterfaceIndex -ErrorAction SilentlyContinue
+    if (-not $a) { return $null }
+    $wifi = $a.NdisPhysicalMedium -eq 9 -or $a.InterfaceDescription -match '(?i)wi-?fi|wireless|802\.11|wlan'
+    $roam = Get-NetAdapterAdvancedProperty -Name $a.Name -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match '(?i)roaming aggressiveness|агрессивность роуминга' } | Select-Object -First 1
+    # порядок значений у драйверов разный ("5.Highest ... 1.Lowest" у Qualcomm): ищем самое низкое по названию
+    $lowest = $null
+    if ($roam -and $roam.ValidDisplayValues) {
+        $vals = @($roam.ValidDisplayValues)
+        $lowest = @($vals | Where-Object { $_ -match '(?i)lowest|миним|самая низк|^\s*1\s*\.' }) | Select-Object -First 1
+    }
+    return New-Object PSObject -Property @{ Name = $a.Name; Gateway = $route.NextHop; Wifi = $wifi; Speed = $a.LinkSpeed
+        Roam = $(if ($roam) { $roam.DisplayValue } else { $null }); RoamName = $(if ($roam) { $roam.DisplayName } else { $null }); RoamLowest = $lowest }
+}
+
+# Пинг до роутера раз в 50 мс в течение $Seconds: медиана, 99%, максимум, всплески от 30 мс, потери
+function Measure-GatewayJitter([string]$Gateway, [int]$Seconds = 15) {
+    $p = New-Object System.Net.NetworkInformation.Ping
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    $all = New-Object System.Collections.Generic.List[int]
+    $lost = 0
+    while ($sw.Elapsed.TotalSeconds -lt $Seconds) {
+        try { $x = $p.Send($Gateway, 1000); if ($x.Status -eq 'Success') { $all.Add([int]$x.RoundtripTime) } else { $lost++ } } catch { $lost++ }
+        Start-Sleep -Milliseconds 50
+    }
+    $s = @($all | Sort-Object)
+    if (-not $s.Count) { return New-Object PSObject -Property @{ Median = -1; P99 = -1; Max = -1; Spikes = 0; Lost = $lost; Count = 0 } }
+    return New-Object PSObject -Property @{ Median = $s[[int]($s.Count / 2)]; P99 = $s[[int][math]::Min($s.Count - 1, [math]::Floor($s.Count * 0.99))]
+        Max = $s[-1]; Spikes = @($s | Where-Object { $_ -ge 30 }).Count; Lost = $lost; Count = $s.Count }
+}
+
 # ---------- работают ли сервисы прямо сейчас ----------
 # Главный вопрос проверки обходов: открывается ли то, ради чего стоит обход. Запрос - как у браузера и игр: напрямую,
 # мимо прокси, через обход, если он запущен. Любой HTTP-ответ, даже 404, - сервис доступен: TLS прошёл, данные пришли.

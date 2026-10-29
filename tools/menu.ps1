@@ -615,6 +615,14 @@ function Show-PcCheck {
         Write-Color ('  ! В Windows установлен российский корневой сертификат (' + (@($ruCerts | ForEach-Object { ($_.Subject -split ',')[0] } | Select-Object -Unique) -join '; ') + ').') Yellow
         Write-Color '    С ним HTTPS-соединения можно подменять незаметно. Если ставили не сами: certmgr.msc -> Доверенные корневые центры -> удалить.' Yellow
     }
+    $wifi = Get-WifiInfo
+    if ($wifi -and $wifi.Wifi -and $wifi.Roam -and $wifi.RoamLowest -and $wifi.Roam -ne $wifi.RoamLowest) {
+        Write-Color ('  Wi-Fi: {0} - {1}: адаптер время от времени ищет другие сети, и пинг в играх прыгает на 50-300 мс' -f $wifi.RoamName, $wifi.Roam) Gray
+        Add-Fix ('Wi-Fi: ' + $wifi.RoamName + ' - ' + $wifi.RoamLowest + ' (меньше фоновых поисков сетей и всплесков пинга). Wi-Fi переподключится на несколько секунд') {
+            param($w)
+            try { Set-NetAdapterAdvancedProperty -Name $w.Name -DisplayName $w.RoamName -DisplayValue $w.RoamLowest -ErrorAction Stop; $true } catch { Write-Color ('  ' + $_.Exception.Message) Red; $false }
+        } $wifi
+    }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
     $tgOn = (Get-Settings).telegram -eq 'on'
     if ($tgOn -and -not (Test-TgBridgeRunning)) {
@@ -826,6 +834,21 @@ function Show-GamePing {
         Write-Color ('  {0,-46} {1}' -f $k, $(if ($ms -lt 0) { 'не отвечает' } else { [string]$ms + ' мс' })) $color
     }
     Write-Color '  Пинг в самой игре выше на время обработки сервером. Франкфурт до 60 мс из Москвы - хорошо.' Gray
+    # участок до роутера - единственный, на который можно повлиять с ПК
+    $w = Get-WifiInfo
+    if ($w -and $w.Gateway) {
+        Write-Host ''
+        Write-Color ('До роутера ({0}, {1}), 15 секунд:' -f $(if ($w.Wifi) { 'Wi-Fi' } else { 'кабель' }), $w.Speed) White
+        $j = Measure-GatewayJitter $w.Gateway 15
+        $bad = $j.Spikes -gt 0 -or $j.Lost -gt 0 -or $j.P99 -ge 20
+        Write-Color ('  обычно {0} мс, 99% пакетов быстрее {1} мс, максимум {2} мс, всплесков от 30 мс: {3}, потерь: {4}' -f $j.Median, $j.P99, $j.Max, $j.Spikes, $j.Lost) $(if ($bad) { 'Yellow' } else { 'Green' })
+        if ($w.Wifi) {
+            if ($bad) { Write-Color '  Всплески до роутера игра чувствует как лаги. Лучше всего - кабель; если только Wi-Fi - диапазон 5 или 6 ГГц и роутер поближе.' Yellow }
+            if ($w.Roam -and $w.RoamLowest -and $w.Roam -ne $w.RoamLowest) {
+                Write-Color ('  {0}: {1}. Пока она не минимальная, адаптер время от времени ищет другие сети, и пинг прыгает - исправление в пункте 5.' -f $w.RoamName, $w.Roam) Gray
+            }
+        }
+    }
 }
 
 # Всё, что сборка ставила в Windows, - одним пунктом. После этого папку можно просто удалить.
