@@ -344,6 +344,8 @@ try {
     # быстрый проверяет и круги целиком, полный - вообще всё: выпавшая из круга стратегия может в него вернуться
     $strategies = @(Get-TestStrategies -Full:$Full)
     $orderIds = @(Get-AllStrategiesOrdered | ForEach-Object { $_.Id })
+    # Windows могла перезапустить службу после сбоя при остановке - тестовый winws2 с тем же фильтром не запустится
+    if (@(Get-OurProcesses).Count) { Stop-Bypass }
     $dry = Test-ConfigDry $settings $strategies[0].Id -NoAuto -IpsetMode 'any'
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; exit 1 }
 
