@@ -1,6 +1,7 @@
 ﻿# Проверка пакета без перехвата трафика: BOM и синтаксис скриптов, winws2 --dry-run на разных настройках,
 # состав профилей и длина командной строки. Права администратора не нужны.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $fails = 0
 # Windows PowerShell 5.1 без BOM читает русские строки скриптов в кодировке ANSI и ломается
 foreach ($f in @(Get-ChildItem (Join-Path $Pkg 'tools\*.ps1')) + @(Get-ChildItem (Join-Path $Pkg 'dev\tests\*.ps1'))) {

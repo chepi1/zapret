@@ -8,7 +8,7 @@
 # открылся со второй попытки - полбалла ("нестабильно"); вред - только если сбой или медленный TLS повторились.
 # Во время теста IPSet временно "any", чтобы проверочные сайты точно попали под обход (так же делает тест Flowseal).
 # -ReportOnly: только отчёт (для проверки провайдера) - основную стратегию не меняем и обход сами не включаем.
-# -Full: все стратегии (27), иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
+# -Full: все стратегии, иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
 param([int]$TimeoutSec = 5, [int]$Parallel = 16, [int]$Rounds = 1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$Full)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
@@ -490,9 +490,18 @@ try {
         $ipLine = 'Заблокированы по IP (не подключаются вовсе, ни одна стратегия их не откроет - только VPN): ' + ($ipBlocked -join ', ')
         Write-Color $ipLine Gray
     }
+    # Баллы плавают от прогона к прогону: основную выбираем по среднему за последние прогоны, а не по этому одному
+    Add-ScoreHistory $alts
+    $avg = Get-AverageScores $alts
+    $choice = Get-PrimaryChoice $alts $avg $settings.alt $orderIds
+    $avgTop = @($alts | Sort-Object @{ Expression = { $avg[$_.Id].Avg }; Descending = $true } | Select-Object -First 5 |
+        ForEach-Object { '{0} {1} ({2})' -f $_.Name, (Format-Points $avg[$_.Id].Avg), $avg[$_.Id].Runs })
+    $avgLine = ('Средний балл за последние прогоны (до {0}), в скобках их число: ' -f $Script:ScoreRuns) + ($avgTop -join ', ')
+    Write-Color $avgLine Gray
     # лучший результат - и в файл отчёта (он уже записан выше вместе с подробностями)
     $report.Insert(1, $bestLine)
     $at = 2
+    $report.Insert($at, $avgLine); $at++
     if ($why) { $report.Insert($at, $why); $at++ }
     if ($freezeLine) { $report.Insert($at, $freezeLine); $at++ }
     if ($ipLine) { $report.Insert($at, $ipLine) }
@@ -500,14 +509,18 @@ try {
     Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
     Write-TextNoBom (Join-Path $Script:Runtime 'test-best.txt') ($best.Id + "`r`n")
     # рейтинг для круга автосмены: порядок по "пробито минус вред", слабые в круг не попадают
-    if ($base) { Save-TestRank $base $alts }
+    if ($base) { Save-TestRank $base $alts; Save-TestCover $table }
     Write-Color ('Отчёт сохранён: ' + $repFile) Gray
 
     $apply = $true
+    $pick = $choice.Top
     if ($ReportOnly) {
         $apply = $false
-    } elseif ($best.Id -eq $settings.alt) {
-        Write-Color ('{0} уже основная.' -f $best.Name) Green
+    } elseif ($pick.Id -eq $settings.alt) {
+        Write-Color ('{0} уже основная{1}.' -f $pick.Name, $(if ($best.Id -ne $pick.Id) { ': по среднему баллу она лучшая' })) Green
+        $apply = $false
+    } elseif ($choice.Noise) {
+        Write-Color ('По среднему баллу впереди {0} ({1}), у основной {2} - {3}. Разница меньше {4}: это случайный разброс между прогонами, основная не меняется.' -f $pick.Name, (Format-Points $avg[$pick.Id].Avg), $choice.Current.Name, (Format-Points $avg[$choice.Current.Id].Avg), $Script:ScoreMargin) Green
         $apply = $false
     } elseif (-not $NoPrompt) {
         # автоподбор проверяет сайты, а игру в матче - нет: стратегию, проверенную в игре, он менять не должен молча
@@ -515,12 +528,12 @@ try {
             $cur = Get-Strategy $settings.alt
             Write-Color ('Автоподбор проверяет сайты, а игру в матче проверить не может. Если игра с {0} идёт без статтеров, основную лучше не менять.' -f $(if ($cur) { $cur.Name } else { 'текущей' })) Yellow
         }
-        $apply = Read-YesNo ("Сделать {0} основной?" -f $best.Name)
+        $apply = Read-YesNo ("Сделать {0} основной?" -f $pick.Name)
     }
     if ($apply) {
-        $settings.alt = $best.Id
+        $settings.alt = $pick.Id
         Save-Settings $settings
-        Write-Color ("Основная стратегия: {0}." -f $best.Name) Green
+        Write-Color ("Основная стратегия: {0}." -f $pick.Name) Green
     }
     $inRing = @()
     foreach ($sec in @('general', 'google', 'discord_media', 'game_tcp')) { $inRing += @(Get-RotationOrder $settings.alt $sec | ForEach-Object { $_.Id }) }

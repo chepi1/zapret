@@ -1,5 +1,6 @@
 ﻿# обновление списков Flowseal и проверка новых версий - на копии пакета.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $stage = Join-Path $env:TEMP ('nba-lists-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item $Pkg (Join-Path $stage 'pkg') -Recurse

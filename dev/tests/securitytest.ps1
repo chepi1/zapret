@@ -5,6 +5,7 @@
 #  - Protect-ReportText скрывает имя пользователя Windows и свой IP;
 #  - Get-IpInfo не подставляет в URL ничего, кроме IP-адресов.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $fails = 0
 function Check($Name, $Cond) { if ($Cond) { Write-Host ('ok   ' + $Name) -ForegroundColor Green } else { Write-Host ('FAIL ' + $Name) -ForegroundColor Red; $script:fails++ } }
 $stage = Join-Path $env:TEMP ('nba-sec-' + [guid]::NewGuid().ToString('N'))

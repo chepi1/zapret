@@ -31,6 +31,24 @@ Start-ListsUpdate -Days $Script:IpsetDays
 
 function Test-Running { return ((@(Get-OurProcesses).Count -gt 0) -or [bool](Get-OurService)) }
 
+# Обход посреди игры лучше не трогать: на время перезапуска соединения матча идут без него, а при запущенном античите
+# драйвер WinDivert может не подняться вовсе (0x8032000A) - тогда обхода не будет, пока игра не закрыта.
+# $What - что сейчас будет сделано. $true - можно продолжать
+function Confirm-GameRunning([string]$What) {
+    $games = @(Get-RunningGames)
+    if (-not $games.Count) { return $true }
+    Write-Color ('Запущена игра: ' + ($games -join ', ') + '.') Yellow
+    Write-Color ($What + ' может оборвать матч, а при античите обход может не запуститься, пока игра не закрыта (ошибка 0x8032000A).') Yellow
+    return (Read-YesNo 'Всё равно продолжить?')
+}
+
+# Настройка уже сохранена, применяется перезапуском обхода. Посреди игры спрашиваем; при отказе она заработает позже
+function Restart-IfRunning([switch]$Quiet) {
+    if (-not (Test-Running)) { return }
+    if (Confirm-GameRunning 'Перезапуск обхода') { Start-Bypass -Quiet:$Quiet | Out-Null }
+    else { Write-Color 'Настройка сохранена: заработает при следующем запуске обхода (пункт 1).' Gray }
+}
+
 # ---------- табличка меню ----------
 # Меню рисуется в двойной рамке: рамка белая, строки внутри дополняются пробелами до одной ширины, длинная строка
 # переносится по словам. Ширина внутри рамки - 64 знака: влезает самое длинное имя стратегии в строке состояния.
@@ -247,7 +265,7 @@ function Select-AltManual {
     if (-not $st -or $st.Missing.Count) { Write-Color 'Нет такой стратегии.' Red; Pause-Menu; return }
     $s.alt = $id
     Save-Settings $s
-    if (Test-Running) { Start-Bypass | Out-Null }
+    if (Test-Running) { Restart-IfRunning }
     else { Write-Color ("Основная стратегия: {0}. Запустите обход пунктом 1." -f $st.Name) Green }
     Pause-Menu
 }
@@ -262,7 +280,7 @@ function Toggle-Auto {
     } else {
         Write-Color 'Автосмена выключена: всё время работает одна выбранная ALT, ровно как у Flowseal.' Green
     }
-    if (Test-Running) { Start-Bypass -Quiet | Out-Null }
+    Restart-IfRunning -Quiet
     Pause-Menu
 }
 
@@ -292,7 +310,7 @@ function Select-GameFilter {
     Save-Settings $s
     Write-Color ('Game Filter: ' + (Get-GameText $s)) Green
     if ($s.game -eq 'off') { Write-Color 'Без Game Filter NBA 2K27 почти наверняка будет вылетать: игровые соединения к AWS режутся после 16-20 КБ.' Yellow }
-    if (Test-Running) { Start-Bypass -Quiet | Out-Null }
+    Restart-IfRunning -Quiet
     Pause-Menu
 }
 
@@ -311,7 +329,7 @@ function Select-Ipset {
     }
     Save-Settings $s
     Write-Color ('IPSet: ' + (Get-IpsetText $s.ipset)) Green
-    if (Test-Running) { Start-Bypass -Quiet | Out-Null }
+    Restart-IfRunning -Quiet
     Pause-Menu
 }
 
@@ -354,7 +372,7 @@ function Show-Autolist {
             $s.autolist = if ($s.autolist -eq 'on') { 'off' } else { 'on' }
             Save-Settings $s
             Write-Color ('Автосписок сайтов: ' + (Get-AutolistText $s)) Green
-            if (Test-Running) { Start-Bypass -Quiet | Out-Null }
+            Restart-IfRunning -Quiet
         }
         default { return }
     }
@@ -597,7 +615,9 @@ function Show-PcCheck {
     Write-Color 'Проверка обходов' White
     # сетевые пробы IPv6 и hosts - сразу и одновременно, пока идут быстрые проверки (раньше ~6 + ~12 с подряд)
     $v6Jobs = if (@(Get-Ipv6Addresses).Count) { Start-Ipv6Probes } else { $null }
-    $pinJobs = Start-HostsPinProbes
+    # через туннель VPN проверка адресов проходит на любом адресе и ничего не значит
+    $vpnOn = @(Get-TunAdapters).Count -gt 0
+    $pinJobs = if ($vpnOn) { $null } else { Start-HostsPinProbes }
     $svcJobs = Start-ServiceProbes
     Write-Color '1/5 Подключение' Cyan
     Show-ConnectionCheck | Out-Null
@@ -624,6 +644,8 @@ function Show-PcCheck {
         } $wifi
     }
     if (@(Get-OurProcesses).Count) { Write-Color '  Обход: работает' Green } else { Write-Color '  Обход: остановлен - включается пунктом 1' Yellow }
+    $crashes = @(Get-BypassCrashes (Get-Date).AddDays(-$Script:CrashDays))
+    if ($crashes.Count) { Write-Color ('  ! Обход падал за последние {0} дней: {1}. Windows сама запускает его снова примерно через 5 секунд; если в это время шёл матч, мог быть лаг или вылет.' -f $Script:CrashDays, (Format-BypassCrashes $crashes)) Yellow }
     $tgOn = (Get-Settings).telegram -eq 'on'
     if ($tgOn -and -not (Test-TgBridgeRunning)) {
         Write-Color '  ! Мост Telegram не запущен: Telegram без него без сети.' Yellow
@@ -663,58 +685,62 @@ function Show-PcCheck {
     }
 
     Write-Color '4/5 hosts: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal, серверы игр' Cyan
-    $status = Get-HostsStatus
-    $rows = @(Test-HostsPins -Pending $pinJobs)
-    foreach ($x in $rows) {
-        $dns = if ($x.Dns.Ok) { '{0} мс' -f $x.Dns.Ms } elseif ($x.Dns.Ip) { 'не открылся' } else { 'нет адреса' }
-        $pin = if ($x.Pin.Ok) { '{0} мс' -f $x.Pin.Ms } elseif ($x.Pin.Ip) { 'не открылся' } else { '-' }
-        $now = if ($status[$x.Group].Present) { 'в hosts есть' } else { 'в hosts нет' }
-        $color = switch ($x.Verdict) { 'helps' { 'Green' } 'worse' { 'Yellow' } default { 'Gray' } }
-        Write-Color ('  {0,-9} по DNS: {1,-11} по адресу Flowseal: {2,-11} {3}' -f $x.Group, $dns, $pin, $now) $color
-    }
-    $want = @(Get-HostsAdvice $rows $status)
-    $have = @($status.Keys | Where-Object { $status[$_].Present })
-    $dirty = @($want | Where-Object { $status[$_].Stale -or $status[$_].Dups -or $status[$_].Missing })
-    if (((@($want | Sort-Object) -join ',') -ne (@($have | Sort-Object) -join ',')) -or $dirty.Count) {
-        $plan = 'держать в hosts ' + $(if ($want.Count) { $want -join ', ' } else { 'ничего из Flowseal' })
-        $drop = @($have | Where-Object { $want -notcontains $_ })
-        if ($drop.Count) { $plan += '; убрать ' + ($drop -join ', ') + ' (по адресу из DNS не хуже)' }
-        if ($dirty.Count) { $plan += '; заменить устаревшие и повторы' }
-        Add-Fix ('hosts: ' + $plan) { Set-HostsFlowseal $want }
-    }
-    $yt = @(Get-HostsYoutube)
-    if ($yt.Count) { Write-Color ('  ! В hosts есть записи YouTube (' + ($yt -join ', ') + '): они мешают YouTube. Удалите их из ' + $Script:HostsFile) Yellow }
-    # серверы игр, часть адресов которых провайдер режет по IP (см. lib.ps1, GamePinHosts)
-    $pinsOn = (Get-Settings).gamepins -eq 'on'
-    foreach ($x in @(Get-GamePinsState)) {
-        $tested = @($x.Good).Count + @($x.Bad).Count
-        $now = if (@($x.Pinned).Count) { 'в hosts закреплено ' + @($x.Pinned).Count } else { 'в hosts нет' }
-        $bad = if (@($x.Bad).Count) { ', не отвечают: ' + ($x.Bad -join ', ') } else { '' }
-        Write-Color ('  Сервер игры {0}: отвечают {1} из {2} адресов{3}; {4}' -f $x.Host, @($x.Good).Count, $tested, $bad, $now) $(if (@($x.Bad).Count) { 'Yellow' } else { 'Gray' })
-    }
-    if (-not $pinsOn) {
-        Add-Fix 'hosts: закрепить рабочие адреса серверов игр (api.quago.io - запись матча NBA 2K27). Часть их адресов провайдер режет по IP, и игра на них подвисает; адреса перепроверяются при каждом запуске обхода' {
-            $s = Get-Settings; $s.gamepins = 'on'; Save-Settings $s
-            $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
+    if ($vpnOn) {
+        Write-Color '  ! Включён VPN: через туннель проверка проходит на любом адресе, поэтому hosts и закрепление серверов игр не проверяю и не меняю. Выключите VPN и запустите проверку снова.' Yellow
+    } else {
+        $status = Get-HostsStatus
+        $rows = @(Test-HostsPins -Pending $pinJobs)
+        foreach ($x in $rows) {
+            $dns = if ($x.Dns.Ok) { '{0} мс' -f $x.Dns.Ms } elseif ($x.Dns.Ip) { 'не открылся' } else { 'нет адреса' }
+            $pin = if ($x.Pin.Ok) { '{0} мс' -f $x.Pin.Ms } elseif ($x.Pin.Ip) { 'не открылся' } else { '-' }
+            $now = if ($status[$x.Group].Present) { 'в hosts есть' } else { 'в hosts нет' }
+            $color = switch ($x.Verdict) { 'helps' { 'Green' } 'worse' { 'Yellow' } default { 'Gray' } }
+            Write-Color ('  {0,-9} по DNS: {1,-11} по адресу Flowseal: {2,-11} {3}' -f $x.Group, $dns, $pin, $now) $color
         }
-    }
-    # серверы, к которым программа под трекером не подключилась: часть адресов режут - закрепляем рабочие; режут все - только VPN
-    foreach ($kv in @((Get-BlockedHosts).GetEnumerator())) {
-        $name = $kv.Key
-        $dns = @()
-        try { $dns = @(Resolve-DnsName $name -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
-        $t = @(Test-TlsIps $name @(@($dns) + @($kv.Value) | Select-Object -Unique))
-        $good = @($t | Where-Object { $_.Ok })
-        if ($good.Count) {
-            Write-Color ('  ! Сервер {0}: трекер видел, что к нему не подключиться ({1}); сейчас отвечают {2} из {3} адресов' -f $name, ($kv.Value -join ', '), $good.Count, $t.Count) Yellow
-            Add-Fix ('hosts: закрепить рабочие адреса ' + $name + ' - часть его адресов провайдер режет по IP') {
-                param($n)
-                Add-GamePinHost $n
+        $want = @(Get-HostsAdvice $rows $status)
+        $have = @($status.Keys | Where-Object { $status[$_].Present })
+        $dirty = @($want | Where-Object { $status[$_].Stale -or $status[$_].Dups -or $status[$_].Missing })
+        if (((@($want | Sort-Object) -join ',') -ne (@($have | Sort-Object) -join ',')) -or $dirty.Count) {
+            $plan = 'держать в hosts ' + $(if ($want.Count) { $want -join ', ' } else { 'ничего из Flowseal' })
+            $drop = @($have | Where-Object { $want -notcontains $_ })
+            if ($drop.Count) { $plan += '; убрать ' + ($drop -join ', ') + ' (по адресу из DNS не хуже)' }
+            if ($dirty.Count) { $plan += '; заменить устаревшие и повторы' }
+            Add-Fix ('hosts: ' + $plan) { Set-HostsFlowseal $want }
+        }
+        $yt = @(Get-HostsYoutube)
+        if ($yt.Count) { Write-Color ('  ! В hosts есть записи YouTube (' + ($yt -join ', ') + '): они мешают YouTube. Удалите их из ' + $Script:HostsFile) Yellow }
+        # серверы игр, часть адресов которых провайдер режет по IP (см. lib.ps1, GamePinHosts)
+        $pinsOn = (Get-Settings).gamepins -eq 'on'
+        foreach ($x in @(Get-GamePinsState)) {
+            $tested = @($x.Good).Count + @($x.Bad).Count
+            $now = if (@($x.Pinned).Count) { 'в hosts закреплено ' + @($x.Pinned).Count } else { 'в hosts нет' }
+            $bad = if (@($x.Bad).Count) { ', не отвечают: ' + ($x.Bad -join ', ') } else { '' }
+            Write-Color ('  Сервер игры {0}: отвечают {1} из {2} адресов{3}; {4}' -f $x.Host, @($x.Good).Count, $tested, $bad, $now) $(if (@($x.Bad).Count) { 'Yellow' } else { 'Gray' })
+        }
+        if (-not $pinsOn) {
+            Add-Fix 'hosts: закрепить рабочие адреса серверов игр (api.quago.io - запись матча NBA 2K27). Часть их адресов провайдер режет по IP, и игра на них подвисает; адреса перепроверяются при каждом запуске обхода' {
                 $s = Get-Settings; $s.gamepins = 'on'; Save-Settings $s
                 $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
-            } $name
-        } else {
-            Write-Color ('  Сервер {0} заблокирован по IP целиком (не отвечает ни один из {1} адресов): обход тут не поможет, только VPN' -f $name, $t.Count) Gray
+            }
+        }
+        # серверы, к которым программа под трекером не подключилась: часть адресов режут - закрепляем рабочие; режут все - только VPN
+        foreach ($kv in @((Get-BlockedHosts).GetEnumerator())) {
+            $name = $kv.Key
+            $dns = @()
+            try { $dns = @(Resolve-DnsName $name -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
+            $t = @(Test-TlsIps $name @(@($dns) + @($kv.Value) | Select-Object -Unique))
+            $good = @($t | Where-Object { $_.Ok })
+            if ($good.Count) {
+                Write-Color ('  ! Сервер {0}: трекер видел, что к нему не подключиться ({1}); сейчас отвечают {2} из {3} адресов' -f $name, ($kv.Value -join ', '), $good.Count, $t.Count) Yellow
+                Add-Fix ('hosts: закрепить рабочие адреса ' + $name + ' - часть его адресов провайдер режет по IP') {
+                    param($n)
+                    Add-GamePinHost $n
+                    $s = Get-Settings; $s.gamepins = 'on'; Save-Settings $s
+                    $u = Update-GamePins; Write-Color ('  ' + (Get-GamePinsText $u)) Gray; $u.Ok
+                } $name
+            } else {
+                Write-Color ('  Сервер {0} заблокирован по IP целиком (не отвечает ни один из {1} адресов): обход тут не поможет, только VPN' -f $name, $t.Count) Gray
+            }
         }
     }
 
@@ -749,6 +775,13 @@ function Show-PcCheck {
 # ---------------- действия и цикл меню ----------------
 # Действия по имени: одно место для главного экрана и подменю
 function Invoke-MenuAction([string]$Name) {
+    $touches = @{ start = 'Запуск обхода'; stop = 'Остановка обхода'; test = 'Автоподбор выключает обход и'; service = 'Смена автозапуска перезапускает обход и'
+        update = 'Обновление перезапускает обход и'; provider = 'Проверка провайдера выключает обход и'; diag = 'Диагностика выключает обход и'; uninstall = 'Удаление выключает обход и' }
+    if ($touches.ContainsKey($Name) -and -not (Confirm-GameRunning $touches[$Name])) {
+        Write-Color 'Отменено.' Gray
+        Pause-Menu
+        return
+    }
     switch ($Name) {
         'start' { Start-WithChecks; Pause-Menu }
         'stop' {
@@ -864,6 +897,7 @@ function Remove-ZapretFromWindows {
     if (-not (Stop-Bypass -Unload)) { Write-Color ('Драйвер WinDivert оставлен: им пользуется другой обход (' + (@(Get-ForeignBypass) -join ', ') + ').') Yellow }
     Remove-AutotuneTask
     Remove-NotifyTask
+    Set-BypassPriorityPolicy $false
     if ($tg) { Set-TelegramMode $false | Out-Null }
     if (@((Get-HostsStatus).Values | Where-Object { $_.Present }).Count) { Set-HostsFlowseal @() | Out-Null }
     $s = Get-Settings; $s.gamepins = 'off'; Save-Settings $s

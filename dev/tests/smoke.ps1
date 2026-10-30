@@ -2,8 +2,9 @@
 #  - функции меню: шапка, проверка подключения, тексты кругов и автонастройки (strict mode из lib.ps1);
 #  - отчёт R целиком (report.ps1 -NoPrompt -NoOpen);
 #  - трекер по записанному журналу сети: -Etl <файл.etl> -EtlPid <PID игры> (track.ps1 -Replay).
-# Лучше запускать на копии папки (run-all.ps1 так и делает): отчёт и трекер пишут файлы в runtime.
+# Только на копии папки (run-all.ps1 так и делает): отчёт и трекер пишут файлы в runtime.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)), [string]$Etl, [int]$EtlPid = 0)
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $fails = 0
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 . (Join-Path $Pkg 'tools\lib.ps1')
@@ -127,12 +128,70 @@ if ($null -ne $savedUpd) { Write-TextNoBom $uf $savedUpd } else { Remove-Item $u
 if (-not @($cmp | Where-Object { -not $_ }).Count -and $newer -eq 'v9.9' -and $all.Count -eq 1 -and $all[0] -like 'zapret v9.9*' -and -not $older -and $hdr -match 'новая версия zapret v9\.9') {
     Write-Host 'ok   новые версии zapret' -ForegroundColor Green
 } else { Write-Host ('FAIL новые версии zapret: cmp=' + ($cmp -join ',') + ' newer=' + $newer + ' all=' + ($all -join '; ') + ' older=' + $older) -ForegroundColor Red; $fails++ }
+# посреди игры меню спрашивает, прежде чем трогать обход; настоящий обход этого ПК тест не трогает
+$origs = @{}
+foreach ($n in 'Get-RunningGames', 'Read-YesNo', 'Stop-Bypass', 'Start-Bypass', 'Test-Running', 'Pause-Menu', 'Unprotect-Package') { $origs[$n] = (Get-Item ('function:' + $n)).ScriptBlock }
+$script:bypassCalls = 0; $script:asked = 0; $script:answer = $false; $script:gamesNow = @('NBA2K27')
+function Get-RunningGames { return @($script:gamesNow) }
+function Read-YesNo { $script:asked++; return $script:answer }
+function Stop-Bypass { $script:bypassCalls++ }
+function Start-Bypass { $script:bypassCalls++ }
+function Test-Running { return $true }
+function Pause-Menu { }
+function Unprotect-Package { throw 'меню пошло останавливать обход' }
+Restart-IfRunning -Quiet 6>$null
+Invoke-MenuAction 'stop' 6>$null
+Invoke-MenuAction 'test' 6>$null
+$okRefuse = ($script:bypassCalls -eq 0 -and $script:asked -eq 3)
+$script:answer = $true
+Restart-IfRunning -Quiet 6>$null
+$okYes = ($script:bypassCalls -eq 1 -and $script:asked -eq 4)
+$script:gamesNow = @(); $script:answer = $false
+Restart-IfRunning -Quiet 6>$null
+$okNoGame = ($script:bypassCalls -eq 2 -and $script:asked -eq 4 -and (Confirm-GameRunning 'x'))
+foreach ($n in $origs.Keys) { Set-Item ('function:' + $n) $origs[$n] }
+if ($okRefuse -and $okYes -and $okNoGame) { Write-Host 'ok   посреди игры обход не трогаем без вопроса' -ForegroundColor Green }
+else { Write-Host ('FAIL защита матча: ' + $okRefuse + ' ' + $okYes + ' ' + $okNoGame) -ForegroundColor Red; $fails++ }
+# каталог памяти автосмены: SYSTEM должен иметь право записи, запрет из cygwin исправляется
+$rd = Get-PkgPath $Script:RingDir
+if (Test-Path $rd) { Remove-Item $rd -Recurse -Force }
+Initialize-RingDir
+$icacls = Join-Path $env:SystemRoot 'System32\icacls.exe'
+& $icacls $rd /deny '*S-1-5-11:(WD,AD)' 2>&1 | Out-Null
+$hadDeny = @((Get-Acl $rd).Access | Where-Object { $_.AccessControlType -eq 'Deny' }).Count -gt 0
+Initialize-RingDir
+$acl = @((Get-Acl $rd).Access)
+$noDeny = @($acl | Where-Object { $_.AccessControlType -eq 'Deny' }).Count -eq 0
+$sysWrite = @($acl | Where-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-18' -and ($_.FileSystemRights -band [Security.AccessControl.FileSystemRights]::CreateFiles) }).Count -gt 0
+if ($hadDeny -and $noDeny -and $sysWrite) { Write-Host 'ok   каталог памяти автосмены: SYSTEM может писать' -ForegroundColor Green }
+else { Write-Host ('FAIL каталог памяти автосмены: ' + $hadDeny + ' ' + $noDeny + ' ' + $sysWrite) -ForegroundColor Red; $fails++ }
+Remove-Item $rd -Recurse -Force
+# приоритет winws2 при запуске Windows: настройка ставится и убирается (проверяем на HKCU: тест без прав администратора)
+$pk = $Script:PriorityKey
+$Script:PriorityKey = 'HKCU:\Software\zapret-smoke\winws2.exe'
+$p0 = Get-BypassPriorityPolicy
+Set-BypassPriorityPolicy $true
+$p1 = Get-BypassPriorityPolicy
+Set-BypassPriorityPolicy $true
+$p2 = Get-BypassPriorityPolicy
+Set-BypassPriorityPolicy $false
+$p3 = Get-BypassPriorityPolicy
+Remove-Item 'HKCU:\Software\zapret-smoke' -Recurse -Force -ErrorAction SilentlyContinue
+$Script:PriorityKey = $pk
+if ($p0 -eq 0 -and $p1 -eq 3 -and $p2 -eq 3 -and $p3 -eq 0) { Write-Host 'ok   приоритет winws2 при запуске Windows' -ForegroundColor Green }
+else { Write-Host ('FAIL приоритет winws2: ' + $p0 + ' ' + $p1 + ' ' + $p2 + ' ' + $p3) -ForegroundColor Red; $fails++ }
+# падения обхода: журнал читается и без записей, время - в коротком виде
+$noCrash = @(Get-BypassCrashes (Get-Date).AddDays(1))
+$fmt = Format-BypassCrashes @([datetime]'2026-10-27 16:57:29', [datetime]'2026-10-29 21:49:49')
+if ($noCrash.Count -eq 0 -and $fmt -eq '27.10 16:57, 29.10 21:49') { Write-Host 'ok   падения обхода' -ForegroundColor Green }
+else { Write-Host ('FAIL падения обхода: ' + $noCrash.Count + ' ' + $fmt) -ForegroundColor Red; $fails++ }
 $before = @(Get-ChildItem (Join-Path $Pkg 'runtime') -Filter 'report-*.txt' -ErrorAction SilentlyContinue).Count
 $out = & $ps -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $Pkg 'tools\report.ps1') -NoPrompt -NoOpen 2>&1
 $rep = @(Get-ChildItem (Join-Path $Pkg 'runtime') -Filter 'report-*.txt' | Sort-Object LastWriteTime -Descending)
 if ($LASTEXITCODE -eq 0 -and $rep.Count -gt $before) {
     $text = [System.IO.File]::ReadAllText($rep[0].FullName)
     Write-Host ('ok   отчёт R: ' + $rep[0].Name + ', ' + $text.Length + ' символов')
+    if ($text -notmatch 'Падения обхода за 7 дней') { Write-Host 'FAIL в отчёте нет падений обхода' -ForegroundColor Red; $fails++ }
     # отчёт пересылают: свой внешний IP в нём должен быть замаскирован (последний октет - x)
     $self = Get-DirectConnectionInfo
     if ($self -and $text.Contains($self.Ip)) { Write-Host 'FAIL в отчёте открытый внешний IP' -ForegroundColor Red; $fails++ }

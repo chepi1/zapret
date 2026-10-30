@@ -323,6 +323,10 @@ function Get-SummaryLines([bool]$Final) {
     $head = if ($Final) { 'Итог ' } else { 'Итог на ' }
     $tail = if ($Final) { '' } else { ' (промежуточный: трекер ещё работает, итог обновляется раз в минуту)' }
     $s.Add($head + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ', длительность ' + ('{0:hh\:mm\:ss}' -f ((Get-Date) - $startTime)) + $tail)
+    $crashes = @(Get-BypassCrashes $startTime)
+    if ($crashes.Count) {
+        $s.Add(('ВНИМАНИЕ: во время записи обход падал: {0}. Windows запустила его снова примерно через 5 секунд; на это время соединения шли без обхода.' -f (Format-BypassCrashes $crashes)))
+    }
     if ($proxyUse.Count) {
         $s.Add(('ВНИМАНИЕ: {0} ходит через локальный прокси {1}. TCP идёт через прокси, а UDP (голос, игра) - напрямую мимо него.' -f $AppName, ($proxyUse -join ', ')))
     }

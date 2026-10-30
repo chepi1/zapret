@@ -87,6 +87,9 @@ if ($sites) {
 
 Add-File 'Параметры winws2 (последний запуск)' (Join-Path $Script:Runtime 'args-active.txt')
 Add-File 'Последний сбой запуска обхода' (Join-Path $Script:Runtime 'start-error.txt')
+Add-Section ('Падения обхода за {0} дней' -f $Script:CrashDays)
+$crashes = @(Get-BypassCrashes (Get-Date).AddDays(-$Script:CrashDays))
+$r.Add($(if ($crashes.Count) { Format-BypassCrashes $crashes } else { '(не было)' }))
 Add-Section 'Telegram'
 $r.Add('Мост Telegram: ' + $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' } } else { 'выключен' }))
 Add-File 'Журнал моста Telegram (последние строки)' (Join-Path $Script:Runtime 'tgbridge.log') 40
