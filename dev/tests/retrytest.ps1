@@ -1,5 +1,6 @@
 ﻿# проверка повторов автоподбора (Merge-Retry, Get-RetryTargets, Get-RunSummary) и файла рейтинга с полбаллами.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools\test.ps1'), [ref]$null, [ref]$null)
@@ -73,6 +74,71 @@ if (Test-Path (Get-PkgPath $Script:RankFile)) {
     Write-Host ('  youtube ring: ' + ((Get-SectionRank $real 'google') -join ',') + ' | general ring: ' + ((Get-SectionRank $real 'general') -join ','))
     Check 'real rings not empty' (@(Get-SectionRank $real 'google').Count -ge 1 -and @(Get-SectionRank $real 'general').Count -ge 1)
 } else { Write-Host '  (рейтинга этого ПК нет - автоподбор ещё не запускали)' }
+
+# средний балл: основную не меняет случайный разброс между прогонами
+$Script:ScoreHistoryFile = 'runtime/dev-scores-check.txt'
+function Alt([string]$Id, $Name, $Score, $Freeze = 0) { New-Object PSObject -Property @{ Id = $Id; Name = $Name; Score = [double]$Score; Freeze = $Freeze } }
+$order = @('50', '58', '60')
+$r1 = @((Alt 50 'белый 1' 47), (Alt 58 'белый 4' 46))
+Add-ScoreHistory $r1
+$av = Get-AverageScores $r1
+$c = Get-PrimaryChoice $r1 $av '50' $order
+Check 'one run: leader stays' ($c.Top.Id -eq '50' -and -not $c.Noise -and $av['50'].Runs -eq 1)
+$r2 = @((Alt 50 'белый 1' 44), (Alt 58 'белый 4' 47.5))
+Add-ScoreHistory $r2
+$av = Get-AverageScores $r2
+$c = Get-PrimaryChoice $r2 $av '50' $order
+Check ('noise: avg 45.5 vs 46.75 got ' + $av['50'].Avg + ' ' + $av['58'].Avg) ($av['50'].Avg -eq 45.5 -and $av['58'].Avg -eq 46.75 -and $c.Top.Id -eq '58' -and $c.Noise -and $c.Current.Id -eq '50')
+$r3 = @((Alt 50 'белый 1' 44), (Alt 58 'белый 4' 48))
+Add-ScoreHistory $r3
+$av = Get-AverageScores $r3
+$c = Get-PrimaryChoice $r3 $av '50' $order
+Check 'clear gap: change offered' ($c.Top.Id -eq '58' -and -not $c.Noise -and $av['58'].Runs -eq 3)
+$r4 = @((Alt 50 'белый 1' 46), (Alt 58 'белый 4' 48))
+Add-ScoreHistory $r4
+$av = Get-AverageScores $r4
+Check ('only last 3 runs got ' + $av['50'].Runs + ' ' + (Format-Points $av['50'].Avg)) ($av['50'].Runs -eq 3 -and [math]::Abs($av['50'].Avg - 134 / 3) -lt 0.001)
+$c = Get-PrimaryChoice $r4 $av '60' $order
+Check 'primary not tested: no noise block' ($c.Top.Id -eq '58' -and -not $c.Noise -and -not $c.Current)
+$tie = @((Alt 50 'x' 40), (Alt 58 'y' 40))
+$tieAvg = @{ '50' = (New-Object PSObject -Property @{ Avg = 40.0; Runs = 1 }); '58' = (New-Object PSObject -Property @{ Avg = 40.0; Runs = 1 }) }
+Check 'tie: primary wins' ((Get-PrimaryChoice $tie $tieAvg '58' $order).Top.Id -eq '58')
+# другой файл под тем же номером и старые прогоны в среднее не идут; испорченные строки не мешают
+$old = (Get-Date).AddDays(-40).ToString('yyyy-MM-dd HH:mm')
+$new = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd HH:mm')
+Write-TextNoBom (Get-PkgPath $Script:ScoreHistoryFile) ("# comment`r`n$old|50|a|10`r`n$new|50|b|20`r`n$new|50|a|30`r`nbroken line`r`n$new|50|a|x`r`n")
+$av = Get-AverageScores @((Alt 50 'a' 32))
+Check ('old, renamed and broken skipped got ' + $av['50'].Avg) ($av['50'].Avg -eq 30 -and $av['50'].Runs -eq 1)
+Remove-Item (Get-PkgPath $Script:ScoreHistoryFile)
+$Script:ScoreHistoryFile = 'runtime/test-scores.txt'
+
+# круг по покрытию: за первой идёт та, что открывает другие адреса, даже со слабым баллом
+$Script:CoverFile = 'runtime/dev-cover-check.txt'
+function RankRow($Id, $Score) { New-Object PSObject -Property @{ Id = $Id; Score = [double]$Score; Freeze = 0 } }
+$rankC = New-Object PSObject -Property @{ Rows = @((RankRow '58' 47), (RankRow '52' 46), (RankRow '51' 45), (RankRow '13' 13), (RankRow '9' 10), (RankRow '7' 9)) }
+$noTcp = Row DPI d FAIL; $noTcp.ConnMs = 0
+$tableC = [ordered]@{
+    '0'  = @((Row Clean bing OK))
+    '58' = @((Row Clean bing OK), (Row DPI a OK), (Row DPI b OK), (Row DPI c FREEZE), $noTcp)
+    '7'  = @((Row DPI d OK))
+    '52' = @((Row Clean bing OK), (Row DPI a OK), (Row DPI b OK))
+    '51' = @((Row Clean bing OK), (Row DPI a OK))
+    '13' = @((Row DPI c OK))
+    '9'  = @((Row YouTube yt OK))
+}
+Save-TestCover $tableC
+Check 'cover file roundtrip' ((Get-TestCover)['58'].Count -eq 4 -and (Get-TestCover)['58'] -contains '?DPI|d' -and (Get-TestCover)['0'][0] -eq 'Clean|bing')
+$ringC = @(Get-RingByCover @('58', '52', '51') 'general' '58' $rankC)
+Check ('ring: coverage goes second, no-TCP target is no gain got ' + ($ringC -join ',')) (($ringC -join ',') -eq '58,13,52,51')
+$ringY = @(Get-RingByCover @('52', '58') 'google' '58' $rankC)
+Check ('ring: youtube targets only in its ring got ' + ($ringY -join ',')) (($ringY -join ',') -eq '58,9,52')
+$ringP = @(Get-RingByCover @('52', '51') 'general' '58' $rankC)
+Check ('ring: weak primary is not forced got ' + ($ringP -join ',')) ($ringP[0] -eq '52' -and $ringP -contains '13')
+Remove-Item (Get-PkgPath $Script:CoverFile)
+$Script:RingCache = @{}
+Check 'ring: no cover file - only by score' ((@(Get-RingByCover @('58', '52') 'general' '58' $rankC) -join ',') -eq '58,52')
+$Script:CoverFile = 'runtime/test-cover.txt'
+
 [Threading.Thread]::CurrentThread.CurrentCulture = 'ru-RU'
 Check ('points use a dot in ru-RU: ' + (Format-Points 44.5)) ((Format-Points 44.5) -eq '44.5')
 if ($fails) { Write-Host "$fails FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'all ok' -ForegroundColor Green }

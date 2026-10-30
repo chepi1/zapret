@@ -13,11 +13,13 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 ## Features
 
 - 32 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites, 5 "white" variants of the soft ALT11 whose fake ClientHello carries the name of a site on ISP whitelists.
-- **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm.
-- Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring.
+- **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm. The primary strategy is compared by the average of the last 3 runs and only changes on a gap of at least 2 points.
+- Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring. Sites that need a non-first strategy are remembered across restarts, and the ring is built by coverage: right after the primary come strategies that open what it cannot.
+- Forged resets from the DPI are recognised by TTL or by arriving faster than the server could answer, and dropped, so connections are not torn down while the server is still answering.
 - 2K's own servers (Take-Two) are never touched: desync there breaks Easy Anti-Cheat.
 - Tools: match tracker, game address scanner, ISP check report, one-file report, diagnostics, excluding a game from the bypass by the tracker log, "direct" routing rules for proxy clients (Happ etc.).
-- Checks the PC for VPN, proxies, game boosters (ExitLag…), another bypass, broken IPv6, Flowseal hosts entries; warns when Steam or Discord got stuck on a proxy that was turned off.
+- Checks the PC for VPN, proxies, game boosters (ExitLag…), another bypass, broken IPv6, Flowseal hosts entries; warns when Steam or Discord got stuck on a proxy that was turned off. Shows when the bypass crashed in the last 7 days.
+- While a game with anti-cheat is running, the menu asks before stopping or restarting the bypass.
 - Scheduled autotune, list updates, Windows notifications, in-menu update from GitHub releases (SHA-256 verified).
 
 ## Quick start

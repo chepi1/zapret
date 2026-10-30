@@ -1,5 +1,6 @@
 ﻿# --dry-run каждой стратегии по отдельности и кругов с новыми стратегиями (без перехвата трафика).
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $env:__COMPAT_LAYER = 'RunAsInvoker'
 # всё - на копии пакета: настоящий runtime (рейтинг пользователя) не трогаем
 $stage = Join-Path $env:TEMP ('nba-dry-' + [guid]::NewGuid().ToString('N'))

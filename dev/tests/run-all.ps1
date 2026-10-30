@@ -6,7 +6,7 @@ $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $stage = Join-Path $env:TEMP ('nba-tests-' + [guid]::NewGuid().ToString('N'))
 $pkg = Join-Path $stage 'pkg'
 & robocopy.exe $root $pkg /E /XD .git dist /NFL /NDL /NJH /NJS /NP | Out-Null
-$tests = @('astlint', 'check', 'drystrat', 'retrytest', 'autotunetest', 'boostertest', 'securitytest', 'smoke')
+$tests = @('astlint', 'check', 'drystrat', 'retrytest', 'luatest', 'autotunetest', 'boostertest', 'securitytest', 'smoke')
 if (-not $Offline) { $tests += @('liststest', 'hoststest', 'tgtest') }
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $failed = @()

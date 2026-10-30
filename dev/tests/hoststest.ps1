@@ -1,5 +1,6 @@
 ﻿# hosts Flowseal - проверка, совет и запись на КОПИИ системного hosts (настоящий не трогаем).
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 . (Join-Path $Pkg 'tools\lib.ps1')
 $fails = 0
 function Check($Name, $Cond) { if ($Cond) { Write-Host ('ok   ' + $Name) -ForegroundColor Green } else { Write-Host ('FAIL ' + $Name) -ForegroundColor Red; $script:fails++ } }
@@ -55,10 +56,24 @@ Write-Host '  --- tail of written copy:'
 Get-Content $Script:HostsFile -Tail 4 | ForEach-Object { '    ' + $_ }
 
 # серверы игр: TLS с проверкой имени (чужой сертификат - не годится), запись блока рядом с блоком Flowseal
-$tls = @(Test-TlsIps 'api.quago.io' @('104.18.124.108'))
-Check 'game pins: foreign certificate rejected' ($tls.Count -eq 1 -and -not $tls[0].Ok)
-$u = Update-GamePins
-Write-Host ('  game pins: ' + (Get-GamePinsText $u))
+# при VPN проверка ничего не значит: закрепление не меняется
+$origTun = (Get-Item function:Get-TunAdapters).ScriptBlock
+$hostsBefore = [System.IO.File]::ReadAllText($Script:HostsFile)
+function Get-TunAdapters { return @(New-Object PSObject -Property @{ Name = 'test-tun'; ifIndex = 0 }) }
+$uv = Update-GamePins
+Set-Item function:Get-TunAdapters $origTun
+Check 'game pins: VPN - nothing changed' ($uv.Skipped -and $uv.Ok -and ([System.IO.File]::ReadAllText($Script:HostsFile) -eq $hostsBefore) -and (Get-GamePinsText $uv) -match 'VPN')
+if (@(Get-TunAdapters).Count) {
+    # сейчас включён настоящий VPN: через туннель чужой сертификат не поймать, блок проверяем на тестовом адресе
+    Write-Host '  (включён VPN: проверка чужого сертификата и живое закрепление пропущены)'
+    $u = New-Object PSObject -Property @{ Pins = [ordered]@{ 'api.quago.io' = @('192.0.2.1') } }
+    Set-GamePins $u.Pins | Out-Null
+} else {
+    $tls = @(Test-TlsIps 'api.quago.io' @('104.18.124.108'))
+    Check 'game pins: foreign certificate rejected' ($tls.Count -eq 1 -and -not $tls[0].Ok)
+    $u = Update-GamePins
+    Write-Host ('  game pins: ' + (Get-GamePinsText $u))
+}
 $gp = [System.IO.File]::ReadAllText($Script:HostsFile)
 Check 'game pins: block written, Flowseal kept' ($gp -match [regex]::Escape($Script:GamePinsBegin) -and $gp -match [regex]::Escape($Script:HostsBegin))
 $bak = @(Get-ChildItem $Script:Runtime -Filter 'hosts-*.bak').Count

@@ -2,6 +2,7 @@
 # (req_pq_multi, без учётной записи) к DC2 и DC4, обычным и медиа. Telegram отвечает resPQ - путь работает.
 # Ходит в интернет (веб-вход Telegram), поэтому run-all.ps1 -Offline его пропускает. Трафик не перехватывается.
 param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
+if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $fails = 0
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $tmp = Join-Path $env:TEMP ('zapret-tgtest-' + [guid]::NewGuid().ToString('N'))

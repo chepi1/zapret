@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.6.1'
+$Script:Version     = '1.7'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -261,9 +261,84 @@ function Get-TestRank {
     return New-Object PSObject -Property @{ Date = $date; Version = $ver; BaseOk = $baseOk; BaseGroups = $baseGroups; Rows = $rows }
 }
 
+# Какие адреса открыла каждая стратегия в последнем автоподборе (runtime\test-cover.txt, рядом с рейтингом).
+# Строка: номер<таб>группа|адрес<таб>группа|адрес... Номер 0 - без обхода. $Table: номер -> строки результата
+$Script:CoverFile = 'runtime/test-cover.txt'
+$Script:RingCache = @{}
+function Save-TestCover($Table) {
+    $lines = @('# Какие адреса открыла каждая стратегия в последнем автоподборе. Удалите файл - круги соберутся только по баллам')
+    foreach ($id in $Table.Keys) {
+        # ? - соединение не установилось: стратегия тут ни при чём (она работает позже), и победой другой стратегии это не считается
+        $lines += (@($id) + @($Table[$id] | ForEach-Object { if ($_.State -eq 'OK') { $_.Group + '|' + $_.Name } elseif ($_.ConnMs -eq 0) { '?' + $_.Group + '|' + $_.Name } } | Sort-Object -Unique)) -join "`t"
+    }
+    Write-TextNoBom (Get-PkgPath $Script:CoverFile) (($lines -join "`r`n") + "`r`n")
+}
+function Get-TestCover {
+    $f = Get-PkgPath $Script:CoverFile
+    if (-not (Test-Path $f)) { return $null }
+    $c = @{}
+    foreach ($line in [System.IO.File]::ReadAllLines($f)) {
+        if (-not $line -or $line.StartsWith('#')) { continue }
+        $p = @($line -split "`t")
+        $c[$p[0]] = @($p | Select-Object -Skip 1)
+    }
+    return $c
+}
+
+# Стратегии с близким баллом обычно открывают одно и то же, и перебирать их при неудаче незачем. Поэтому сразу за первой в круг
+# идут те, что открывают заблокированные адреса, которых не открыла ни одна стратегия выше; вред тут не помеха: на такую
+# стратегию переходит только сервер, на котором первая не сработала. Дальше - сильные по баллу ($Ids), всего до $RingMax.
+# Адреса YouTube и Discord считаются только для их кругов: у них свои стратегии
+function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank) {
+    # шапка меню строит круги при каждой перерисовке: тот же ответ, пока файл не поменялся
+    $f = Get-Item -LiteralPath (Get-PkgPath $Script:CoverFile) -ErrorAction SilentlyContinue
+    if (-not $f) { return @($Ids) }
+    $cacheKey = ($Section, $PrimaryId, $f.LastWriteTimeUtc.Ticks, (@($Ids) -join ',')) -join '|'
+    if ($Script:RingCache.ContainsKey($cacheKey)) { return $Script:RingCache[$cacheKey] }
+    $cover = Get-TestCover
+    if (-not $cover -or -not $cover.ContainsKey('0')) { return @($Ids) }
+    $groups = $Script:SectionGroups[$Section]
+    $others = @($Script:SectionGroups.Values | ForEach-Object { $_ })
+    $mine = @{}
+    foreach ($id in $cover.Keys) {
+        $l = New-Object System.Collections.Generic.List[string]
+        foreach ($k in $cover[$id]) {
+            if ($k.StartsWith('?')) { continue }
+            $g = $k.Substring(0, [math]::Max(0, $k.IndexOf('|')))
+            if ($(if ($groups) { $groups -contains $g } else { $others -notcontains $g })) { $l.Add($k) }
+        }
+        $mine[$id] = $l
+    }
+    $first = if (@($Ids) -contains $PrimaryId) { $PrimaryId } else { @($Ids)[0] }
+    $done = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($k in @($cover['0'])) { if (-not $k.StartsWith('?')) { [void]$done.Add($k) } }
+    if ($cover.ContainsKey($first)) { foreach ($k in $cover[$first]) { [void]$done.Add($k.TrimStart('?')) } }
+    $ring = @($first)
+    # кандидаты в порядке рейтинга: при равной пользе берём ту, у кого балл выше
+    $cands = @($Rank.Rows | Sort-Object @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } } | ForEach-Object { $_.Id })
+    while ($ring.Count -lt $Script:RingMax) {
+        $best = $null; $bestGain = 0
+        foreach ($id in $cands) {
+            if ($ring -contains $id -or -not $cover.ContainsKey($id)) { continue }
+            $gain = 0
+            foreach ($k in $mine[$id]) { if (-not $done.Contains($k)) { $gain++ } }
+            if ($gain -gt $bestGain) { $best = $id; $bestGain = $gain }
+        }
+        if (-not $best) { break }
+        $ring += $best
+        foreach ($k in $mine[$best]) { [void]$done.Add($k) }
+    }
+    foreach ($id in @($Ids)) {
+        if ($ring.Count -ge $Script:RingMax) { break }
+        if ($ring -notcontains $id) { $ring += $id }
+    }
+    $Script:RingCache[$cacheKey] = $ring
+    return $ring
+}
+
 # Стратегии, достаточно сильные для профиля, от лучшей к худшей (Id). $null - по этому профилю различать нечего
 # (группа у провайдера не блокируется или рейтинг старого формата): тогда берётся круг сайтов.
-function Get-SectionRank($Rank, [string]$Section) {
+function Get-SectionRank($Rank, [string]$Section, [string]$PrimaryId) {
     $groups = $Script:SectionGroups[$Section]
     $score = @{}
     if ($groups) {
@@ -278,7 +353,7 @@ function Get-SectionRank($Rank, [string]$Section) {
     $q = @($Rank.Rows | Where-Object { $score[$_.Id] -ge $Script:RankMinShare * $bestGain } |
         Sort-Object @{ Expression = { $score[$_.Id] }; Descending = $true }, @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } } |
         Select-Object -First $Script:RingMax)
-    return @($q | ForEach-Object { $_.Id })
+    return @(Get-RingByCover @($q | ForEach-Object { $_.Id }) $Section $PrimaryId $Rank)
 }
 
 # $Base и $Alts - итоги автоподбора (Get-RunSummary): Ok, Total, Score, Harm, Freeze и Groups (группа -> Ok/Total)
@@ -307,6 +382,84 @@ function Test-StrategyTested($St, $Rank) {
     return [bool]($Rank -and @($Rank.Rows | Where-Object { $_.Id -eq $St.Id }).Count)
 }
 
+# Баллы автоподбора плавают от прогона к прогону: на одном ПК за вечер - до 3 баллов. Основную стратегию поэтому сравниваем
+# по среднему за последние прогоны. Строка файла: дата|номер|имя|балл (номер и имя вместе, как в tested-strategies)
+$Script:ScoreHistoryFile = 'runtime/test-scores.txt'
+$Script:ScoreRuns = 3       # сколько последних прогонов каждой стратегии усредняем
+$Script:ScoreMaxDays = 30   # прогоны старше забываем: за это время у провайдера всё могло поменяться
+$Script:ScoreMargin = 2     # меньшая разница средних - случайность, основная не меняется
+
+function Get-ScoreHistory {
+    $min = (Get-Date).AddDays(-$Script:ScoreMaxDays)
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $rows = @()
+    foreach ($l in @(Get-ListLines (Get-PkgPath $Script:ScoreHistoryFile))) {
+        $p = $l -split '[|]'
+        $d = [datetime]::MinValue; $x = 0.0
+        if ($p.Count -ne 4) { continue }
+        if (-not [datetime]::TryParseExact($p[0], 'yyyy-MM-dd HH:mm', $inv, [Globalization.DateTimeStyles]::None, [ref]$d) -or $d -lt $min) { continue }
+        if (-not [double]::TryParse($p[3], [Globalization.NumberStyles]::Float, $inv, [ref]$x)) { continue }
+        $rows += New-Object PSObject -Property @{ Date = $p[0]; Id = $p[1]; Name = $p[2]; Score = $x }
+    }
+    return $rows
+}
+
+# $Alts - итоги автоподбора (Get-RunSummary)
+function Add-ScoreHistory($Alts) {
+    $now = Get-Date -Format 'yyyy-MM-dd HH:mm'
+    $rows = @(Get-ScoreHistory) + @($Alts | ForEach-Object { New-Object PSObject -Property @{ Date = $now; Id = $_.Id; Name = $_.Name; Score = $_.Score } })
+    $keep = @($rows | Group-Object { $_.Id + '|' + $_.Name } | ForEach-Object { $_.Group | Select-Object -Last $Script:ScoreRuns })
+    $lines = @('# Баллы последних прогонов автоподбора: дата|номер|имя|балл. Удалите файл - среднее начнётся заново') +
+        @($keep | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Date, $_.Id, $_.Name, (Format-Points $_.Score) })
+    Write-TextNoBom (Get-PkgPath $Script:ScoreHistoryFile) (($lines -join "`r`n") + "`r`n")
+}
+
+# Номер стратегии -> средний балл (Avg) и число прогонов (Runs)
+function Get-AverageScores($Alts) {
+    $hist = @(Get-ScoreHistory)
+    $avg = @{}
+    foreach ($a in $Alts) {
+        $vals = @($hist | Where-Object { $_.Id -eq $a.Id -and $_.Name -eq $a.Name } | ForEach-Object { $_.Score } | Select-Object -Last $Script:ScoreRuns)
+        if (-not $vals.Count) { $vals = @($a.Score) }
+        $avg[$a.Id] = New-Object PSObject -Property @{ Avg = ($vals | Measure-Object -Average).Average; Runs = $vals.Count }
+    }
+    return $avg
+}
+
+# Кого предлагать основной. Top - лучший средний (при равенстве основная, потом реже замерзает, потом основные стратегии);
+# Noise - Top впереди основной меньше чем на $ScoreMargin: менять незачем
+function Get-PrimaryChoice($Alts, [hashtable]$Avg, [string]$CurrentId, $OrderIds) {
+    $top = @($Alts | Sort-Object @{ Expression = { $Avg[$_.Id].Avg }; Descending = $true }, @{ Expression = { $_.Id -ne $CurrentId } }, @{ Expression = { $_.Freeze } }, @{ Expression = { [array]::IndexOf(@($OrderIds), $_.Id) } })[0]
+    $cur = @($Alts | Where-Object { $_.Id -eq $CurrentId }) | Select-Object -First 1
+    $noise = $false
+    if ($cur -and $top.Id -ne $cur.Id) { $noise = ($Avg[$top.Id].Avg - $Avg[$cur.Id].Avg) -lt $Script:ScoreMargin }
+    return New-Object PSObject -Property @{ Top = $top; Current = $cur; Noise = $noise }
+}
+
+# Память автосмены (lua\autoring.lua): какие сайты и подсети работают не с первой стратегией круга
+$Script:RingDir = 'runtime/ring'
+# Каталог создаём сами. Если его создаст winws2 (mkdir в cygwin), в его правах будет запрет записи для Authenticated Users:
+# служба работает от SYSTEM, входит в эту группу и не сможет записать файл. Такие права исправляем на обычные
+function Initialize-RingDir {
+    $d = Get-PkgPath $Script:RingDir
+    if (-not (Test-Path $d)) { New-Item -ItemType Directory $d -Force | Out-Null; return }
+    $deny = @((Get-Acl $d).Access | Where-Object { $_.AccessControlType -eq 'Deny' })
+    if ($deny.Count) { & (Join-Path $env:SystemRoot 'System32\icacls.exe') $d /reset /T /C /Q 2>&1 | Out-Null }
+}
+function Get-RingStateName([string]$Section, $Ring) {
+    $sig = (@($Ring | ForEach-Object { $_.Id + ':' + $_.Name }) -join ',')
+    $md5 = [System.Security.Cryptography.MD5]::Create()
+    $hex = [BitConverter]::ToString($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($sig))).Replace('-', '').Substring(0, 8).ToLower()
+    return ('ring-{0}-{1}.txt' -f $Section, $hex)
+}
+# Круг поменялся (новый автоподбор) - появляется новый файл. Старые оставляем на случай возврата, но не больше 8
+function Remove-OldRingMemory {
+    $d = Get-PkgPath $Script:RingDir
+    if (-not (Test-Path $d)) { return }
+    Get-ChildItem $d -Filter 'ring-*.txt' -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -Skip 8 |
+        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+}
+
 # Круг автосмены профиля $Section (general - сайты, ipset_tcp, google - YouTube, discord_media, game_tcp).
 # С рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные сильные.
 # Без рейтинга (автоподбор ещё не запускали) и у игры (FixedRings) - основная и основные стратегии в порядке RotationPref.
@@ -315,8 +468,8 @@ function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
     $primary = @($all | Where-Object { $_.Id -eq $PrimaryId })
     $rank = if ($Script:FixedRings -contains $Section) { $null } else { Get-TestRank }
     if ($rank) {
-        $ids = Get-SectionRank $rank $Section
-        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' }
+        $ids = Get-SectionRank $rank $Section $PrimaryId
+        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' $PrimaryId }
         if ($null -ne $ids) {
             $order = @()
             if ($ids -contains $PrimaryId) { $order += $primary }
@@ -442,7 +595,8 @@ function Get-PkgPath([string]$Rel) {
 
 # Профили повторяют general (ALT10-13).bat Flowseal в том же порядке, с Game Filter и IPSet.
 # Отличия от Flowseal:
-#  - на TCP-профилях работает circular (zapret-auto.lua): при 3 неудачах подряд к одному серверу
+#  - на TCP-профилях работает circular (zapret-auto.lua) с детекторами lua\autoring.lua: при неудаче к одному серверу
+#    (непроверенная на нём стратегия - с первой, проверенная - с третьей подряд)
 #    (повторные отправки = замерзание 16-20 КБ, RST от DPI) этот сервер переводится на следующую ALT;
 #  - из UDP 443 в драйвер попадают только пакеты QUIC Initial, а не весь QUIC-трафик YouTube;
 #  - сети Take-Two (собственные серверы 2K) исключены везде: они не заблокированы, а фейки и разрезка
@@ -486,6 +640,9 @@ function New-BypassArgList {
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-antidpi.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-auto.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/fooling.lua'))
+    $a.Add('--lua-init=@' + (Get-PkgPath 'lua/autoring.lua'))
+    # память автосмены (lua\autoring.lua): файл можно писать только в этот каталог
+    if ($auto) { Initialize-RingDir; $a.Add('--writable=' + (Get-PkgPath $Script:RingDir)) }
     $a.Add('--blob=quic_google:@' + (Get-PkgPath 'fake/quic_initial_www_google_com.bin'))
     $a.Add('--blob=quic_4pda:@' + (Get-PkgPath 'fake/quic_initial_4pda_to.bin'))
     $a.Add('--blob=stun_fs:@' + (Get-PkgPath 'fake/stun.bin'))
@@ -527,13 +684,19 @@ function New-BypassArgList {
         if ($St.Sections.ContainsKey($Name)) { return $St.Sections[$Name] }
         return $St.Sections[$Fallback]
     }
-    function Add-Section([string]$Name, [switch]$Circular, [string]$CircularArgs = '', [string]$Fallback = '') {
+    function Add-Section([string]$Name, [switch]$Circular, [string]$CircularArgs = '', [string]$Fallback = '', [switch]$Learn) {
         $ring = @(if ($Circular -and $auto) { Get-RotationOrder $altId $Name } else { $primary })
+        # поддельные сбросы фильтра выбрасываются (lua\autoring.lua). Игру не трогаем. Входящие SYN+ACK, FIN и RST драйвер
+        # и так передаёт winws2, поэтому лишней нагрузки нет
+        if ($Learn) { foreach ($l in '--payload=all', '--out-range=x', '--in-range=a', '--lua-desync=rst_guard', '--in-range=x', '--out-range=a') { $a.Add($l) } }
         if ($ring.Count -ge 2) {
             $a.Add('--payload=all')
             $a.Add('--out-range=-s34228')
             $a.Add('--in-range=-s5556')
-            $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs)
+            # имя файла памяти - по составу круга: номера стратегий значат своё только в этом составе. Игра - без памяти
+            # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
+            $memArgs = if ($Learn) { ':key=' + $Name + ':state=' + (Get-RingStateName $Name $ring) + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
+            $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
             $n = 0
             foreach ($st in $ring) {
@@ -541,16 +704,18 @@ function New-BypassArgList {
                 foreach ($l in (Get-SectionLines $st $Name $Fallback)) {
                     if ($l.StartsWith('--lua-desync=')) { $a.Add($l + ':strategy=' + $n) } else { $a.Add($l) }
                 }
+                if ($Learn) { foreach ($l in '--payload=all', '--out-range=-d10', ('--lua-desync=rst_mark:strategy=' + $n)) { $a.Add($l) } }
             }
         } else {
             foreach ($l in (Get-SectionLines $ring[0] $Name $Fallback)) { $a.Add($l) }
+            if ($Learn) { foreach ($l in '--payload=all', '--out-range=-d10', '--lua-desync=rst_mark') { $a.Add($l) } }
         }
     }
 
     # Стратегия "общего списка" нужна в трёх профилях (general, tcp_ipset, autolist). С автосменой это все стратегии
     # круга, и три копии раздували командную строку к пределу Windows (32767). Поэтому - шаблон zapret2 и --import.
     $a.Add('--template=tpl_general')
-    Add-Section 'general' -Circular -CircularArgs ':reset'
+    Add-Section 'general' -Circular -CircularArgs ':reset' -Learn
     $a.Add('--new')
 
     Add-Profile 'quic_list' (@('--filter-udp=443', '--filter-l7=quic') + $hostlists + $hostEx + $ipEx)
@@ -558,9 +723,9 @@ function New-BypassArgList {
     Add-Profile 'discord_voice' (@("--filter-udp=$($Script:DiscordUdpPorts)", '--filter-l7=discord,stun') + $ipGames)
     Add-Section 'discord_udp'
     Add-Profile 'discord_media' (@("--filter-tcp=$($Script:DiscordTcpPorts)", '--hostlist-domains=discord.media') + $ipGames)
-    Add-Section 'discord_media' -Circular -CircularArgs ':reset'
+    Add-Section 'discord_media' -Circular -CircularArgs ':reset' -Learn
     Add-Profile 'google' (@('--filter-tcp=443', ('--hostlist=' + (Get-PkgPath 'lists/list-google.txt'))) + $ipGames)
-    Add-Section 'google' -Circular -CircularArgs ':reset'
+    Add-Section 'google' -Circular -CircularArgs ':reset' -Learn
     Add-Profile 'general' (@('--filter-tcp=80,443') + $hostlists + $hostEx + $ipEx + @('--import=tpl_general'))
     Add-Profile 'quic_ipset' (@('--filter-udp=443', '--filter-l7=quic') + $ips + $hostEx + $ipEx)
     Add-Section 'quic'
@@ -568,7 +733,7 @@ function New-BypassArgList {
     $ipsetRing = @(if ($auto) { Get-RotationOrder $altId 'ipset_tcp' } else { $primary })
     if (@($ipsetRing | Where-Object { $_.Sections.ContainsKey('ipset_tcp') }).Count) {
         Add-Profile 'tcp_ipset' (@('--filter-tcp=80,443,8443') + $ips + $hostEx + $ipEx)
-        Add-Section 'ipset_tcp' -Circular -CircularArgs ':reset' -Fallback 'general'
+        Add-Section 'ipset_tcp' -Circular -CircularArgs ':reset' -Fallback 'general' -Learn
     } else {
         Add-Profile 'tcp_ipset' (@('--filter-tcp=80,443,8443') + $ips + $hostEx + $ipEx + @('--import=tpl_general'))
     }
@@ -633,6 +798,27 @@ function Set-HighPriority {
     foreach ($p in (Get-OurProcesses)) {
         try { $p.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::High } catch { }
     }
+    Set-BypassPriorityPolicy $true
+}
+
+# При загрузке Windows и после сбоя службу запускает Windows, без меню, и приоритет был бы обычным. Настройка Windows для winws2.exe
+# (CpuPriorityClass: 3 - высокий) действует при любом запуске. Убирает её пункт "Удалить zapret из Windows"
+$Script:PriorityKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\winws2.exe'
+function Set-BypassPriorityPolicy([bool]$On) {
+    $k = $Script:PriorityKey
+    try {
+        if (-not $On) {
+            if (Test-Path $k) { Remove-Item $k -Recurse -Force -ErrorAction Stop }
+        } elseif ((Get-BypassPriorityPolicy) -ne 3) {
+            New-Item -Path ($k + '\PerfOptions') -Force -ErrorAction Stop | Out-Null
+            New-ItemProperty -Path ($k + '\PerfOptions') -Name 'CpuPriorityClass' -Value 3 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+        }
+    } catch { }
+}
+function Get-BypassPriorityPolicy {
+    $v = Get-ItemProperty -Path ($Script:PriorityKey + '\PerfOptions') -Name 'CpuPriorityClass' -ErrorAction SilentlyContinue
+    if ($v) { return $v.CpuPriorityClass }
+    return 0
 }
 
 function Enable-TcpTimestamps {
@@ -660,7 +846,7 @@ function Stop-Bypass([switch]$Unload) {
     # winws2 службы завершился, не сообщив Windows об остановке (упал или его добили) - для Windows это сбой, и через
     # 5 секунд она сама запустит службу снова (автоперезапуск при сбое). Автоподбор тогда упирался в "A copy of
     # winws2 is already running with the same filter". Дожидаемся перезапуска и останавливаем ещё раз
-    if ($svcUp -and ($crashed -or (Test-ServiceCrashed $since))) {
+    if ($svcUp -and ($crashed -or @(Get-BypassCrashes $since).Count)) {
         for ($i = 0; $i -lt 70; $i++) {
             Start-Sleep -Milliseconds 100
             $svc.Refresh()
@@ -675,12 +861,16 @@ function Stop-Bypass([switch]$Unload) {
     if ($Unload) { return (Remove-WinDivertDriver) }
 }
 
-# Журнал Windows: служба обхода "неожиданно завершилась" (7031) после $Since - значит, Windows её перезапустит
-function Test-ServiceCrashed([datetime]$Since) {
+# Когда служба обхода неожиданно завершалась после $Since, от ранних к поздним (журнал Windows, события 7031 и 7034).
+# Записи нет - Get-WinEvent бросает исключение. Причину журнал не называет: winws2 в роли службы ничего не пишет
+function Get-BypassCrashes([datetime]$Since) {
     $ev = @()
-    try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031; StartTime = $Since } -ErrorAction Stop) } catch { }
-    return @($ev | Where-Object { $_.Message -and ($_.Message.Contains($Script:ServiceDisplayName) -or $_.Message.Contains($Script:ServiceName)) }).Count -gt 0
+    try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031, 7034; StartTime = $Since } -ErrorAction Stop) } catch { }
+    return @($ev | Where-Object { $_.Message -and ($_.Message.Contains($Script:ServiceDisplayName) -or $_.Message.Contains($Script:ServiceName)) } |
+        ForEach-Object { $_.TimeCreated } | Sort-Object)
 }
+function Format-BypassCrashes($Times) { return (@($Times | ForEach-Object { $_.ToString('dd.MM HH:mm') }) -join ', ') }
+$Script:CrashDays = 7   # за сколько дней проверка обходов и отчёт показывают падения
 
 # winws2 (cygwin) изредка падает сразу после старта, а с ошибкой WinDivert выходит за доли секунды. Запуск удачный,
 # когда процесс проработал $AliveMs подряд; раньше ждали фиксированные 3 секунды при каждом запуске.
@@ -817,6 +1007,7 @@ function Start-Bypass([switch]$Quiet) {
     }
     if ($alive) {
         Set-HighPriority
+        Remove-OldRingMemory
         # адреса серверов игр - уже через обход, как их увидит игра
         $gp = if ($settings.gamepins -eq 'on') { Update-GamePins } else { $null }
         if (-not $Quiet) {
@@ -863,7 +1054,7 @@ function Get-StartFailureHints([string]$Text) {
     if ($Text -match '(?i)cannot find the file|не удается найти указанный файл') { $h += 'Не найден файл: антивирус удалил winws2.exe или WinDivert64.sys. Добавьте папку в исключения и распакуйте архив заново.' }
     # FWP_E_IN_USE (0x8032000A): у Windows остались фильтры прошлого запуска. Было при перезапуске обхода посреди игры с античитом
     if ($Text -match '(?i)referenced by other objects|0x8032000A|ссылаются другие объекты') {
-        $games = @(Get-Process -Name $Script:GameProcessNames -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+        $games = @(Get-RunningGames)
         $msg = 'Драйвер WinDivert не смог поставить фильтры: Windows держит фильтры прошлого запуска (0x8032000A).'
         if ($games.Count) { $msg += ' Так бывает, если перезапускать обход при открытой игре с античитом, а сейчас открыто: ' + ($games -join ', ') + '. Закройте игру, запустите обход (пункт 1), потом игру. Не поможет - перезагрузите ПК.' }
         else { $msg += ' Перезагрузите ПК и запускайте обход до игры.' }
@@ -2246,14 +2437,18 @@ function Set-GamePins($Pins) {
 # Перепроверить адреса и записать в hosts рабочие (при запуске обхода, если закрепление включено).
 # Имя, у которого не ответил ни один адрес, не закрепляется: пусть идёт по DNS.
 function Update-GamePins {
+    # При VPN в режиме туннеля TLS проходит на любом адресе: клиент соединяется по имени из запроса, а не по адресу.
+    # Такая проверка закрепила бы и заблокированные адреса, поэтому закреплённое не трогаем
+    if (@(Get-TunAdapters).Count) { return New-Object PSObject -Property @{ Ok = $true; State = @(); Pins = [ordered]@{}; Skipped = $true } }
     $state = @(Get-GamePinsState)
     $pins = [ordered]@{}
     foreach ($s in $state) { if ($s.Good.Count) { $pins[$s.Host] = @($s.Good | Select-Object -First $Script:GamePinsMax) } }
     $ok = Set-GamePins $pins
-    return New-Object PSObject -Property @{ Ok = $ok; State = $state; Pins = $pins }
+    return New-Object PSObject -Property @{ Ok = $ok; State = $state; Pins = $pins; Skipped = $false }
 }
 
 function Get-GamePinsText($Update) {
+    if ($Update.Skipped) { return 'включён VPN, проверить адреса нельзя - закрепление не менялось' }
     return (@(foreach ($s in $Update.State) {
         $n = if ($Update.Pins.Contains($s.Host)) { @($Update.Pins[$s.Host]).Count } else { 0 }
         $bad = if ($s.Bad.Count) { ', не отвечают: ' + ($s.Bad -join ', ') } else { '' }
@@ -2607,6 +2802,9 @@ $Script:IpsetDays = 7
 # Игры и античиты: пока они запущены, обход на время теста не выключаем
 $Script:GameProcessNames = @('NBA2K*', 'dota2', 'cs2', 'csgo', 'EasyAntiCheat*', 'BEService*', 'FortniteClient*', 'r5apex*',
     'RocketLeague', 'GTA5*', 'TslGame*', 'VALORANT*', 'eldenring', 'FC2*', 'Overwatch', 'destiny2')
+function Get-RunningGames {
+    return @(Get-Process -Name $Script:GameProcessNames -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessName } | Sort-Object -Unique)
+}
 
 # Запрос к планировщику занимает ~0,3 с, а шапка меню перерисовывается после каждого пункта: ответ держим минуту.
 # Install/Remove-AutotuneTask сбрасывают его сразу.
@@ -2678,7 +2876,7 @@ function Add-AutotuneLog([string]$Text) {
 # Почему автоподбор сейчас нельзя запускать (пусто - можно)
 function Get-AutotuneBlockers {
     $w = @()
-    $games = @(Get-Process -Name $Script:GameProcessNames -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)
+    $games = @(Get-RunningGames)
     if ($games.Count) { $w += ('запущена игра: ' + ($games -join ', ')) }
     $tun = @(Get-TunAdapters)
     if ($tun.Count) { $w += ('включён VPN: ' + (($tun | ForEach-Object { $_.Name }) -join ', ')) }
