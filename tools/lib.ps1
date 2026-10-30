@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.6'
+$Script:Version     = '1.6.1'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -642,16 +642,44 @@ function Enable-TcpTimestamps {
 
 function Stop-Bypass([switch]$Unload) {
     $svc = Get-OurService
-    if ($svc -and $svc.Status -ne 'Stopped') {
+    $svcUp = $svc -and $svc.Status -ne 'Stopped'
+    $since = Get-Date
+    if ($svcUp) {
         Stop-Service -Name $Script:ServiceName -Force -ErrorAction SilentlyContinue
         try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(10)) } catch { }
+        # служба отчиталась об остановке - процесс завершается сам за доли секунды; добиваем только зависший
+        for ($i = 0; $i -lt 15 -and @(Get-OurProcesses).Count; $i++) { Start-Sleep -Milliseconds 100 }
     }
+    $crashed = $false
     foreach ($p in (Get-OurProcesses)) {
+        if ($svc) { $svc.Refresh(); if ($svc.Status -ne 'Stopped') { $crashed = $true } }
         try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
     }
     # ждём, пока процессы действительно завершатся (обычно сразу), а не фиксированные полсекунды
     for ($i = 0; $i -lt 30 -and @(Get-OurProcesses).Count; $i++) { Start-Sleep -Milliseconds 100 }
+    # winws2 службы завершился, не сообщив Windows об остановке (упал или его добили) - для Windows это сбой, и через
+    # 5 секунд она сама запустит службу снова (автоперезапуск при сбое). Автоподбор тогда упирался в "A copy of
+    # winws2 is already running with the same filter". Дожидаемся перезапуска и останавливаем ещё раз
+    if ($svcUp -and ($crashed -or (Test-ServiceCrashed $since))) {
+        for ($i = 0; $i -lt 70; $i++) {
+            Start-Sleep -Milliseconds 100
+            $svc.Refresh()
+            if ($svc.Status -ne 'Stopped') {
+                Stop-Service -Name $Script:ServiceName -Force -ErrorAction SilentlyContinue
+                try { $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(10)) } catch { }
+                foreach ($p in (Get-OurProcesses)) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+                break
+            }
+        }
+    }
     if ($Unload) { return (Remove-WinDivertDriver) }
+}
+
+# Журнал Windows: служба обхода "неожиданно завершилась" (7031) после $Since - значит, Windows её перезапустит
+function Test-ServiceCrashed([datetime]$Since) {
+    $ev = @()
+    try { $ev = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; ProviderName = 'Service Control Manager'; Id = 7031; StartTime = $Since } -ErrorAction Stop) } catch { }
+    return @($ev | Where-Object { $_.Message -and ($_.Message.Contains($Script:ServiceDisplayName) -or $_.Message.Contains($Script:ServiceName)) }).Count -gt 0
 }
 
 # winws2 (cygwin) изредка падает сразу после старта, а с ошибкой WinDivert выходит за доли секунды. Запуск удачный,
