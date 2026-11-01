@@ -12,7 +12,8 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 
 ## Features
 
-- 32 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites, 5 "white" variants of the soft ALT11 whose fake ClientHello carries the name of a site on ISP whitelists.
+- 34 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites, 5 "white" variants of the soft ALT11 whose fake ClientHello carries the name of a site on ISP whitelists, 2 new STUN-order variants.
+- The fourth white variant now uses 6 fake repeats instead of 8 in the general TCP profile, retaining STUN. Its dedicated game, Discord and YouTube profiles are unchanged.
 - **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm. The primary strategy is compared by the average of the last 3 runs and only changes on a gap of at least 2 points.
 - Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring. Sites that need a non-first strategy are remembered across restarts, and the ring is built by coverage: right after the primary come strategies that open what it cannot.
 - Forged resets from the DPI are recognised by TTL or by arriving faster than the server could answer, and dropped, so connections are not torn down while the server is still answering.
@@ -33,7 +34,7 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 ## Security and privacy
 
 - zapret2 files are verified against the official release SHA-256 before every start; code folders are locked to Administrators and SYSTEM.
-- No telemetry. Network requests (HTTPS only): ipwho.is / ipinfo.io (ISP and country), GitHub (Flowseal lists, new versions, updates), web.telegram.org (when the Telegram bridge is on), hyperion-cs.github.io (test hosting set), the autotest targets.
+- No telemetry. Network requests (HTTPS only): ipwho.is / ipinfo.io (ISP and country), GitHub (Flowseal lists, new versions, updates), web.telegram.org (when the Telegram bridge is on), hyperion-cs.github.io (test hosting set), Cloudflare / Google DoH (fixed DNS diagnostic names, no browsing history), the autotest targets.
 - Reports hide the last octet of your IP and your Windows user name.
 
 ## License

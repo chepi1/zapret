@@ -4,6 +4,8 @@ if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет фай�
 $env:__COMPAT_LAYER = 'RunAsInvoker'
 # всё - на копии пакета: настоящий runtime (рейтинг пользователя) не трогаем
 $stage = Join-Path $env:TEMP ('nba-dry-' + [guid]::NewGuid().ToString('N'))
+$stage = [IO.Path]::GetFullPath($stage)
+if ([IO.Path]::GetDirectoryName($stage) -ne [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')) { throw 'Unsafe test directory' }
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item $Pkg (Join-Path $stage 'pkg') -Recurse
 . (Join-Path $stage 'pkg\tools\lib.ps1')
@@ -21,6 +23,10 @@ foreach ($st in $all) {
 # круг из пяти разных по устройству стратегий: подменяем рейтинг на время проверки
 $rankPath = Get-PkgPath $Script:RankFile
 $backup = if (Test-Path $rankPath) { [System.IO.File]::ReadAllText($rankPath) } else { $null }
+$coverFile = $Script:CoverFile
+# Синтетическому рейтингу не подходит покрытие из настоящих замеров пользователя.
+$Script:CoverFile = 'runtime/dev-dry-cover.txt'
+$Script:RingCache = @{}
 try {
     $lines = @('# date: 2026-10-27 12:00', 'base 20 54 DPI=10/36 Discord=0/4 YouTube=0/3', '7 45 45 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3',
         '5 44 44 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3', '45 43 43 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3',
@@ -45,6 +51,7 @@ try {
     $okOld = $newIds.Count -gt 0 -and @($newIds | Where-Object { $qp -notcontains $_ }).Count -eq 0
     Write-TextNoBom $testedPath ((@($newSt | ForEach-Object { $_.Id + '|' + $_.Name }) -join "`r`n") + "`r`n")
     $qp2 = @(Get-TestStrategies | ForEach-Object { $_.Id })
+    if ($qp2 -notcontains '41' -or $qp2 -notcontains '42') { Write-Host 'FAIL quick pool lost EXP or SIMPLE FAKE'; $fails++ }
     # основная стратегия этого ПК проверяется всегда, даже если она новая
     $primaryId = (Get-Settings).alt
     $okNew = @($newIds | Where-Object { $_ -ne $primaryId -and $qp2 -contains $_ }).Count -eq 0
@@ -58,13 +65,21 @@ try {
     Write-Host ('ring cmdline: ' + $cmd.Length + ' chars, tcp_ipset own section: ' + ($cmd -match 'tcp_ipset"\s+(?:"--(?!import)[^"]*"\s+)*"--lua-desync=circular'))
     # без рейтинга: круг только из основных
     Remove-Item $rankPath
+    Remove-Item $testedPath -ErrorAction SilentlyContinue
+    $freshPool = @(Get-TestStrategies | ForEach-Object { $_.Id })
+    $missingFresh = @($newIds | Where-Object { $freshPool -notcontains $_ })
+    if ($missingFresh.Count) { Write-Host ('FAIL fresh install misses new strategies: ' + ($missingFresh -join ',')); $fails++ }
+    else { Write-Host 'new strategies included on a fresh install' -ForegroundColor Green }
+    if ($null -ne $testedBackup) { [System.IO.File]::WriteAllText($testedPath, $testedBackup) }
     Write-Host ('no-rank ring: ' + ((Get-RotationOrder '12' 'general' | ForEach-Object { $_.Id }) -join ','))
     Write-Host ('quick pool (no rank): ' + ((Get-TestStrategies | ForEach-Object { $_.Id }) -join ','))
     Write-Host ('full pool: ' + @(Get-TestStrategies -Full).Count)
 } finally {
+    $Script:CoverFile = $coverFile
+    $Script:RingCache = @{}
     if ($null -ne $backup) { [System.IO.File]::WriteAllText($rankPath, $backup, $Script:Utf8NoBom) }
     Remove-Item (Get-PkgPath 'runtime/args-devring.txt') -ErrorAction SilentlyContinue
 }
 Write-Host ('quick pool (real rank): ' + ((Get-TestStrategies | ForEach-Object { $_.Id }) -join ','))
-Remove-Item $stage -Recurse -Force
-if ($fails) { Write-Host "$fails FAILED" -ForegroundColor Red } else { Write-Host 'all ok' -ForegroundColor Green }
+Remove-Item -LiteralPath $stage -Recurse -Force
+if ($fails) { Write-Host "$fails FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'all ok' -ForegroundColor Green; exit 0 }

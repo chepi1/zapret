@@ -4,7 +4,7 @@ param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Write-Host '  пропущено: нужны права администратора (запустите run-all.ps1 из окна администратора)'; exit 0 }
-$w = Join-Path $Pkg 'runtime\luatest'
+$w = Join-Path $Pkg ('runtime\luatest-' + [guid]::NewGuid().ToString('N'))
 $lua = @('zapret-lib.lua', 'zapret-antidpi.lua', 'zapret-auto.lua', 'fooling.lua', 'autoring.lua') | ForEach-Object { '"--lua-init=@' + (Join-Path $Pkg ('lua\' + $_)) + '"' }
 $test = '"--lua-init=@' + (Join-Path $PSScriptRoot 'luatest.lua') + '"'
 $psi = New-Object Diagnostics.ProcessStartInfo

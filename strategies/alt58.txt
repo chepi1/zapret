@@ -1,7 +1,7 @@
-# name: ALT11 белый 4
-# desc: Как ALT11 белый 1, но в фейке имя ya.ru. Белые списки у узлов провайдеров разные.
+# name: ALT11 белый 4 лёгкая
+# desc: Белый 4 с именем ya.ru: для сайтов 6 повторов фейков вместо 8. STUN сохранён. YouTube, Discord и игра - как прежде.
 # origin: zapret 1.6, на основе ALT11 мягкой; YouTube, Discord и игра - как в ней
-# since: 1.6
+# since: 1.8
 [quic]
 --out-range=-n10
 --payload=quic_initial
@@ -25,11 +25,11 @@
 [general]
 --out-range=-d10
 --payload=tls_client_hello
---lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
---lua-desync=fake:blob=fake_default_tls:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8:tls_mod=rnd,dupsid,sni=ya.ru
+--lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
+--lua-desync=fake:blob=fake_default_tls:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6:tls_mod=rnd,dupsid,sni=ya.ru
 --lua-desync=multisplit:pos=1
 --payload=http_req
---lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=8
+--lua-desync=fake:blob=tls_sferum:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=6
 --lua-desync=multisplit:pos=1
 [game_tcp]
 --out-range=<n4

@@ -635,6 +635,13 @@ function Show-PcCheck {
         Write-Color ('  ! В Windows установлен российский корневой сертификат (' + (@($ruCerts | ForEach-Object { ($_.Subject -split ',')[0] } | Select-Object -Unique) -join '; ') + ').') Yellow
         Write-Color '    С ним HTTPS-соединения можно подменять незаметно. Если ставили не сами: certmgr.msc -> Доверенные корневые центры -> удалить.' Yellow
     }
+    if (-not $vpnOn) {
+        $dns = Get-DnsCheck
+        Write-Color ('  ' + (Get-DnsCheckText $dns)) $(if ($dns.Suspect.Count) { 'Yellow' } else { 'Gray' })
+        if ($dns.Suspect.Count) {
+            Write-Color '    Можно сравнить с защищённым DNS: в браузере - "Безопасный DNS" (Cloudflare или Google), в Windows 11 - Параметры -> Сеть -> свойства подключения -> Назначение DNS-сервера.' Yellow
+        }
+    }
     $wifi = Get-WifiInfo
     if ($wifi -and $wifi.Wifi -and $wifi.Roam -and $wifi.RoamLowest -and $wifi.Roam -ne $wifi.RoamLowest) {
         Write-Color ('  Wi-Fi: {0} - {1}: адаптер время от времени ищет другие сети, и пинг в играх прыгает на 50-300 мс' -f $wifi.RoamName, $wifi.Roam) Gray

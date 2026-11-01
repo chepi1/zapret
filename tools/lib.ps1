@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.7'
+$Script:Version     = '1.8'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -248,11 +248,14 @@ function Get-TestRank {
     # рейтинг без строки version сделан версией до 1.6, где её ещё не писали
     $rows = @(); $baseOk = $null; $baseGroups = @{}; $date = $null; $ver = '1.5'
     $n = '(-?\d+(?:\.\d+)?)'
+    # стратегии, убранной обновлением сборки, в файле ещё числится балл: иначе она занимала бы место в круге, а в работе её нет
+    $exists = @(Get-Strategies | ForEach-Object { $_.Id })
     foreach ($line in [System.IO.File]::ReadAllLines($f)) {
         if ($line -match '^#\s*date:\s*(.+)$') { $date = $matches[1].Trim(); continue }
         if ($line -match '^#\s*version:\s*(.+)$') { $ver = $matches[1].Trim(); continue }
         if ($line -match ('^base\s+' + $n + '\s+(\d+)(.*)$')) { $baseOk = ConvertFrom-Points $matches[1]; $baseGroups = Read-RankGroups $matches[3]; continue }
         if ($line -match ('^(\d+)\s+' + $n + '\s+' + $n + '\s+(\d+)\s+(\d+)\s+(\d+)(.*)$')) {
+            if ($exists -notcontains $matches[1]) { continue }
             $rows += New-Object PSObject -Property @{ Id = $matches[1]; Score = (ConvertFrom-Points $matches[2]); Ok = (ConvertFrom-Points $matches[3])
                 Total = [int]$matches[4]; Harm = [int]$matches[5]; Freeze = [int]$matches[6]; Groups = (Read-RankGroups $matches[7]) }
         }
@@ -268,8 +271,7 @@ $Script:RingCache = @{}
 function Save-TestCover($Table) {
     $lines = @('# Какие адреса открыла каждая стратегия в последнем автоподборе. Удалите файл - круги соберутся только по баллам')
     foreach ($id in $Table.Keys) {
-        # ? - соединение не установилось: стратегия тут ни при чём (она работает позже), и победой другой стратегии это не считается
-        $lines += (@($id) + @($Table[$id] | ForEach-Object { if ($_.State -eq 'OK') { $_.Group + '|' + $_.Name } elseif ($_.ConnMs -eq 0) { '?' + $_.Group + '|' + $_.Name } } | Sort-Object -Unique)) -join "`t"
+        $lines += (@($id) + @($Table[$id] | Where-Object { $_.State -eq 'OK' } | ForEach-Object { $_.Group + '|' + $_.Name } | Sort-Object -Unique)) -join "`t"
     }
     Write-TextNoBom (Get-PkgPath $Script:CoverFile) (($lines -join "`r`n") + "`r`n")
 }
@@ -280,7 +282,8 @@ function Get-TestCover {
     foreach ($line in [System.IO.File]::ReadAllLines($f)) {
         if (-not $line -or $line.StartsWith('#')) { continue }
         $p = @($line -split "`t")
-        $c[$p[0]] = @($p | Select-Object -Skip 1)
+        # ? - метка версии 1.7: "стратегия тут ни при чём". Это была ошибка, такие адреса просто не открылись (см. Convert-CurlResult)
+        $c[$p[0]] = @($p | Select-Object -Skip 1 | Where-Object { -not $_.StartsWith('?') })
     }
     return $c
 }
@@ -303,7 +306,6 @@ function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank) {
     foreach ($id in $cover.Keys) {
         $l = New-Object System.Collections.Generic.List[string]
         foreach ($k in $cover[$id]) {
-            if ($k.StartsWith('?')) { continue }
             $g = $k.Substring(0, [math]::Max(0, $k.IndexOf('|')))
             if ($(if ($groups) { $groups -contains $g } else { $others -notcontains $g })) { $l.Add($k) }
         }
@@ -311,8 +313,8 @@ function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank) {
     }
     $first = if (@($Ids) -contains $PrimaryId) { $PrimaryId } else { @($Ids)[0] }
     $done = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($k in @($cover['0'])) { if (-not $k.StartsWith('?')) { [void]$done.Add($k) } }
-    if ($cover.ContainsKey($first)) { foreach ($k in $cover[$first]) { [void]$done.Add($k.TrimStart('?')) } }
+    foreach ($k in @($cover['0'])) { [void]$done.Add($k) }
+    if ($cover.ContainsKey($first)) { foreach ($k in $cover[$first]) { [void]$done.Add($k) } }
     $ring = @($first)
     # кандидаты в порядке рейтинга: при равной пользе берём ту, у кого балл выше
     $cands = @($Rank.Rows | Sort-Object @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } } | ForEach-Object { $_.Id })
@@ -486,14 +488,17 @@ function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
 # в кругах автосмены: так стратегия, найденная полным автоподбором, не выпадает из круга после быстрого.
 # Плюс новые стратегии (с "# since:"), которые на этом ПК ещё не проверялись: пришедшие с обновлением сборки
 # проверяются первым же быстрым автоподбором, а дальше остаются в нём, только если попали в круги.
+# QuickExtra (EXP, SIMPLE FAKE): фейк-приветствие без STUN впереди. Часть серверов отвечает только так, а STUN первым стоит почти во
+# всех основных (за 10 автоподборов: net4u.de и adwin.fr - ALT11 0 из 10, ALT13 10 из 10); без них кругу не из чего выбирать
+$Script:QuickExtra = @('41', '42')
 function Get-TestStrategies([switch]$Full) {
     $all = @(Get-AllStrategiesOrdered)
     if ($Full) { return $all }
     $s = Get-Settings
-    $keep = @($Script:RotationPref) + @($s.alt)
+    $keep = @($Script:RotationPref) + $Script:QuickExtra + @($s.alt)
     foreach ($sec in $Script:SectionTitles.Keys) { $keep += @(Get-RotationOrder $s.alt $sec | ForEach-Object { $_.Id }) }
     $rank = Get-TestRank
-    if ($rank) { $keep += @($all | Where-Object { $_.Since -and -not (Test-StrategyTested $_ $rank) } | ForEach-Object { $_.Id }) }
+    $keep += @($all | Where-Object { $_.Since -and (-not $rank -or -not (Test-StrategyTested $_ $rank)) } | ForEach-Object { $_.Id })
     return @($all | Where-Object { $keep -contains $_.Id })
 }
 
@@ -806,12 +811,36 @@ function Set-HighPriority {
 $Script:PriorityKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\winws2.exe'
 function Set-BypassPriorityPolicy([bool]$On) {
     $k = $Script:PriorityKey
+    $perf = $k + '\PerfOptions'
+    $savedName = 'ZapretPreviousCpuPriorityClass'
     try {
         if (-not $On) {
-            if (Test-Path $k) { Remove-Item $k -Recurse -Force -ErrorAction Stop }
+            if (Test-Path -LiteralPath $perf) {
+                $key = Get-Item -LiteralPath $perf -ErrorAction Stop
+                $saved = $key.GetValue($savedName, $null)
+                if ($null -ne $saved) {
+                    if ((Get-BypassPriorityPolicy) -eq 3) {
+                        if ($saved -eq 'absent') { Remove-ItemProperty -LiteralPath $perf -Name 'CpuPriorityClass' -ErrorAction Stop }
+                        else { New-ItemProperty -LiteralPath $perf -Name 'CpuPriorityClass' -Value ([int]$saved) -PropertyType DWord -Force -ErrorAction Stop | Out-Null }
+                    }
+                    Remove-ItemProperty -LiteralPath $perf -Name $savedName -ErrorAction Stop
+                }
+            }
+            foreach ($path in @($perf, $k)) {
+                if (Test-Path -LiteralPath $path) {
+                    $key = Get-Item -LiteralPath $path -ErrorAction Stop
+                    if ($key.ValueCount -eq 0 -and $key.SubKeyCount -eq 0) { Remove-Item -LiteralPath $path -Force -ErrorAction Stop }
+                }
+            }
         } elseif ((Get-BypassPriorityPolicy) -ne 3) {
-            New-Item -Path ($k + '\PerfOptions') -Force -ErrorAction Stop | Out-Null
-            New-ItemProperty -Path ($k + '\PerfOptions') -Name 'CpuPriorityClass' -Value 3 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
+            if (-not (Test-Path -LiteralPath $perf)) { New-Item -Path $perf -Force -ErrorAction Stop | Out-Null }
+            $key = Get-Item -LiteralPath $perf -ErrorAction Stop
+            if ($null -eq $key.GetValue($savedName, $null)) {
+                $before = $key.GetValue('CpuPriorityClass', $null)
+                $saved = if ($null -eq $before) { 'absent' } else { [string]$before }
+                New-ItemProperty -LiteralPath $perf -Name $savedName -Value $saved -PropertyType String -Force -ErrorAction Stop | Out-Null
+            }
+            New-ItemProperty -LiteralPath $perf -Name 'CpuPriorityClass' -Value 3 -PropertyType DWord -Force -ErrorAction Stop | Out-Null
         }
     } catch { }
 }
@@ -2381,6 +2410,70 @@ function Test-TlsIps([string]$Name, [string[]]$Ips, [int]$TimeoutMs = 2000) {
     return $res
 }
 
+# ---------- подмена DNS ----------
+# Провайдер или роутер может отвечать на запросы о заблокированных сайтах чужим адресом: соединение идёт не туда, и обход бессилен.
+# Сравниваем системный DNS с DoH. Частный адрес или доступность только адреса DoH - повод для предупреждения, но не доказательство
+# подмены: CDN, маршрутизация и тайм-ауты тоже влияют на TLS. Неполную проверку явно отличаем от отсутствия подозрительных ответов.
+$Script:DnsProbeNames = @('discord.com', 'x.com', 'rutracker.org')
+function Test-PrivateIp([string]$Ip) {
+    return $Ip -match '^(0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)'
+}
+# Адреса A из DoH. Пусто - DoH недоступен или адреса нет: тогда и вывода нет
+function Get-DohAddresses([string]$Name) {
+    $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
+    foreach ($u in @('https://1.1.1.1/dns-query?name=', 'https://8.8.8.8/resolve?name=')) {
+        $r = Invoke-Native $curl ('-s --noproxy "*" --ssl-no-revoke --max-time 2 -H "accept: application/dns-json" "' + $u + $Name + '&type=A"') $Script:Runtime 4
+        if ($r.ExitCode -ne 0) { continue }
+        try {
+            $ips = @((ConvertFrom-Json $r.Output).Answer | Where-Object { $_.type -eq 1 } | ForEach-Object { $_.data })
+            if ($ips.Count) { return $ips }
+        } catch { }
+    }
+    return @()
+}
+# Возможная проблема DNS/маршрута. $SysOk, $DohOk - прошёл ли TLS по адресам системного DNS и DoH.
+function Test-DnsAnswerForged($Sys, $Doh, [bool]$SysOk, [bool]$DohOk) {
+    if (-not @($Sys).Count -or -not @($Doh).Count) { return $false }
+    if (@($Sys | Where-Object { @($Doh) -contains $_ }).Count) { return $false }
+    if (-not @($Sys | Where-Object { -not (Test-PrivateIp $_) }).Count) { return $true }
+    return ((-not $SysOk) -and $DohOk)
+}
+# Подозрительные имена и число адресов, для которых удалось сделать сравнение.
+function Get-DnsCheck {
+    $res = @()
+    $checked = 0
+    $bypassOn = @(Get-OurProcesses).Count -gt 0
+    foreach ($n in $Script:DnsProbeNames) {
+        $doh = @(Get-DohAddresses $n)
+        # DoH недоступен: сравнивать не с чем, и ждать его у каждого имени незачем
+        if (-not $doh.Count) { break }
+        $sys = @()
+        try { $sys = @(Resolve-DnsName $n -Type A -DnsOnly -NoHostsFile -QuickTimeout -ErrorAction Stop | Where-Object { $_.Type -eq 'A' } | ForEach-Object { $_.IPAddress }) } catch { }
+        if (-not $sys.Count) { continue }
+        if (@($sys | Where-Object { $doh -contains $_ }).Count) { $checked++; continue }
+        if (-not @($sys | Where-Object { -not (Test-PrivateIp $_) }).Count) { $res += $n; $checked++; continue }
+        if (-not $bypassOn) { continue }
+        $sysOk = $false; $dohOk = $false
+        # Одинаковый ответ - обычный случай, TLS проверять незачем. Без обхода заблокированный сайт не откроется ни по какому адресу
+        if ($bypassOn -and $sys.Count -and -not @($sys | Where-Object { $doh -contains $_ }).Count) {
+            $sysOk = @(Test-TlsIps $n $sys 1500 | Where-Object { $_.Ok }).Count -gt 0
+            $dohOk = @(Test-TlsIps $n $doh 1500 | Where-Object { $_.Ok }).Count -gt 0
+        }
+        if (-not $sysOk -and -not $dohOk) { continue }
+        $checked++
+        if (Test-DnsAnswerForged $sys $doh $sysOk $dohOk) { $res += $n }
+    }
+    return New-Object PSObject -Property @{ Suspect = @($res); Checked = $checked; Total = @($Script:DnsProbeNames).Count }
+}
+function Get-DnsCheckText($Result) {
+    if (-not $Result.Checked) { return 'DNS: проверить не удалось, нет данных для сравнения.' }
+    $coverage = ' Проверено имён: {0}/{1}.' -f $Result.Checked, $Result.Total
+    if ($Result.Suspect.Count) {
+        return ('DNS: возможная подмена или недоступный адрес: ' + ($Result.Suspect -join ', ') + '. Разные ответы CDN и сбои маршрута тоже могут быть причиной.' + $coverage)
+    }
+    return ('DNS: подозрительных ответов среди проверенных не обнаружено.' + $coverage)
+}
+
 # По каждому имени: адреса из DNS (мимо hosts), закреплённые сейчас, и какие из них отвечают
 function Get-GamePinsState {
     $hosts = @(Read-HostsEntries $Script:HostsFile)
@@ -2712,14 +2805,83 @@ function Get-UpdatePlan([string]$Src, [string]$Dst) {
     return $plan
 }
 
+# Удаляем только явно отозванные файлы сборки, а не любые пользовательские стратегии.
+function Get-RetiredStrategies([string]$Src, [string]$Dst) {
+    $manifest = Join-Path $Src 'strategies\retired.txt'
+    if (-not (Test-Path -LiteralPath $manifest)) { return @() }
+    foreach ($name in Get-ListLines $manifest) {
+        if ($name -notmatch '^alt\d+\.txt$') { continue }
+        $rel = 'strategies\' + $name
+        if (-not (Test-Path -LiteralPath (Join-Path $Src $rel)) -and (Test-Path -LiteralPath (Join-Path $Dst $rel))) { $rel }
+    }
+}
+
+# Если выбранная стратегия отозвана, готовим замену настройки внутри той же файловой транзакции.
+function Prepare-UpdateSettings([string]$Src, [string]$Dst, $Remove) {
+    $file = Join-Path $Dst 'runtime\settings.ini'
+    if (-not (Test-Path -LiteralPath $file)) { return @() }
+    $text = [IO.File]::ReadAllText($file)
+    $match = [regex]::Match($text, '(?m)^[ \t]*alt[ \t]*=[ \t]*(\d+)[ \t]*\r?$')
+    if (-not $match.Success -or @($Remove) -notcontains ('strategies\alt' + $match.Groups[1].Value + '.txt')) { return @() }
+    $replacement = '12'
+    if (-not (Test-Path -LiteralPath (Join-Path $Src 'strategies\alt12.txt'))) { throw 'В обновлении нет запасной стратегии ALT12.' }
+    $text = [regex]::Replace($text, '(?m)^([ \t]*alt[ \t]*=[ \t]*)\d+([ \t]*\r?)$', ('${1}' + $replacement + '${2}'))
+    $staged = Join-Path $Src 'runtime\settings.ini'
+    New-Item -ItemType Directory (Split-Path -Parent $staged) -Force -ErrorAction Stop | Out-Null
+    Write-TextNoBom $staged $text
+    Write-Color ('Выбранная стратегия отозвана в обновлении. После установки основной станет ALT' + $replacement + '.') Yellow
+    return 'runtime\settings.ini'
+}
+
+# Сначала резервные копии всех исходных файлов, затем замена/удаление. Даже частично записанный файл включён в откат.
+function Install-UpdateFiles([string]$Src, [string]$Dst, [string]$Backup, $Plan, $Remove) {
+    $root = [IO.Path]::GetFullPath($Dst).TrimEnd('\') + '\'
+    $items = @(@($Plan) + @($Remove) | Select-Object -Unique)
+    $originals = @{}
+    $done = New-Object System.Collections.Generic.List[string]
+    try {
+        foreach ($item in $items) {
+            $target = [IO.Path]::GetFullPath((Join-Path $root $item))
+            if ([IO.Path]::IsPathRooted($item) -or -not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw ('Недопустимый путь: ' + $item) }
+            $originals[$item] = Test-Path -LiteralPath $target
+            if ($originals[$item]) {
+                $b = Join-Path $Backup $item
+                New-Item -ItemType Directory (Split-Path -Parent $b) -Force -ErrorAction Stop | Out-Null
+                Copy-Item -LiteralPath $target -Destination $b -Force -ErrorAction Stop
+            }
+        }
+        foreach ($item in @($Plan)) {
+            $target = Join-Path $root $item
+            $done.Add($item)
+            New-Item -ItemType Directory (Split-Path -Parent $target) -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath (Join-Path $Src $item) -Destination $target -Force -ErrorAction Stop
+        }
+        foreach ($item in @($Remove)) {
+            $done.Add($item)
+            Remove-Item -LiteralPath (Join-Path $root $item) -Force -ErrorAction Stop
+        }
+        return $true
+    } catch {
+        Write-Color ('Обновление прервано: ' + $_.Exception.Message + '. Возвращаю прежние файлы.') Red
+        for ($i = $done.Count-1; $i -ge 0; $i--) {
+            $item = $done[$i]
+            $target = Join-Path $root $item
+            try {
+                if ($originals[$item]) { Copy-Item -LiteralPath (Join-Path $Backup $item) -Destination $target -Force -ErrorAction Stop }
+                elseif (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop }
+            } catch { Write-Color ('Не удалось восстановить ' + $item + '. Резервная копия: ' + $Backup + '. ' + $_.Exception.Message) Red }
+        }
+        return $false
+    }
+}
+
 # Скачивает, проверяет и ставит релиз $Rel (из Get-ZapretRelease). Перед заменой старые файлы копируются
-# в runtime\update\backup и при сбое возвращаются. Возвращает $true, если обновлено.
+# в runtime\update\<номер>\backup и при сбое возвращаются. Возвращает $true, если обновлено.
 function Install-ZapretUpdate($Rel) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $dir = Join-Path $Script:Runtime 'update'
-    if (Test-Path $dir) { Remove-Item $dir -Recurse -Force }
-    New-Item -ItemType Directory $dir | Out-Null
+    $dir = Join-Path (Join-Path $Script:Runtime 'update') ([guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory $dir -Force -ErrorAction Stop | Out-Null
     $zip = Join-Path $dir $Rel.Name
     Write-Color ('Скачиваю ' + $Rel.Name + '...') Cyan
     $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 300 -o "' + $zip + '" "' + $Rel.Url + '"') $dir 320
@@ -2727,7 +2889,7 @@ function Install-ZapretUpdate($Rel) {
     $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
     if (-not $Rel.Sha256 -or $hash -ne $Rel.Sha256) {
         Write-Color 'Контрольная сумма архива не совпала с GitHub - архив повреждён или подменён, не ставлю.' Red
-        Remove-Item $dir -Recurse -Force
+        Remove-Item -LiteralPath $zip -Force
         return $false
     }
     $x = Join-Path $dir 'x'
@@ -2741,35 +2903,21 @@ function Install-ZapretUpdate($Rel) {
         return $false
     }
     $plan = @(Get-UpdatePlan $src $Script:Root)
+    $remove = @(Get-RetiredStrategies $src $Script:Root)
+    $plan += @(Prepare-UpdateSettings $src $Script:Root $remove)
     # bin\WinDivert64.sys занят, пока драйвер загружен: останавливаем обход и выгружаем драйвер
     $was = @(Get-OurProcesses).Count -gt 0
     Stop-Bypass -Unload | Out-Null
     $backup = Join-Path $dir 'backup'
-    $done = @()
-    try {
-        foreach ($item in $plan) {
-            $target = Join-Path $Script:Root $item
-            if (Test-Path -LiteralPath $target) {
-                $b = Join-Path $backup $item
-                New-Item -ItemType Directory (Split-Path -Parent $b) -Force | Out-Null
-                Copy-Item -LiteralPath $target $b -Force
-            } else { New-Item -ItemType Directory (Split-Path -Parent $target) -Force | Out-Null }
-            Copy-Item -LiteralPath (Join-Path $src $item) $target -Force -ErrorAction Stop
-            $done += $item
-        }
-    } catch {
-        Write-Color ('Не удалось заменить ' + $item + ': ' + $_.Exception.Message + '. Возвращаю прежние файлы.') Red
-        foreach ($d in $done) {
-            $b = Join-Path $backup $d
-            if (Test-Path -LiteralPath $b) { Copy-Item -LiteralPath $b (Join-Path $Script:Root $d) -Force } else { Remove-Item -LiteralPath (Join-Path $Script:Root $d) -Force -ErrorAction SilentlyContinue }
-        }
+    if (-not (Install-UpdateFiles $src $Script:Root $backup $plan $remove)) {
         if ($was) { Start-Bypass -Quiet | Out-Null }
         return $false
     }
     # новое меню само включит обход, если он работал (runtime\update-restart.txt)
     Write-TextNoBom (Join-Path $Script:Runtime 'update-restart.txt') $(if ($was) { 'start' } else { '' })
-    Remove-Item (Join-Path $dir 'x') -Recurse -Force -ErrorAction SilentlyContinue
-    Write-Color ('Обновлено до zapret {0}: файлов заменено {1}. Меню откроется заново.' -f $Rel.Tag, $plan.Count) Green
+    $cleanup = [IO.Path]::GetFullPath($x)
+    if ([IO.Path]::GetDirectoryName($cleanup) -eq [IO.Path]::GetFullPath($dir)) { Remove-Item -LiteralPath $cleanup -Recurse -Force -ErrorAction SilentlyContinue }
+    Write-Color ('Обновлено до zapret {0}: файлов заменено {1}, старых стратегий убрано {2}. Меню откроется заново.' -f $Rel.Tag, $plan.Count, $remove.Count) Green
     return $true
 }
 

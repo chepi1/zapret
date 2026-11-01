@@ -61,6 +61,9 @@ if ($info) {
     # последний октет скрыт: для диагностики хватает провайдера и страны
     $r.Add(('Внешний IP: {0} ({1}, {2}), провайдер: {3} [{4}]' -f (Get-MaskedIp ([string]$info.Ip)), $info.CountryCode, $info.City, $info.Isp, $info.As))
 } else { $r.Add('Внешний IP: не удалось узнать') }
+if (-not @(Get-TunAdapters).Count) {
+    $r.Add((Get-DnsCheckText (Get-DnsCheck)))
+}
 foreach ($x in @(Get-ProxyWarnings)) { $r.Add('Прокси/VPN: ' + $x) }
 foreach ($b in @(Get-GameBoosters)) { $r.Add('Игровой ускоритель: ' + $b) }
 $r.Add('hosts: ' + (Get-HostsStatusText (Get-HostsStatus)) + $(if (@(Get-HostsYoutube).Count) { '; есть записи YouTube!' } else { '' }))

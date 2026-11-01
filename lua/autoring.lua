@@ -1,6 +1,8 @@
 -- zapret: детекторы автосмены стратегий (circular из zapret-auto.lua). Штатные детекторы не помнят, работала ли стратегия
 -- на сайте, ждут 3 неудачи подряд, а после перезапуска обхода всё начинается заново. Здесь:
---  - стратегия, которая на сайте ещё не работала, меняется после первой неудачи; проверенная - после fails;
+--  - стратегия, которая на сайте ещё не работала, меняется после первой неудачи (двух повторов данных вместо трёх);
+--    проверенная - после fails неудач;
+--  - неудача - ещё и закрытие TLS-соединения сервером без ответа на ClientHello;
 --  - неудача соединения, начатого при прежней стратегии, не считается: браузер открывает к сайту сразу несколько;
 --  - стратегия считается проверенной, когда от сервера получено больше got байт, то есть за зоной заморозки 16-20 КБ.
 --    Входящие данные драйвер не перехватывает: сколько получено, видно по номеру подтверждения в исходящих пакетах;
@@ -25,6 +27,21 @@ local memory = {}
 -- он просто пройдёт, как раньше.
 local RST_TTL_DELTA = 2
 local RST_GAP_MAX = 0.010
+-- Непроверенной стратегии на сайте хватает двух повторов данных вместо трёх. Windows повторяет через 0.3 и ещё через 0.6 с, третий раз -
+-- ещё через 1.2 с: сайт уходит на следующую стратегию примерно через секунду, а не через две. Идея - из z2k (necronicle, MIT)
+local RETRANS_UNPROVEN = 2
+-- Сервер закрыл TLS-соединение, не ответив на ClientHello: ничего или только TLS alert (7 байт). Значит, он получил не то, что нужно:
+-- до него дошёл фейк или испорченный разрез, и повторять это незачем. Настоящий ответ на ClientHello всегда длиннее. Содержимое входящих
+-- пакетов драйвер не перехватывает, а FIN виден, поэтому смотрим по его номеру. Идея проверки на alert - из z2k
+local TLS_ALERT_LEN = 7
+local function tls_refused(desync)
+	local tcp, track = desync.dis.tcp, desync.track
+	if not tcp or not track or desync.outgoing or track.l7proto~="tls" or bitand(tcp.th_flags, TH_FIN)==0 then return false end
+	local seq = pos_get(desync,'s')
+	local server = track.pos.direct.tcp
+	local last = math.max(seq+#desync.dis.payload, server.uppos or 0)
+	return seq>=1 and last<=TLS_ALERT_LEN+1
+end
 local function forged_rst(desync)
 	local tcp, track = desync.dis.tcp, desync.track
 	if not tcp or not track or desync.outgoing or bitand(tcp.th_flags, TH_RST)==0 then return false end
@@ -172,9 +189,9 @@ local function ring_success_impl(desync, crec)
 	-- входящий FIN виден и у короткого ответа: это успех соединения, но ещё не проверка стратегии
 	local proved = ok and desync.outgoing
 	if not ok and desync.dis.tcp and desync.outgoing then
-		-- Windows может отдать данные одним большим пакетом (LSO): он начинается раньше maxseq, а кончается за ним.
-		-- Столько клиент мог отправить, только получая подтверждения
-		if pos_get(desync,'p')>(tonumber(desync.arg.maxseq) or 32768) or ring_got(desync)>(tonumber(desync.arg.got) or 28000) then
+		-- Сам размер исходящего LSO-пакета не доказывает доставку: приложение может поставить большой запрос в очередь
+		-- до первого ответа. Проверяем байты, получение которых клиент подтвердил номером ACK.
+		if ring_got(desync)>(tonumber(desync.arg.got) or 28000) then
 			DLOG("ring: past the freeze zone. treating connection as successful")
 			ok, proved = true, true
 		end
@@ -191,10 +208,15 @@ end
 local function ring_failure_impl(desync, crec)
 	-- подделка не значит, что стратегия не работает: соединение продолжается
 	if forged_rst(desync) or ring_skip(desync, crec) then return false end
-	if not standard_failure_detector(desync, crec) then return false end
 	local hrec = crec.ring.hrec
+	local unproven = hrec and hrec.ring_ok~=hrec.nstrategy
+	local retrans = desync.arg.retrans
+	if unproven and not retrans then desync.arg.retrans = RETRANS_UNPROVEN end
+	local failed = standard_failure_detector(desync, crec)
+	desync.arg.retrans = retrans
+	if not failed and not tls_refused(desync) then return false end
 	-- стратегия на этом сайте ещё не работала: одной неудачи достаточно
-	if hrec and hrec.ring_ok~=hrec.nstrategy then
+	if unproven then
 		hrec.failure_counter = (tonumber(desync.arg.fails) or 3)-1
 		hrec.failure_time_last = os.time()
 	end

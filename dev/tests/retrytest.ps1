@@ -69,7 +69,8 @@ $Script:RankFile = 'runtime/test-rank.txt'
 # рейтинг этого ПК (если автоподбор уже запускали) читается и даёт круги
 if (Test-Path (Get-PkgPath $Script:RankFile)) {
     $real = Get-TestRank
-    $lines = @([System.IO.File]::ReadAllLines((Get-PkgPath $Script:RankFile)) | Where-Object { $_ -match '^\d+\s' })
+    # стратегии, убранные обновлением, из рейтинга выпадают
+    $lines = @([System.IO.File]::ReadAllLines((Get-PkgPath $Script:RankFile)) | Where-Object { $_ -match '^(\d+)\s' -and (Get-Strategy $matches[1]) })
     Check ('real rank parses (' + $lines.Count + ' rows)') ($real -and $real.Rows.Count -eq $lines.Count -and $real.BaseOk -gt 0)
     Write-Host ('  youtube ring: ' + ((Get-SectionRank $real 'google') -join ',') + ' | general ring: ' + ((Get-SectionRank $real 'general') -join ','))
     Check 'real rings not empty' (@(Get-SectionRank $real 'google').Count -ge 1 -and @(Get-SectionRank $real 'general').Count -ge 1)
@@ -116,10 +117,11 @@ $Script:ScoreHistoryFile = 'runtime/test-scores.txt'
 $Script:CoverFile = 'runtime/dev-cover-check.txt'
 function RankRow($Id, $Score) { New-Object PSObject -Property @{ Id = $Id; Score = [double]$Score; Freeze = 0 } }
 $rankC = New-Object PSObject -Property @{ Rows = @((RankRow '58' 47), (RankRow '52' 46), (RankRow '51' 45), (RankRow '13' 13), (RankRow '9' 10), (RankRow '7' 9)) }
-$noTcp = Row DPI d FAIL; $noTcp.ConnMs = 0
+# tcp=0 tls=0: curl так пишет и зависание после ClientHello. Это неудача стратегии, другая стратегия этот адрес открывает
+$hung = Row DPI d FAIL; $hung.ConnMs = 0
 $tableC = [ordered]@{
     '0'  = @((Row Clean bing OK))
-    '58' = @((Row Clean bing OK), (Row DPI a OK), (Row DPI b OK), (Row DPI c FREEZE), $noTcp)
+    '58' = @((Row Clean bing OK), (Row DPI a OK), (Row DPI b OK), (Row DPI c FREEZE), $hung)
     '7'  = @((Row DPI d OK))
     '52' = @((Row Clean bing OK), (Row DPI a OK), (Row DPI b OK))
     '51' = @((Row Clean bing OK), (Row DPI a OK))
@@ -127,9 +129,16 @@ $tableC = [ordered]@{
     '9'  = @((Row YouTube yt OK))
 }
 Save-TestCover $tableC
-Check 'cover file roundtrip' ((Get-TestCover)['58'].Count -eq 4 -and (Get-TestCover)['58'] -contains '?DPI|d' -and (Get-TestCover)['0'][0] -eq 'Clean|bing')
+Check 'cover file roundtrip' ((Get-TestCover)['58'].Count -eq 3 -and (Get-TestCover)['58'] -notcontains 'DPI|d' -and (Get-TestCover)['0'][0] -eq 'Clean|bing')
 $ringC = @(Get-RingByCover @('58', '52', '51') 'general' '58' $rankC)
-Check ('ring: coverage goes second, no-TCP target is no gain got ' + ($ringC -join ',')) (($ringC -join ',') -eq '58,13,52,51')
+Check ('ring: coverage goes second, hung target counts got ' + ($ringC -join ',')) (($ringC -join ',') -eq '58,13,7,52,51')
+# файл версии 1.7 с метками "?": такие адреса - обычные неудачи
+$Script:RingCache = @{}
+Write-TextNoBom (Get-PkgPath $Script:CoverFile) ("0`tClean|bing`r`n58`tDPI|a`t?DPI|d`r`n7`tDPI|d`r`n52`tDPI|a`r`n")
+$ringOld = @(Get-RingByCover @('58', '52') 'general' '58' $rankC)
+Check ('ring: old file with ? marks got ' + ($ringOld -join ',')) (($ringOld -join ',') -eq '58,7,52')
+$Script:RingCache = @{}
+Save-TestCover $tableC
 $ringY = @(Get-RingByCover @('52', '58') 'google' '58' $rankC)
 Check ('ring: youtube targets only in its ring got ' + ($ringY -join ',')) (($ringY -join ',') -eq '58,9,52')
 $ringP = @(Get-RingByCover @('52', '51') 'general' '58' $rankC)
@@ -138,6 +147,24 @@ Remove-Item (Get-PkgPath $Script:CoverFile)
 $Script:RingCache = @{}
 Check 'ring: no cover file - only by score' ((@(Get-RingByCover @('58', '52') 'general' '58' $rankC) -join ',') -eq '58,52')
 $Script:CoverFile = 'runtime/test-cover.txt'
+
+# стратегия, убранная обновлением сборки, не занимает место в круге: балл у неё в файле есть, а работать ей нечем
+$Script:RankFile = 'runtime/dev-rank-check.txt'
+Write-TextNoBom (Get-PkgPath $Script:RankFile) ("base 20 54 DPI=10/36`r`n58 47 47 54 0 0 DPI=30/36`r`n999 46 46 54 0 0 DPI=30/36`r`n")
+$rkGone = Get-TestRank
+Check 'rank: removed strategy dropped' (@($rkGone.Rows).Count -eq 1 -and $rkGone.Rows[0].Id -eq '58')
+Remove-Item (Get-PkgPath $Script:RankFile)
+$Script:RankFile = 'runtime/test-rank.txt'
+
+# подмена DNS: адреса CDN законно разные, подмена - только частный адрес или нет сертификата по адресу системного DNS
+Check 'dns: same address' (-not (Test-DnsAnswerForged @('1.1.1.1') @('1.1.1.1', '2.2.2.2') $false $true))
+Check 'dns: other cdn address with a certificate is fine' (-not (Test-DnsAnswerForged @('3.3.3.3') @('4.4.4.4') $true $true))
+Check 'dns: address without a certificate is forged' (Test-DnsAnswerForged @('3.3.3.3') @('4.4.4.4') $false $true)
+Check 'dns: bypass off, both fail: no conclusion' (-not (Test-DnsAnswerForged @('3.3.3.3') @('4.4.4.4') $false $false))
+Check 'dns: private address is forged' (Test-DnsAnswerForged @('10.0.0.1') @('4.4.4.4') $false $false)
+Check 'dns: no doh answer: no conclusion' (-not (Test-DnsAnswerForged @('10.0.0.1') @() $false $false))
+Check 'dns: no system answer: no conclusion' (-not (Test-DnsAnswerForged @() @('4.4.4.4') $false $true))
+Check 'dns: private ranges' ((Test-PrivateIp '172.16.0.1') -and (Test-PrivateIp '100.64.0.1') -and -not (Test-PrivateIp '172.32.0.1') -and -not (Test-PrivateIp '11.0.0.1') -and -not (Test-PrivateIp '100.128.0.1'))
 
 [Threading.Thread]::CurrentThread.CurrentCulture = 'ru-RU'
 Check ('points use a dot in ru-RU: ' + (Format-Points 44.5)) ((Format-Points 44.5) -eq '44.5')

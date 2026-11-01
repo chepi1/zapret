@@ -1,0 +1,17 @@
+# Reserved filenames of withdrawn bundled strategies. Custom strategy files are preserved.
+alt53.txt
+alt54.txt
+alt55.txt
+alt56.txt
+alt57.txt
+alt59.txt
+alt61.txt
+alt62.txt
+alt63.txt
+alt64.txt
+alt65.txt
+alt66.txt
+alt67.txt
+alt68.txt
+alt69.txt
+alt72.txt

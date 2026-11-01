@@ -1,6 +1,6 @@
 # name: ALT13
 # desc: Фейки (ClientHello sochi.park + stun2) и подмена имени хоста в ClientHello на mail.ru (hostfakesplit). YouTube: подмена на www.google.com.
-# flowseal: general (ALT13).bat (altorder=1 в zapret2 нет, порядок частей стандартный)
+# flowseal: general (ALT13).bat (altorder=1 - hostfakesplit_alt из lua\fooling.lua)
 [quic]
 --out-range=-n10
 --payload=quic_initial
@@ -25,19 +25,19 @@
 --payload=tls_client_hello
 --lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
---lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit_alt:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --payload=http_req
 --lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
---lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit_alt:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 [game_tcp]
 --out-range=<n4
 --payload=tls_client_hello
 --lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --lua-desync=fake:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
---lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit_alt:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --payload=http_req
 --lua-desync=fake:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
---lua-desync=hostfakesplit:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
+--lua-desync=hostfakesplit_alt:host=mail.ru:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --payload=unknown
 --lua-desync=fake:payload=unknown:blob=tls_sochi:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5
 --lua-desync=fake:payload=unknown:blob=stun2:tcp_ts=-600000:tcp_ts_up:fool=ts_or_md5:repeats=5

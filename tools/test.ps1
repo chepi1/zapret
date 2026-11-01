@@ -102,6 +102,8 @@ function Get-IpBlocked($Table, [int]$TimeoutMs = 3000) {
     return $res
 }
 
+# curl записывает время TCP, только когда завершился и TLS. Соединение есть, а ClientHello остался без ответа - будет tcp=0 и tls=0,
+# как будто сервер недоступен (проверено на curl 8.21). Поэтому нули - не "нет соединения"; недоступность по IP проверяет Get-IpBlocked.
 function Convert-CurlResult($Item) {
     $parts = @($Item.Out.Result.Trim() -split '\s+')
     $code = '000'; $up = 0.0; $down = 0.0; $conn = 0.0; $tls = 0.0
@@ -439,7 +441,7 @@ try {
 
     # Подробности по каждому адресу - только в файл отчёта
     $report.Add('')
-    $report.Add('Подробно (состояние, HTTP-код, код curl, отправлено/получено байт, TCP мс, TLS мс, попыток; x2 - проверен дважды, лучший замер):')
+    $report.Add('Подробно (состояние, HTTP-код, код curl, отправлено/получено байт, TCP мс, TLS мс, попыток; x2 - проверен дважды, лучший замер; tcp=0 tls=0 - нет ответа на ClientHello или нет соединения: curl их не различает):')
     foreach ($id in ($table.Keys | Sort-Object)) {
         $name = if ($id -eq '0') { 'без обхода' } else { (Get-Strategy $id).Name }
         $report.Add('[' + $name + ']')

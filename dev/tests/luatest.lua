@@ -59,6 +59,45 @@ local function fail_conn(host, o)
 	return first, last, tr
 end
 local function hrec_of(key, host) return autostate[key] and autostate[key][host] end
+
+-- непроверенной стратегии хватает двух повторов
+local r1 = new_track("two-retrans.example")
+send(r1, { key="r" })
+send(r1, { key="r" })
+check("unproven: one retransmission keeps strategy", hrec_of("r","two-retrans.example").nstrategy==1)
+send(r1, { key="r" })
+check("unproven: two retransmissions rotate", hrec_of("r","two-retrans.example").nstrategy==2)
+-- проверенной нужно три повтора на неудачу, и одна неудача её ещё не меняет
+local r2 = new_track("proven-retrans.example")
+send(r2, { key="r" })
+hrec_of("r","proven-retrans.example").ring_ok = 1
+send(r2, { key="r" }); send(r2, { key="r" })
+check("proven: two retransmissions are no failure", hrec_of("r","proven-retrans.example").failure_counter==nil)
+send(r2, { key="r" })
+check("proven: three retransmissions are one failure", hrec_of("r","proven-retrans.example").failure_counter==1 and hrec_of("r","proven-retrans.example").nstrategy==1)
+
+-- сервер закрыл TLS-соединение, не ответив на ClientHello
+local function inbound_fin(rseq, l7, flags)
+	local tr = new_track("fin.example")
+	tr.l7proto = l7 or "tls"
+	tr.pos.direct, tr.pos.reverse = tr.pos.server, tr.pos.client
+	tr.pos.server.tcp.rseq = rseq
+	return { func="circular", func_n=1, func_instance="circular_1", outgoing=false, track=tr, l7payload="empty", arg={ fails="3" },
+		dis={ tcp={ th_flags=flags or (TH_FIN+TH_ACK), th_ack=0, th_seq=1, options={} }, payload="" }, target={ ip=pton("2.2.2.2") }, plan={} }
+end
+check("fin right after hello is a failure", ring_failure(inbound_fin(1), {})==true)
+check("fin after tls alert is a failure", ring_failure(inbound_fin(8), {})==true)
+check("fin after server hello is no failure", ring_failure(inbound_fin(9), {})==false)
+check("fin of a plain http reply is no failure", ring_failure(inbound_fin(1, "http"), {})==false)
+check("other inbound packets are no failure", ring_failure(inbound_fin(1, "tls", TH_ACK), {})==false)
+local fo = inbound_fin(1); fo.outgoing = true
+check("outgoing fin is no failure", ring_failure(fo, {})==false)
+local fd = inbound_fin(1); fd.dis.payload = string.rep("x", 8)
+check("fin carrying a server response is no failure", ring_failure(fd, {})==false)
+local fa = inbound_fin(1); fa.dis.payload = string.rep("x", 7)
+check("fin carrying only a tls alert is a failure", ring_failure(fa, {})==true)
+local fr = inbound_fin(1); fr.track.pos.server.tcp.uppos = 100
+check("old fin cannot erase a previously observed response", ring_failure(fr, {})==false)
 local function file_of(state)
 	local ok, text = pcall(readfile, os.getenv("WRITABLE").."/"..state)
 	return ok and text or nil
@@ -89,14 +128,17 @@ check("past the freeze zone is a proof", hrec_of("t","example.org").ring_ok==2)
 local text = file_of("ring-test.txt")
 check("memory file written by low-integrity process", text and text:find("example.org 2",1,true) and text:find("1.2.3.0/24 2",1,true))
 
--- большой исходящий пакет (LSO) начинается раньше maxseq и кончается за ним: это тоже проверка стратегии
+-- Большой исходящий пакет LSO сам по себе не доказывает, что сервер что-либо получил.
 local big = new_track("big-packet.example")
 send(big, { key="lso", state="ring-lso.txt", ip="3.3.3.3" })
 hrec_of("lso","big-packet.example").nstrategy = 2
 local big2 = new_track("big-packet.example")
 send(big2, { key="lso", state="ring-lso.txt", ip="3.3.3.3", len=40000 })
-check("large send past maxseq is a proof", hrec_of("lso","big-packet.example").ring_ok==2)
-check("large send saved to file", (file_of("ring-lso.txt") or ""):find("big-packet.example 2",1,true)~=nil)
+check("large initial send without a reply is not a proof", hrec_of("lso","big-packet.example").ring_ok==nil)
+check("unanswered large send is not saved", (file_of("ring-lso.txt") or ""):find("big-packet.example 2",1,true)==nil)
+send(big2, { key="lso", state="ring-lso.txt", ip="3.3.3.3", len=40000 })
+send(big2, { key="lso", state="ring-lso.txt", ip="3.3.3.3", len=40000 })
+check("unanswered large send still rotates on retransmissions", hrec_of("lso","big-packet.example").nstrategy==3)
 
 -- проверенная стратегия меняется только после fails неудач
 fail_conn("two.example.org")
@@ -206,11 +248,37 @@ local function hello_packet(arg)
 		arg=arg, reasm_data=hello, dis={ tcp={ th_flags=TH_ACK, th_ack=1, th_seq=1001, options={} }, payload=hello }, target={ ip=pton("1.2.3.4") } }
 end
 
+-- tls_mod=none у ALT8 и других стратегий Flowseal: в описании zapret2 такого значения нет
+local okn, resn = pcall(tls_mod, fake_default_tls, "none", nil)
+print("     tls_mod none: "..(okn and (resn==fake_default_tls and "blob unchanged" or "returned "..type(resn)) or "error: "..tostring(resn)))
+check("tls_mod none does not break the fake", okn)
+
 -- клон настоящего ClientHello с другим именем
 tls_google = fake_default_tls
 local cl = hello_packet({ blob="ch_clone", fallback="tls_google", sni_del=true, sni_first="ya.ru", sni_snt_new="0" })
 tls_client_hello_clone(nil, cl)
 check("clone has white name only", cl.ch_clone and cl.ch_clone:find("ya.ru",1,true)~=nil and cl.ch_clone:find("discord.com",1,true)==nil)
+
+-- hostfakesplit_alt: порядок altorder=1. Отправка подменена, разбор ClientHello настоящий
+local sent = {}
+local real_send = rawsend_payload_segmented
+rawsend_payload_segmented = function(d, part, seq, opts)
+	sent[#sent+1] = { part=part, seq=seq, fake=(opts.fooling==d.arg) }
+	return true
+end
+local hs = hello_packet({ host="mail.ru", dir="out", payload="tls_client_hello", tcp_ts_up=true })
+local hv = hostfakesplit_alt(nil, hs)
+local name_at = hello:find("discord.com",1,true)
+check("hostfakesplit_alt sends four parts and drops the original", hv==VERDICT_DROP and #sent==4)
+check("order: start, fake name, end, real name", #sent==4 and not sent[1].fake and sent[2].fake and not sent[3].fake and not sent[4].fake)
+check("real parts rebuild the hello", #sent==4 and sent[1].part..sent[4].part..sent[3].part==hello)
+check("real name goes last", #sent==4 and sent[4].part=="discord.com" and sent[4].seq==name_at-1)
+check("fake name has the same place and length", #sent==4 and sent[2].seq==name_at-1 and #sent[2].part==#"discord.com" and sent[2].part~="discord.com" and sent[2].part:sub(-7)=="mail.ru")
+sent = {}
+local hb = hello_packet({ host="mail.ru", dir="out", payload="tls_client_hello" })
+hb.reasm_data = "not a client hello"; hb.dis.payload = hb.reasm_data
+check("no host in the data: nothing is sent", hostfakesplit_alt(nil, hb)==nil and #sent==0)
+rawsend_payload_segmented = real_send
 
 print(fails>0 and (fails.." FAILED") or "all ok")
 io.stdout:flush()
