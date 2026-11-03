@@ -58,6 +58,14 @@ function Test-TcpOpen($Targets, [int]$TimeoutMs = 2500) {
     return $open
 }
 
+function Get-LabCurlState([string]$Code,[Nullable[int]]$Exit,[double]$Up,[double]$Down,[bool]$Post) {
+    $state=Get-ProbeTransferState $Code $Exit $Up $Down $Post
+    if ($state -eq 'OK') { return '+' }
+    if ($state -eq 'FREEZE') { return 'F' }
+    if ($Exit -eq 28) { return 'H' }
+    if ($Exit -eq 35) { return '5' }
+    return ('c'+[string]$Exit)
+}
 function Invoke-LabBatch($Targets, [string]$PostFile) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     $queue = New-Object System.Collections.Queue
@@ -68,7 +76,7 @@ function Invoke-LabBatch($Targets, [string]$PostFile) {
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
         while ($queue.Count -gt 0 -and $running.Count -lt $Parallel) {
             $t = $queue.Dequeue()
-            $a = '-s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4 -r 0-65535 --resolve "' + $t.Host + ':443:' + $t.Ip + '"' +
+            $a = '-q -s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4 -r 0-65535 --resolve "' + $t.Host + ':443:' + $t.Ip + '"' +
                  ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect}"'
             if ($t.Post) { $a += ' -X POST --data-binary "@' + $PostFile + '"' }
             $a += ' "' + $t.Url + '"'
@@ -88,7 +96,7 @@ function Invoke-LabBatch($Targets, [string]$PostFile) {
                 if ($x.Count -ge 5) { $code = $x[0]; try { $up = [double]::Parse($x[1], $inv); $down = [double]::Parse($x[2], $inv); $tcp = [double]::Parse($x[3], $inv); $tls = [double]::Parse($x[4], $inv) } catch { } }
                 $exit = $r.P.ExitCode
                 # + открылся, F отправка встала (заморозка), H нет ответа на ClientHello или нет соединения, 5 ошибка TLS, c<код> другое
-                $st = if ($code -ne '000') { '+' } elseif ($exit -eq 28 -and $up -gt 0) { 'F' } elseif ($exit -eq 28) { 'H' } elseif ($exit -eq 35) { '5' } else { 'c' + $exit }
+                $st=Get-LabCurlState $code $exit $up $down ([bool]$r.T.Post)
                 $rows.Add((New-Object PSObject -Property @{ Key = $r.T.Key; St = $st; Code = $code; Exit = $exit; Up = $up; Down = $down; Tcp = [math]::Round($tcp * 1000); Tls = [math]::Round($tls * 1000) }))
                 $running.RemoveAt($i)
             }

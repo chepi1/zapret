@@ -1,4 +1,11 @@
 ﻿# Measurement evidence helpers. No processes, network requests or settings writes on import.
+function Get-ProbeTransferState([string]$Code,[Nullable[int]]$Exit,[double]$Up,[double]$Down,[bool]$Post) {
+    if ($null -eq $Exit) { return 'FAIL' }
+    if ($Exit -eq 6) { return 'NA' }
+    if ($Exit -eq 0 -and $Code -match '^[1-9][0-9]{2}$') { return 'OK' }
+    if ($Exit -eq 28 -and ($Down -gt 0 -or ($Post -and $Up -gt 0))) { return 'FREEZE' }
+    return 'FAIL'
+}
 function Get-PrimaryDecisionText($Choice,[hashtable]$Averages,[string]$CurrentName,[double]$Margin,[switch]$ReportOnly,[switch]$KeepPrimary) {
     if ($ReportOnly) { return ('Решение по основной: '+$CurrentName+' сохраняется — режим отчёта.') }
     if ($KeepPrimary) { return ('Решение по основной: '+$CurrentName+' сохраняется; рейтинг и круги автосмены обновляются после итоговой проверки.') }

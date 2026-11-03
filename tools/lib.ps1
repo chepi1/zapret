@@ -2369,7 +2369,7 @@ function Get-IpInfo([string[]]$Ips, [int]$TimeoutSec = 8) {
     function Start-Curl([string]$Url) {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $curl
-        $psi.Arguments = '-s --noproxy "*" --max-time ' + $TimeoutSec + ' "' + $Url + '"'
+        $psi.Arguments = '-q -s --noproxy "*" --max-time ' + $TimeoutSec + ' "' + $Url + '"'
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
@@ -2529,7 +2529,7 @@ function Start-Ipv6Probes([int]$TimeoutSec = 6) {
         foreach ($v in @('4', '6')) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $curl
-            $psi.Arguments = '-' + $v + ' -s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --connect-timeout ' + ($TimeoutSec - 1) +
+            $psi.Arguments = '-q -' + $v + ' -s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --connect-timeout ' + ($TimeoutSec - 1) +
                 ' -w "%{http_code} %{time_appconnect}" "https://' + $Script:Ipv6Hosts[$name] + '/"'
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
@@ -2679,7 +2679,7 @@ function Start-HostsPinProbes([int]$TimeoutSec = 6, [int]$Tries = 2) {
         for ($t = 0; $t -lt $Tries; $t++) {
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $curl
-            $psi.Arguments = '-s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --resolve "' + $it.Probe + ':443:' + $it.Ip +
+            $psi.Arguments = '-q -s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' --resolve "' + $it.Probe + ':443:' + $it.Ip +
                 '" -w "%{http_code} %{time_appconnect}" "https://' + $it.Probe + $it.Path + '"'
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
@@ -2880,7 +2880,7 @@ function Start-ServiceProbes([int]$TimeoutSec = 8) {
     foreach ($name in $Script:ServiceProbes.Keys) {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = $curl
-        $psi.Arguments = '-s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' -w "%{http_code} %{time_appconnect}" "' + $Script:ServiceProbes[$name] + '"'
+        $psi.Arguments = '-q -s -o NUL --noproxy "*" --ssl-no-revoke --max-time ' + $TimeoutSec + ' -w "%{http_code} %{time_appconnect}" "' + $Script:ServiceProbes[$name] + '"'
         $psi.UseShellExecute = $false
         $psi.CreateNoWindow = $true
         $psi.RedirectStandardOutput = $true
@@ -3023,7 +3023,7 @@ function Test-PrivateIp([string]$Ip) {
 function Get-DohAddresses([string]$Name) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     foreach ($u in @('https://1.1.1.1/dns-query?name=', 'https://8.8.8.8/resolve?name=')) {
-        $r = Invoke-Native $curl ('-s --noproxy "*" --ssl-no-revoke --max-time 2 -H "accept: application/dns-json" "' + $u + $Name + '&type=A"') $Script:Runtime 4
+        $r = Invoke-Native $curl ('-q -s --noproxy "*" --ssl-no-revoke --max-time 2 -H "accept: application/dns-json" "' + $u + $Name + '&type=A"') $Script:Runtime 4
         if ($r.ExitCode -ne 0) { continue }
         try {
             $ips = @((ConvertFrom-Json $r.Output).Answer | Where-Object { $_.type -eq 1 } | ForEach-Object { $_.data })

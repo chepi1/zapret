@@ -46,7 +46,7 @@ function Read-DpiSuite {
     $fresh = Join-Path $Script:Runtime 'dpi-suite.json'
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $r = Invoke-Native $curl ('-s -f --noproxy "*" --ssl-no-revoke --max-time 8 -o "' + $fresh + '" "https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json"') $Script:Runtime 15
+    $r = Invoke-Native $curl ('-q -s -f --noproxy "*" --ssl-no-revoke --max-time 8 -o "' + $fresh + '" "https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/suite.v2.json"') $Script:Runtime 15
     $bundled = Join-Path $PSScriptRoot 'dpi-suite.json'
     $items = $null
     # ConvertFrom-Json в PowerShell 5.1 отдаёт JSON-массив одним объектом, поэтому без конвейера
@@ -128,11 +128,8 @@ function Convert-CurlResult($Item) {
     if ($Item.PSObject.Properties['Started']) { try { $startedUtc=([datetime]$Item.Started).ToUniversalTime().ToString('o') } catch { } }
     if ($Item.PSObject.Properties['StartedTicks']) { $startedMs=1000.0*$Item.StartedTicks/[Diagnostics.Stopwatch]::Frequency }
     $observedMs=1000.0*[Diagnostics.Stopwatch]::GetTimestamp()/[Diagnostics.Stopwatch]::Frequency
-    $state = 'FAIL'
-    if ($exit -eq 6) { $state = 'NA' }                                   # домен не резолвится: адрес не учитываем
-    elseif ($code -ne '000') { $state = 'OK' }
-    elseif ($exit -eq 28 -and $Item.T.Post -and $up -gt 0 -and $down -eq 0) { $state = 'FREEZE' }   # отправка встала: блок 16-20 КБ
-    elseif ($exit -eq 28 -and -not $Item.T.Post -and $down -gt 0) { $state = 'FREEZE' }             # загрузка встала
+    # HTTP headers can arrive before a stalled/truncated body. Success requires curl exit0.
+    $state=Get-ProbeTransferState $code $exit $up $down ([bool]$Item.T.Post)
     return New-Object PSObject -Property @{
         Group = $Item.T.Group; Name = $Item.T.Name; Url = $Item.T.Url; State = $state; Code = $code; Exit = $exit
         Up = $up; Down = $down; ConnMs = [math]::Round($conn * 1000); TlsMs = [math]::Round($tls * 1000)
@@ -163,7 +160,7 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
         while ($queue.Count -gt 0 -and $running.Count -lt $Width) {
             Assert-ProbeDeadline $DeadlineTicks
             $t = $queue.Dequeue()
-            $a = '-s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4' +
+            $a = '-q -s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4' +
                  ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect} %{time_namelookup} %{time_starttransfer} %{time_total}"'
             if ($Control) { $a += ' --head' } else { $a += ' -r 0-65535' }
             if (-not $Control -and $t.Post) { $a += ' -X POST --data-binary "@' + $PostFile + '"' }
