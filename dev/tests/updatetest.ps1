@@ -3,6 +3,7 @@ param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 if (Test-Path (Join-Path $Pkg '.git')) { throw 'Run on a package copy.' }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
+$Script:ControlMutexName='Local\zapret-updatetest-'+[guid]::NewGuid().ToString('N')
 $fails = 0
 function Check($Name, $Ok) { if ($Ok) { Write-Host ('ok   ' + $Name) } else { Write-Host ('FAIL ' + $Name); $script:fails++ } }
 $stage = [IO.Path]::GetFullPath((Join-Path $env:TEMP ('zapret-update-test-' + [guid]::NewGuid().ToString('N'))))

@@ -2,6 +2,7 @@
 if (Test-Path (Join-Path $Pkg '.git')) { throw 'Run on a package copy.' }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
+$Script:ControlMutexName='Local\zapret-starttest-'+[guid]::NewGuid().ToString('N')
 $originals = @{}
 $originalStop = ${function:Stop-Bypass}
 $originalWait = ${function:Wait-BypassAlive}

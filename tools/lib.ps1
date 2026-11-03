@@ -926,30 +926,48 @@ function Enable-TcpTimestamps {
 }
 
 
-# Один владелец управления на папку; вложенные вызовы в том же скрипте допустимы.
+# Один владелец управления общей службой/драйвером на ПК и дополнительная lease конкретной папки.
 if (-not (Get-Variable ControlDepth -Scope Script -ErrorAction SilentlyContinue)) {
     $Script:ControlDepth = 0
     $Script:ControlHandle = $null
+    $Script:ControlMutex = $null
 }
+if (-not (Get-Variable ControlMutexName -Scope Script -ErrorAction SilentlyContinue)) { $Script:ControlMutexName = 'Global\chepi1.zapret2.control.v2' }
 if (-not (Get-Variable GameControlApproved -Scope Script -ErrorAction SilentlyContinue)) { $Script:GameControlApproved = $false }
 function Enter-BypassControl([string]$Action) {
     if ($Script:ControlDepth -gt 0) { $Script:ControlDepth++; return $true }
     $handle = $null
+    $mutex = $null; $ownsMutex = $false
     try {
+        $security = New-Object Security.AccessControl.MutexSecurity
+        foreach ($sid in @('S-1-5-18','S-1-5-32-544',[Security.Principal.WindowsIdentity]::GetCurrent().User.Value) | Select-Object -Unique) {
+            $identity = New-Object Security.Principal.SecurityIdentifier($sid)
+            $rule = New-Object Security.AccessControl.MutexAccessRule($identity, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
+            $security.AddAccessRule($rule)
+        }
+        $created = $false
+        $mutex = New-Object Threading.Mutex($false, $Script:ControlMutexName, [ref]$created, $security)
+        try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
+        if (-not $ownsMutex) { $mutex.Dispose(); return $false }
         $handle = [IO.File]::Open((Join-Path $Script:Runtime 'control.lock'), 'OpenOrCreate', 'ReadWrite', 'Read')
         $bytes = [Text.Encoding]::UTF8.GetBytes(('{0} {1} {2}' -f $PID, (Get-Date -Format s), $Action))
         $handle.SetLength(0); $handle.Write($bytes, 0, $bytes.Length); $handle.Flush()
         $Script:ControlHandle = $handle; $Script:ControlDepth = 1
+        $Script:ControlMutex = $mutex
         return $true
     } catch {
         if ($handle) { $handle.Dispose() }
+        if ($mutex) { if ($ownsMutex) { $mutex.ReleaseMutex() }; $mutex.Dispose() }
         return $false
     }
 }
 function Exit-BypassControl {
     if ($Script:ControlDepth -le 0) { return }
     $Script:ControlDepth--
-    if ($Script:ControlDepth -eq 0) { $Script:ControlHandle.Dispose(); $Script:ControlHandle = $null }
+    if ($Script:ControlDepth -eq 0) {
+        try { $Script:ControlHandle.Dispose(); $Script:ControlHandle = $null }
+        finally { $Script:ControlMutex.ReleaseMutex(); $Script:ControlMutex.Dispose(); $Script:ControlMutex = $null }
+    }
 }
 function Assert-BypassControlAllowed {
     $games = @(Get-RunningGames)

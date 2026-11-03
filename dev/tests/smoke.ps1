@@ -8,6 +8,7 @@ if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет фай�
 $fails = 0
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 . (Join-Path $Pkg 'tools\lib.ps1')
+$Script:ControlMutexName='Local\zapret-smoketest-'+[guid]::NewGuid().ToString('N')
 # функции меню без его главного цикла
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools\menu.ps1'), [ref]$null, [ref]$null)
 foreach ($f in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) { . ([scriptblock]::Create($f.Extent.Text)) }

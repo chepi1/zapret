@@ -20,10 +20,17 @@ function Assert-BypassControlAllowed {}
 function Get-BypassCmdLine { param($Settings,$Name,$Alt,[switch]$NoAuto,$IpsetMode) $script:argsSeen=@{NoAuto=[bool]$NoAuto;Ipset=$IpsetMode;Auto=$Settings.auto}; return 'mock' }
 function Start-Process { return [pscustomobject]@{HasExited=$false} }
 function Start-Sleep {}
+$script:launchedCommand=''
+function Start-Process { param($FilePath,$ArgumentList,$WorkingDirectory,$WindowStyle,[switch]$PassThru) $script:launchedCommand=$ArgumentList;return [pscustomobject]@{HasExited=$false} }
 Start-TestInstance @{auto='on';ipset='loaded'} 12 -Final | Out-Null
 Check 'final launch keeps auto and actual IPSet' (-not $script:argsSeen.NoAuto -and -not $script:argsSeen.Ipset -and $script:argsSeen.Auto -eq 'on')
 Start-TestInstance @{auto='on';ipset='loaded'} 12 | Out-Null
 Check 'exploration still uses any without auto' ($script:argsSeen.NoAuto -and $script:argsSeen.Ipset -eq 'any')
+Check 'temporary instance has independent exit timer' ($script:launchedCommand -match 'test_lifetime_guard' -and $script:launchedCommand -match 'timer_set')
+Check 'larger slow batches receive sufficient timer budget' ((Get-TestInstanceLifetimeMs 100 1 2) -gt 120000)
+$invalidBudget=$false
+try{Get-TestInstanceLifetimeMs 1000 1 60 | Out-Null}catch{$invalidBudget=$true}
+Check 'oversized stage is rejected instead of silently cutting test short' $invalidBudget
 # Execute the actual publish/check/rollback block with all process and network effects replaced.
 $block=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if (-not $ReportOnly)')},$true)
 $script:finalBlock=[scriptblock]::Create($block.Extent.Text)
@@ -38,7 +45,7 @@ function Run-FinalBlock($Rows) {
     $script:actual=$Rows; $script:savedSettings=0
     $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11'}; $apply=$true; $ReportOnly=$false
     $base=@{}; $alts=@(); $table=@{'11'=$before;'0'=@((Row Clean normal OK))}
-    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}
+    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}; $testLifetimeMs=120000
     $report=New-Object 'System.Collections.Generic.List[string]'
     $repFile=Join-Path $Script:Runtime 'final-fixture.txt'
     Write-TextNoBom (Get-PkgPath $Script:RankFile) 'old rank'

@@ -218,10 +218,20 @@ function Test-FinalCandidateRows($Expected, $Actual) {
     return [pscustomobject]@{ Ok=($required.Count -gt 0 -and $failed.Count -eq 0); Failed=@($failed | Select-Object -Unique) }
 }
 
-function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final) {
+function Get-TestInstanceLifetimeMs([int]$TargetCount, [int]$Parallelism, [int]$Timeout) {
+    if ($TargetCount -lt 1 -or $Parallelism -lt 1 -or $Timeout -lt 1) { throw 'Некорректный бюджет тестового запуска.' }
+    # Основные запросы и повторные попытки, запас на подготовку/завершение. Таймер не зависит от родителя.
+    $budget = [math]::Max(120000, (30 + 4 * [math]::Ceiling($TargetCount / [double]$Parallelism) * $Timeout) * 1000)
+    if ($budget -gt 1800000) { throw 'Один тестовый этап требует больше 30 минут; уменьшите тайм-аут или число адресов.' }
+    return [int]$budget
+}
+
+function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final, [ValidateRange(1000,1800000)][int]$LifetimeMs = 120000) {
     Assert-BypassControlAllowed
     $cmd = if ($Final) { Get-BypassCmdLine -Settings $Settings -Name 'final-check' -Alt $Alt }
            else { Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any' }
+    $guard = "--lua-init=timer_set('test_lifetime_guard',function() os.exit(3) end," + $LifetimeMs.ToString([Globalization.CultureInfo]::InvariantCulture) + ',true)'
+    $cmd += ' ' + (ConvertTo-WinArg $guard)
     # winws2 (cygwin) изредка падает при старте без причины - тогда стратегия выпадала из теста. Пробуем до трёх раз.
     for ($try = 1; $try -le 3; $try++) {
         Assert-BypassControlAllowed
@@ -361,6 +371,7 @@ try {
 
     # быстрый проверяет и круги целиком, полный - вообще всё: выпавшая из круга стратегия может в него вернуться
     $strategies = @(Get-TestStrategies -Full:$Full)
+    $testLifetimeMs = Get-TestInstanceLifetimeMs $targets.Count $Parallel $TimeoutSec
     $networkBefore = Get-NetworkObservation
     Set-RingNetworkContext $networkBefore
     $settingsKey = @($settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$settings[$_] }) -join '|'
@@ -393,7 +404,7 @@ try {
             Write-Host -NoNewline ('        проверяю {0} адресов...' -f $(if ($run.Id -ne '0') { $targets.Count - $ipSkip.Count } else { $targets.Count }))
             $p = $null
             if ($run.Id -ne '0') {
-                $p = Start-TestInstance $settings $run.Id
+                $p = Start-TestInstance $settings $run.Id -LifetimeMs $testLifetimeMs
                 if (-not $p) { Write-Color ' winws2 не запустился' Red; continue }
             }
             $cleanBase = if ($table.ContainsKey('0')) { Get-CleanBaseline $table['0'] } else { $null }
@@ -584,7 +595,7 @@ try {
             Assert-BypassControlAllowed
             if (-not $table.ContainsKey($candidate.alt)) { throw 'Рабочая стратегия не была измерена в этом прогоне.' }
             Write-Color 'Проверяю итоговую комбинацию с рабочими списками, IPSet и автосменой...' Cyan
-            $p = Start-TestInstance $candidate $candidate.alt -Final
+            $p = Start-TestInstance $candidate $candidate.alt -Final -LifetimeMs $testLifetimeMs
             if (-not $p) { throw 'Итоговая конфигурация не запустилась; прежние настройки сохраняются.' }
             $finalRows = @(Invoke-CurlBatch $targets $postFile)
             $expected = @($table[$candidate.alt]) + @($table['0'] | Where-Object { $_.Group -eq 'Clean' })
