@@ -183,19 +183,26 @@ function Get-Strategies {
         $desc = ''
         $since = ''
         $sec = @{}
+        $matchL3 = @{}
+        $invalid = @()
         $cur = $null
         foreach ($line in [System.IO.File]::ReadAllLines($file.FullName)) {
             $t = $line.Trim()
             if ($t -match '^#\s*name:\s*(.+)$') { $name = $matches[1]; continue }
             if ($t -match '^#\s*desc:\s*(.+)$') { $desc = $matches[1]; continue }
             if ($t -match '^#\s*since:\s*(.+)$') { $since = $matches[1].Trim(); continue }
+            if ($t -match '^#\s*match-l3:\s*(.*)$') {
+                $family=$matches[1].Trim()
+                if(-not $cur -or $family -notin @('ipv4','ipv6') -or $matchL3.ContainsKey($cur)){$invalid+='некорректный match-l3';continue}
+                $matchL3[$cur]=$family;continue
+            }
             if ($t -eq '' -or $t.StartsWith('#')) { continue }
             if ($t -match '^\[([a-z_]+)\]$') { $cur = $matches[1]; $sec[$cur] = @(); continue }
             if ($cur) { $sec[$cur] += $t }
         }
-        $missing = @($Script:Sections | Where-Object { -not $sec.ContainsKey($_) })
+        $missing = @($Script:Sections | Where-Object { -not $sec.ContainsKey($_) }) + $invalid
         $result += New-Object PSObject -Property @{
-            Id = $id; Name = $name; Desc = $desc; Since = $since; File = $file.FullName; Sections = $sec; Missing = $missing
+            Id = $id; Name = $name; Desc = $desc; Since = $since; File = $file.FullName; Sections = $sec; MatchL3=$matchL3; Missing = $missing
         }
     }
     $Script:StrategiesCache = New-Object PSObject -Property @{ Sig = $sig; Items = $result }
@@ -205,6 +212,11 @@ function Get-Strategies {
 function Get-Strategy([string]$Id) {
     foreach ($s in (Get-Strategies)) { if ($s.Id -eq $Id) { return $s } }
     return $null
+}
+function Get-SectionMatchL3($Strategy,[string]$Section,[string]$Fallback='') {
+    $actual=if($Strategy.Sections.ContainsKey($Section)){$Section}else{$Fallback}
+    if($Strategy.PSObject.Properties.Name -contains 'MatchL3' -and $Strategy.MatchL3.ContainsKey($actual)){return $Strategy.MatchL3[$actual]}
+    return 'any'
 }
 
 # Все целые стратегии в порядке RotationPref, затем любые свои (alt14.txt и т.д.) - для автоподбора
@@ -669,7 +681,7 @@ function Get-AutolistText([hashtable]$Settings) {
 
 # ---------- сборка параметров winws2 ----------
 # Параметры передаются прямо в командной строке, как у Flowseal: файл @config в Windows-сборке winws2
-# разбирается через bash, которого в Windows нет. Все пути абсолютные: у службы рабочая папка System32.
+# разбирается через bash, которого в Windows нет. Обычно пути абсолютные; длинные команды используют --chdir и относительные пути пакета.
 
 function Get-PkgPath([string]$Rel) {
     $sep = if ($Script:Root -match '^[A-Za-z]:\\') { '\' } else { '/' }
@@ -762,10 +774,23 @@ function New-BypassArgList {
     $ips += '--ipset=' + (Get-PkgPath 'lists/ipset-user.txt')
 
     $script:firstProfile = $true
-    function Add-Profile([string]$Name, [string[]]$Filters) {
+    $profileInfo=@{Current=$null}
+    $generalTemplates=@{}
+    function Add-ProfileRaw([string]$Name, [string[]]$Filters) {
+        $profileInfo.Current=@{Name=$Name;Filters=$Filters;Start=$a.Count;First=$script:firstProfile}
         if ($script:firstProfile) { $a.Add("--name=$Name"); $script:firstProfile = $false }
         else { $a.Add("--new=$Name") }
         foreach ($f in $Filters) { $a.Add($f) }
+    }
+    function Add-Profile([string]$Name, [string[]]$Filters) {
+        if($generalTemplates.Count -gt 0 -and $Filters -contains '--import=tpl_general'){
+            foreach($family in @('ipv4','ipv6')){
+                if(-not $generalTemplates.ContainsKey($family)){continue}
+                $filtered=@($Filters|Where-Object{$_ -ne '--import=tpl_general'})+@(('--filter-l3='+$family),('--import='+$generalTemplates[$family]))
+                Add-ProfileRaw ($Name+'_'+$family) $filtered
+            }
+            $profileInfo.Current=$null
+        }else{Add-ProfileRaw $Name $Filters}
     }
     # Секция стратегии. С circular - секции стратегий круга этого профиля по очереди, каждая со своим номером strategy=N.
     # Если в круге профиля одна стратегия (например, на этом провайдере YouTube пробивает только она) - она без circular.
@@ -774,8 +799,21 @@ function New-BypassArgList {
         if ($St.Sections.ContainsKey($Name)) { return $St.Sections[$Name] }
         return $St.Sections[$Fallback]
     }
-    function Add-Section([string]$Name, [switch]$Circular, [string]$CircularArgs = '', [string]$Fallback = '', [switch]$Learn) {
+    function Add-Section([string]$Name, [switch]$Circular, [string]$CircularArgs = '', [string]$Fallback = '', [switch]$Learn,[string]$Family='') {
         $ring = @(if ($Circular -and $auto) { Get-RotationOrder $altId $Name } else { $primary })
+        if($Family){$ring=@($ring|Where-Object{(Get-SectionMatchL3 $_ $Name $Fallback) -in @('any',$Family)})}
+        elseif(@($ring|Where-Object{(Get-SectionMatchL3 $_ $Name $Fallback) -ne 'any'}).Count -and $null -ne $profileInfo.Current){
+            $profile=$profileInfo.Current
+            $a.RemoveRange($profile.Start,$a.Count-$profile.Start)
+            $script:firstProfile=$profile.First
+            foreach($version in @('ipv4','ipv6')){
+                if(-not @($ring|Where-Object{(Get-SectionMatchL3 $_ $Name $Fallback) -in @('any',$version)}).Count){continue}
+                Add-ProfileRaw ($profile.Name+'_'+$version) (@($profile.Filters)+@('--filter-l3='+$version))
+                Add-Section $Name -Circular:$Circular -CircularArgs $CircularArgs -Fallback $Fallback -Learn:$Learn -Family $version
+            }
+            return
+        }
+        if(-not $ring.Count){return}
         # поддельные сбросы фильтра выбрасываются (lua\autoring.lua). Игру не трогаем. Входящие SYN+ACK, FIN и RST драйвер
         # и так передаёт winws2, поэтому лишней нагрузки нет
         if ($Learn) { foreach ($l in '--payload=all', '--out-range=x', '--in-range=a', '--lua-desync=rst_guard', '--in-range=x', '--out-range=a') { $a.Add($l) } }
@@ -785,8 +823,9 @@ function New-BypassArgList {
             $a.Add('--in-range=-s5556')
             # имя файла памяти - по составу круга: номера стратегий значат своё только в этом составе. Игра - без памяти
             # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
-            $stateArg = if ($Script:RingPersistAllowed) { ':context=network-context.txt:state=' + (Get-RingStateName $Name $ring) } else { '' }
-            $memArgs = if ($Learn) { ':key=' + $Name + $stateArg + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
+            $memoryName=if($Family){$Name+'_'+$Family}else{$Name}
+            $stateArg = if ($Learn -and $Script:RingPersistAllowed) { ':context=network-context.txt:state=' + (Get-RingStateName $memoryName $ring) } else { '' }
+            $memArgs = if ($Learn) { ':key=' + $memoryName + $stateArg + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
             $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
             $n = 0
@@ -805,9 +844,20 @@ function New-BypassArgList {
 
     # Стратегия "общего списка" нужна в трёх профилях (general, tcp_ipset, autolist). С автосменой это все стратегии
     # круга, и три копии раздували командную строку к пределу Windows (32767). Поэтому - шаблон zapret2 и --import.
-    $a.Add('--template=tpl_general')
-    Add-Section 'general' -Circular -CircularArgs ':reset' -Learn
-    $a.Add('--new')
+    $generalRing=@(if($auto){Get-RotationOrder $altId 'general'}else{$primary})
+    if(@($generalRing|Where-Object{(Get-SectionMatchL3 $_ 'general') -ne 'any'}).Count){
+        foreach($family in @('ipv4','ipv6')){
+            if(-not @($generalRing|Where-Object{(Get-SectionMatchL3 $_ 'general') -in @('any',$family)}).Count){continue}
+            $generalTemplates[$family]='tpl_general_'+$family
+            $a.Add('--template='+$generalTemplates[$family])
+            Add-Section 'general' -Circular -CircularArgs ':reset' -Learn -Family $family
+            $a.Add('--new')
+        }
+    }else{
+        $a.Add('--template=tpl_general')
+        Add-Section 'general' -Circular -CircularArgs ':reset' -Learn
+        $a.Add('--new')
+    }
 
     Add-Profile 'quic_list' (@('--filter-udp=443', '--filter-l7=quic') + $hostlists + $hostEx + $ipEx)
     Add-Section 'quic'
@@ -860,6 +910,23 @@ function ConvertTo-WinCmdLine([string[]]$ArgList) {
     return (@($ArgList | ForEach-Object { ConvertTo-WinArg $_ }) -join ' ')
 }
 
+function ConvertTo-CompactBypassArguments([string[]]$Arguments) {
+    $rootPrefix=$Script:Root.TrimEnd('\','/')+'\'
+    $result=New-Object 'System.Collections.Generic.List[string]'
+    $result.Add('--chdir='+$Script:Root)
+    foreach($arg in $Arguments){
+        # Только файловые параметры внутри пакета; Lua-код, внешние пути и --writable не переписываются.
+        if($arg -match '^(--(?:lua-init=@|blob=[A-Za-z_][A-Za-z_0-9]*:@|hostlist(?:-exclude|-auto|-auto-debug)?=|ipset(?:-exclude)?=|debug=@))(.+)$'){
+            $option=$matches[1];$path=$matches[2]
+            if($path.StartsWith($rootPrefix,[StringComparison]::OrdinalIgnoreCase)){
+                $arg=$option+($path.Substring($rootPrefix.Length).Replace('\','/'))
+            }
+        }
+        $result.Add($arg)
+    }
+    return ,($result.ToArray())
+}
+
 # Командная строка winws2. Копия по одному параметру в строке кладётся в runtime\args-<Name>.txt для диагностики.
 function Get-BypassCmdLine {
     param([hashtable]$Settings, [string]$Name = 'active', [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [switch]$DryRun, [string]$DebugFile)
@@ -868,8 +935,12 @@ function Get-BypassCmdLine {
         if ($Name -in @('test','final-check','diag')) { $Script:RingPersistAllowed = $false }
         $list = New-BypassArgList -Settings $Settings -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun:$DryRun -DebugFile $DebugFile
     } finally { $Script:RingPersistAllowed = $previousPersistence }
-    Write-TextNoBom (Join-Path $Script:Runtime ('args-' + $Name + '.txt')) (($list -join "`r`n") + "`r`n")
     $cmd = ConvertTo-WinCmdLine $list
+    if($cmd.Length -gt 30000){
+        $list=ConvertTo-CompactBypassArguments $list
+        $cmd=ConvertTo-WinCmdLine $list
+    }
+    Write-TextNoBom (Join-Path $Script:Runtime ('args-' + $Name + '.txt')) (($list -join "`r`n") + "`r`n")
     # предел командной строки Windows - 32767 символов; пути к файлам повторяются в каждом профиле
     if ($cmd.Length -gt 32000) {
         throw ("Командная строка winws2 слишком длинная ({0} символов, предел Windows 32767). Перенесите папку в короткий путь, например C:\zapret" -f $cmd.Length)

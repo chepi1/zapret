@@ -44,7 +44,7 @@ local function ring_context(desync)
 		if key~=network_cache.key or composition~=network_cache.composition then network_cache.revision=network_cache.revision+1 end
 		network_cache.key, network_cache.composition, network_cache.checked = key, composition, mono
 	end
-	local expected = desync.arg.state and desync.arg.state:match("^ring%-[a-z_]+%-([a-f0-9]+)%-[a-f0-9]+%.txt$")
+	local expected = desync.arg.state and desync.arg.state:match("^ring%-[a-z_0-9]+%-([a-f0-9]+)%-[a-f0-9]+%.txt$")
 	if not expected or #expected~=24 or expected:upper()~=network_cache.composition then return nil, network_cache.revision end
 	return network_cache.key, network_cache.revision
 end

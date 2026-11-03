@@ -11,3 +11,6 @@ lists/*.bak
 # архивы сборки (dev\build.ps1)
 dist/
 *.zip
+
+# developer Python cache
+__pycache__/

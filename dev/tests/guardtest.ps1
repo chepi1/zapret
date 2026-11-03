@@ -11,6 +11,7 @@ finally { $env:__COMPAT_LAYER=$compat }
 if($result.ExitCode -ne 0 -or $result.TimedOut){throw ('Timer initialization dry-run failed: '+$result.Output)}
 Write-Host 'ok actual engine accepts generated timer argument'
 if(-not(Test-Admin)){Write-Host 'skip actual timer expiry: administrator token required';exit 0}
-$result=Invoke-Native $Script:Exe ('--intercept=0 '+(ConvertTo-WinArg $guard)) $Script:Bin 5
+# --intercept=0 exits after lua-init, before timer events. A false filter leaves the event loop active without capturing traffic.
+$result=Invoke-Native $Script:Exe ('--wf-raw=false '+(ConvertTo-WinArg $guard)) $Script:Bin 5
 if($result.TimedOut -or $result.ExitCode -ne 23){throw ('Timer did not terminate empty-filter process: '+$result.ExitCode+' '+$result.Output)}
 Write-Host 'ok actual timer terminates its own empty-filter process'

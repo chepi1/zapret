@@ -110,7 +110,7 @@ def parse_opts(p):
     o = {'modes': [], 'repeats': None, 'fooling': [], 'badseq': '-10000', 'fake_tls': [], 'fake_http': [],
          'fake_unknown': [], 'fake_quic': [], 'fake_discord': [], 'fake_stun': [], 'fake_unknown_udp': [],
          'pos': None, 'seqovl': None, 'seqovl_pattern': None, 'fakedsplit_pattern': None, 'host': None,
-         'cutoff': None, 'any': False, 'ip_id_zero': False, 'default_tls_mod': None}
+         'cutoff': None, 'any': False, 'ip_id_zero': False, 'default_tls_mod': None, 'l3': None}
     for k, v in p:
         if k == '--dpi-desync':
             o['modes'] = v.split(',')
@@ -163,8 +163,12 @@ def parse_opts(p):
             o['any'] = v == '1'
         elif k == '--ip-id':
             o['ip_id_zero'] = v == 'zero'
+        elif k == '--filter-l3':
+            if v not in ('ipv4', 'ipv6') or (o['l3'] and o['l3'] != v):
+                raise ValueError('unsupported or conflicting --filter-l3=' + v)
+            o['l3'] = v
         elif k in ('--filter-udp', '--filter-tcp', '--filter-l7', '--hostlist', '--hostlist-exclude', '--ipset',
-                   '--ipset-exclude', '--hostlist-domains', '--hostlist-exclude-domains', '--filter-l3'):
+                   '--ipset-exclude', '--hostlist-domains', '--hostlist-exclude-domains'):
             pass
         else:
             warn('опция не перенесена: %s=%s' % (k, v))
@@ -283,10 +287,12 @@ def convert(path):
             lines = udp_section(o, 'quic' if kind == 'quic_ipset' else kind)
         elif kind == 'all_tcp':
             for k in ('discord_media', 'google', 'general', 'ipset_tcp'):
-                sec[k] = tcp_section(o, k)
+                sec[k] = (['# match-l3: ' + o['l3']] if o['l3'] else []) + tcp_section(o, k)
             continue
         else:
             lines = tcp_section(o, kind)
+        if o['l3']:
+            lines.insert(0, '# match-l3: ' + o['l3'])
         if kind == 'quic_ipset':
             if 'quic' in sec and sec['quic'] != lines:
                 warn('QUIC для ipset отличается от QUIC для списка: взят списочный')
@@ -319,6 +325,9 @@ def read_ours(path):
     sec, cur = {}, None
     for l in open(path, encoding='utf-8'):
         l = l.strip()
+        if l.startswith('# match-l3:') and cur:
+            sec[cur].append(l)
+            continue
         if not l or l.startswith('#'):
             continue
         m = re.match(r'^\[([a-z_]+)\]$', l)

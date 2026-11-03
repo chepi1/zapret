@@ -12,18 +12,21 @@
 --payload=stun
 --lua-desync=fake:blob=discord_udp:repeats=6
 [discord_media]
+# match-l3: ipv4
 --out-range=-d10
 --payload=empty
 --lua-desync=syndata
 --payload=tls_client_hello
 --lua-desync=multidisorder
 [google]
+# match-l3: ipv4
 --out-range=-d10
 --payload=empty
 --lua-desync=syndata
 --payload=tls_client_hello
 --lua-desync=multidisorder
 [general]
+# match-l3: ipv4
 --out-range=-d10
 --payload=empty
 --lua-desync=syndata

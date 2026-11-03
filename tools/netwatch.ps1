@@ -1,6 +1,9 @@
 ﻿# Один наблюдатель папки. Не запускает/останавливает обход, не меняет сеть и не выполняет внешних запросов.
 param([ValidateRange(0,1000000)][int]$MaxSamples=0)
 . (Join-Path $PSScriptRoot 'lib.ps1')
+foreach($required in @('Get-NetworkObservation','Get-RingCompositionKey','Write-NetworkWatchRecord','Get-NetworkWatchRecord')){
+    if(-not(Get-Command $required -ErrorAction SilentlyContinue)){exit 1}
+}
 $lease=$null
 try{
     try{$lease=[IO.File]::Open((Join-Path $Script:Runtime 'network-watch.lock'),'OpenOrCreate','ReadWrite','Read')}catch{exit 0}

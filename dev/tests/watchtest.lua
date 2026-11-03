@@ -58,6 +58,10 @@ if type(ring_network_key)=='function' then
     check('changed disk composition cannot reuse memory of loaded process',ring_success(packet(),{})==true and host.nstrategy==1)
     host.nstrategy=3;ring_success(packet(),{})
     check('old loaded composition cannot save hints for new disk configuration',writes==previous_writes)
+    now=now+1;mono=mono+2;files['root/network-context.txt']='3 '..now..' '..a..' '..config..'\n'
+    local family=packet();family.arg.key='family-fixture';family.arg.state=state:gsub('general','general_ipv4')
+    files[ring_state_path('root',family.arg.state,a)]='example.test 3\n'
+    check('family-specific ring name can use guarded persistence',ring_success(family,{})==true and host.nstrategy==3)
     os.time, os.getenv = real_time, real_getenv
 end
 io.stdout:flush();os.exit(fails>0 and 1 or 0)
