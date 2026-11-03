@@ -361,7 +361,10 @@ try {
 
     # быстрый проверяет и круги целиком, полный - вообще всё: выпавшая из круга стратегия может в него вернуться
     $strategies = @(Get-TestStrategies -Full:$Full)
-    $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; Rounds=$Rounds }
+    $networkBefore = Get-NetworkObservation
+    Set-RingNetworkContext $networkBefore
+    $settingsKey = @($settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$settings[$_] }) -join '|'
+    $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; Rounds=$Rounds; Settings=$settingsKey; Network=$networkBefore.Key }
     $scoreInputs = Get-ScoreInputsHash $targets $scoreParameters
     $scoreContext = Get-ScoreContext $info $targets $scoreParameters
     $scoreFingerprints = @{}
@@ -432,7 +435,7 @@ try {
     }
 
     # ---------- итог ----------
-    if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) {
+    if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) {
         $changed = 'Файлы изменились во время автоподбора. Результаты не применены и не добавлены в историю; повторите проверку после завершения правок.'
         Write-Color $changed Yellow
         $report.Add($changed)
@@ -523,7 +526,7 @@ try {
     # Баллы плавают от прогона к прогону: основную выбираем по среднему за последние прогоны, а не по этому одному
     $historySaved = Add-ScoreHistory $alts $scoreContext $scoreFingerprints
     if (-not $historySaved) {
-        if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) { throw 'Стратегии или код изменились перед сохранением. Результаты не применены; повторите автоподбор после завершения правок.' }
+        if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Стратегии или код изменились перед сохранением. Результаты не применены; повторите автоподбор после завершения правок.' }
         $scoreContext = ''
         Write-Color 'Совместимая история недоступна: сравниваю только текущий прогон.' Yellow
     }
@@ -590,7 +593,7 @@ try {
             Stop-Process -Id $p.Id -Force -ErrorAction Stop
             if (-not $p.WaitForExit(5000)) { throw 'Не удалось остановить итоговую проверку.' }
             $p = $null
-            if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) { throw 'Входные файлы изменились во время итоговой проверки.' }
+            if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Входные файлы изменились во время итоговой проверки.' }
             if (-not $check.Ok) { throw ('Итоговая комбинация не подтверждена: ' + ($check.Failed -join ', ')) }
             Assert-BypassControlAllowed
             if ($apply) { Save-Settings $candidate; $settings = $candidate }

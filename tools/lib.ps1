@@ -12,6 +12,9 @@ $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
+. (Join-Path $PSScriptRoot 'netstate.ps1')
+$Script:RingNetworkKey = 'unknown-' + [guid]::NewGuid().ToString('N')
+$Script:RingPersistAllowed = $false
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -401,7 +404,10 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        foreach ($dir in @('lists','fake')) {
+            $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
+        }
         foreach ($file in $files) {
             $parts += (Get-FileHash -LiteralPath (Join-Path $Script:Root $file) -Algorithm SHA256 -ErrorAction Stop).Hash
         }
@@ -420,7 +426,8 @@ function Get-ScoreContext($Connection, $Targets, [hashtable]$Parameters = @{}) {
         try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($asn + '|' + $country + '|' + $inputs)))).Replace('-','') } finally { $sha.Dispose() }
     } catch { return '' }
 }
-function Test-ScoreInputs([string]$Before, $Targets, [hashtable]$Parameters, [hashtable]$Fingerprints) {
+function Test-ScoreInputs([string]$Before, $Targets, [hashtable]$Parameters, [hashtable]$Fingerprints, $NetworkBefore = $null) {
+    if ($null -ne $NetworkBefore -and -not (Test-NetworkObservation $NetworkBefore (Get-NetworkObservation))) { return $false }
     if (-not $Before -or $Before -cne (Get-ScoreInputsHash $Targets $Parameters)) { return $false }
     foreach ($id in $Fingerprints.Keys) {
         if (-not $Fingerprints[$id] -or $Fingerprints[$id] -cne (Get-StrategyFingerprint $id)) { return $false }
@@ -511,7 +518,7 @@ function Initialize-RingDir {
     if ($deny.Count) { & (Join-Path $env:SystemRoot 'System32\icacls.exe') $d /reset /T /C /Q 2>&1 | Out-Null }
 }
 function Get-RingStateName([string]$Section, $Ring) {
-    $sig = (@($Ring | ForEach-Object { $_.Id + ':' + $_.Name }) -join ',')
+    $sig = $Script:RingNetworkKey + '|' + (@($Ring | ForEach-Object { $_.Id + ':' + $_.Name + ':' + (Get-StrategyFingerprint $_.Id) }) -join ',')
     $md5 = [System.Security.Cryptography.MD5]::Create()
     $hex = [BitConverter]::ToString($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($sig))).Replace('-', '').Substring(0, 8).ToLower()
     return ('ring-{0}-{1}.txt' -f $Section, $hex)
@@ -762,7 +769,8 @@ function New-BypassArgList {
             $a.Add('--in-range=-s5556')
             # имя файла памяти - по составу круга: номера стратегий значат своё только в этом составе. Игра - без памяти
             # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
-            $memArgs = if ($Learn) { ':key=' + $Name + ':state=' + (Get-RingStateName $Name $ring) + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
+            $stateArg = if ($Script:RingPersistAllowed) { ':state=' + (Get-RingStateName $Name $ring) } else { '' }
+            $memArgs = if ($Learn) { ':key=' + $Name + $stateArg + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
             $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
             $n = 0
@@ -1154,6 +1162,9 @@ function Get-ServiceBinPath([string]$CmdLine) {
 
 # Запускает обход с текущими настройками. Возвращает $true, если winws2 жив через 3 секунды.
 function Start-BypassCore([switch]$Quiet) {
+    Set-RingNetworkContext (Get-NetworkObservation)
+    # Сохранённая ImagePath службы не может обновить контекст после смены сети/перезагрузки.
+    if (Get-OurService) { $Script:RingPersistAllowed = $false }
     # обход снова включают - уведомление "обход не работает" опять имеет смысл (см. пункт 2 меню)
     Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)

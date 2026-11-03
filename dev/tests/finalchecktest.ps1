@@ -38,7 +38,7 @@ function Run-FinalBlock($Rows) {
     $script:actual=$Rows; $script:savedSettings=0
     $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11'}; $apply=$true; $ReportOnly=$false
     $base=@{}; $alts=@(); $table=@{'11'=$before;'0'=@((Row Clean normal OK))}
-    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}
+    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}
     $report=New-Object 'System.Collections.Generic.List[string]'
     $repFile=Join-Path $Script:Runtime 'final-fixture.txt'
     Write-TextNoBom (Get-PkgPath $Script:RankFile) 'old rank'
