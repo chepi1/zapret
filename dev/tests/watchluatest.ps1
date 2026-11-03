@@ -9,7 +9,7 @@ if(-not(Test-Admin)){
     }
     Write-Host 'skip Lua watchdog unit: administrator or developer Lua runtime required';exit 0
 }
-$args0=@('--intercept=0',('--lua-init=@'+(Join-Path $Pkg 'lua/autoring.lua')),('--lua-init=@'+(Join-Path $PSScriptRoot 'watchtest.lua')))
+$args0=@('--intercept=0',('--lua-init=@'+(Join-Path $Pkg 'lua/ring-store.lua')),('--lua-init=@'+(Join-Path $Pkg 'lua/autoring.lua')),('--lua-init=@'+(Join-Path $PSScriptRoot 'watchtest.lua')))
 $r=Invoke-Native $Script:Exe (ConvertTo-WinCmdLine $args0) $Script:Bin 10
 Write-Host $r.Output
 if($r.ExitCode -ne 0 -or $r.TimedOut -or $r.Output -notmatch 'network marker parser exists'){exit 1}

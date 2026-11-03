@@ -5,7 +5,7 @@ if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет фай�
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Write-Host '  пропущено: нужны права администратора (запустите run-all.ps1 из окна администратора)'; exit 0 }
 $w = Join-Path $Pkg ('runtime\luatest-' + [guid]::NewGuid().ToString('N'))
-$lua = @('zapret-lib.lua', 'zapret-antidpi.lua', 'zapret-auto.lua', 'fooling.lua', 'autoring.lua') | ForEach-Object { '"--lua-init=@' + (Join-Path $Pkg ('lua\' + $_)) + '"' }
+$lua = @('zapret-lib.lua', 'zapret-antidpi.lua', 'zapret-auto.lua', 'fooling.lua', 'ring-store.lua', 'autoring.lua') | ForEach-Object { '"--lua-init=@' + (Join-Path $Pkg ('lua\' + $_)) + '"' }
 $test = '"--lua-init=@' + (Join-Path $PSScriptRoot 'luatest.lua') + '"'
 $psi = New-Object Diagnostics.ProcessStartInfo
 $psi.FileName = Join-Path $Pkg 'bin\winws2.exe'

@@ -833,6 +833,7 @@ function New-BypassArgList {
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-antidpi.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-auto.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/fooling.lua'))
+    $a.Add('--lua-init=@' + (Get-PkgPath 'lua/ring-store.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/autoring.lua'))
     # память автосмены (lua\autoring.lua): файл можно писать только в этот каталог
     if ($auto) { Initialize-RingDir; $a.Add('--writable=' + (Get-PkgPath $Script:RingDir)) }

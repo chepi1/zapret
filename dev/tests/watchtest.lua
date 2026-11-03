@@ -18,9 +18,10 @@ if type(ring_network_key)=='function' then
 end
 -- Exercise real ring detectors against a virtual filesystem; no packets or network are used.
 if type(ring_network_key)=='function' then
-    local real_time, real_getenv = os.time, os.getenv
+    local real_time, real_getenv, real_rename, real_remove = os.time, os.getenv, os.rename, os.remove
     local now, mono = os.time()+10, 0
-    os.time=function() return now end
+    local time_reads=0
+    os.time=function() time_reads=time_reads+1;return now end
     os.getenv=function(name) if name=='WRITABLE' then return 'root' end;return real_getenv(name) end
     clock_getfloattime=function() return mono end
     DLOG=function() end;DLOG_ERR=function() end
@@ -30,10 +31,22 @@ if type(ring_network_key)=='function' then
     local b=string.rep('B',64)
     local state_a=ring_state_path('root',state,a)
     local state_b=ring_state_path('root',state,b)
-    local files={[state_a]='example.test 2\n',[state_b]='example.test 3\n'}
+    local function saved(n) return '# ring-store-v2\nexample.test '..n..' '..now..' '..now..'\n' end
+    local original_a=saved(2)
+    local files={[state_a]=original_a,[state_b]=saved(3)}
+    local timers={}
+    timer_set=function(name,callback,ms) timers[name]={callback=callback,at=mono+ms/1000} end
+    local function advance(seconds)
+        now,mono=now+seconds,mono+seconds
+        local ready={}
+        for name,timer in pairs(timers) do if timer.at<=mono then ready[name]=timer;timers[name]=nil end end
+        for name,timer in pairs(ready) do timer.callback(name) end
+    end
     local writes=0
     readfile=function(path) if not files[path] then error('missing') end;return files[path] end
     writefile=function(path,text) files[path]=text;writes=writes+1 end
+    os.rename=function(from,to) files[to]=files[from];files[from]=nil;return true end
+    os.remove=function(path) files[path]=nil;return true end
     local host={nstrategy=1,ctstrategy=3}
     local function packet()
         return {arg={key='watch-fixture',state=state,context='network-context.txt'},host_record=host,
@@ -46,7 +59,12 @@ if type(ring_network_key)=='function' then
     check('network B resets host state and loads its own memory',ring_success(packet(),{})==true and host.nstrategy==3)
     check('old connection cannot update another network memory',ring_success(old,old_conn)==false and writes==0)
     host.nstrategy=2;ring_success(packet(),{})
-    check('successful choice persists only into active network file',writes==1 and files[state_b]:find('example.test 2',1,true) and files[state_a]=='example.test 2\n')
+    check('detector does not synchronously serialize learned memory',writes==0)
+    advance(5)
+    check('successful choice persists only into active network file',writes==1 and files[state_b]:find('example.test 2',1,true) and files[state_a]==original_a)
+    local time_before=time_reads
+    for i=1,1000 do ring_success(packet(),{}) end
+    check('cached context confirmations do not repeatedly query wall clock',time_reads==time_before)
     now=now+21;mono=mono+2
     check('watchdog expiry clears learned host hints',ring_success(packet(),{})==true and host.nstrategy==1)
     host.nstrategy=3;ring_success(packet(),{})
@@ -60,8 +78,32 @@ if type(ring_network_key)=='function' then
     check('old loaded composition cannot save hints for new disk configuration',writes==previous_writes)
     now=now+1;mono=mono+2;files['root/network-context.txt']='3 '..now..' '..a..' '..config..'\n'
     local family=packet();family.arg.key='family-fixture';family.arg.state=state:gsub('general','general_ipv4')
-    files[ring_state_path('root',family.arg.state,a)]='example.test 3\n'
+    local family_file=ring_state_path('root',family.arg.state,a)
+    files[family_file]=saved(3)
     check('family-specific ring name can use guarded persistence',ring_success(family,{})==true and host.nstrategy==3)
-    os.time, os.getenv = real_time, real_getenv
+    host.nstrategy=2;ring_success(family,{})
+    previous_writes=writes
+    files['root/network-context.txt']='3 '..now..' '..b..' '..config..'\n'
+    advance(5)
+    check('timer rereads network marker even without another packet',writes==previous_writes and files[family_file]:find('example.test 3 ',1,true))
+    files['root/network-context.txt']='3 '..now..' '..a..' '..config..'\n';mono=mono+2
+    ring_success(family,{})
+    host.nstrategy=2;ring_success(family,{})
+    files['root/network-context.txt']='3 '..now..' '..a..' '..string.rep('D',24)..'\n'
+    advance(5)
+    check('timer rejects a changed composition before saving',writes==previous_writes)
+    local flap_state=state:gsub('abc','abcd')
+    local flap_a,flap_b=ring_state_path('root',flap_state,a),ring_state_path('root',flap_state,b)
+    files[flap_a],files[flap_b]=saved(2),saved(2)
+    for i=1,12 do
+        now,mono=now+1,mono+2
+        files['root/network-context.txt']='3 '..now..' '..(i%2==0 and b or a)..' '..config..'\n'
+        local flap=packet();flap.arg.key='flap-fixture';flap.arg.state=flap_state
+        ring_success(flap,{})
+        host.nstrategy=3;ring_success(flap,{})
+    end
+    previous_writes=writes;advance(5)
+    check('repeated network changes cancel obsolete queued snapshots',writes==previous_writes+1 and files[flap_b]:find('example.test 3 ',1,true)~=nil)
+    os.time, os.getenv, os.rename, os.remove = real_time, real_getenv, real_rename, real_remove
 end
 io.stdout:flush();os.exit(fails>0 and 1 or 0)

@@ -117,7 +117,7 @@ function Get-LabArgs($Lines, [string]$FilterFile) {
     $a = New-Object System.Collections.Generic.List[string]
     $a.Add('--wf-tcp-out=80,443')
     $a.Add('--wf-raw-filter=@' + $FilterFile)
-    foreach ($l in 'zapret-lib.lua', 'zapret-antidpi.lua', 'zapret-auto.lua', 'fooling.lua', 'autoring.lua') { $a.Add('--lua-init=@' + (Join-Path $Pkg ('lua\' + $l))) }
+    foreach ($l in 'zapret-lib.lua', 'zapret-antidpi.lua', 'zapret-auto.lua', 'fooling.lua', 'ring-store.lua', 'autoring.lua') { $a.Add('--lua-init=@' + (Join-Path $Pkg ('lua\' + $l))) }
     $names = @{ quic_google = 'quic_initial_www_google_com.bin'; quic_4pda = 'quic_initial_4pda_to.bin'; stun_fs = 'stun.bin'; stun2 = 'stun2.bin'; tls_google = 'tls_clienthello_www_google_com.bin'
         tls_4pda = 'tls_clienthello_4pda_to.bin'; tls_sferum = 'tls_clienthello_www_sferum_ru.bin'; tls_sochi = 'tls_clienthello_sochi_park.bin'; discord_udp = 'ACTIVE_DISCORD_UDP.bin'; game_udp = 'ACTIVE_GAME_UDP.bin' }
     foreach ($k in $names.Keys) { $a.Add('--blob=' + $k + ':@' + (Join-Path $Pkg ('fake\' + $names[$k]))) }

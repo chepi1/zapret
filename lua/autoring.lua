@@ -31,10 +31,11 @@ function ring_state_path(dir, state, key)
 	if not dir or not state or not state:match("^[%w_-]+%.txt$") or not key or not key:match("^[A-F0-9]+$") or #key~=64 then return nil end
 	return dir.."/"..state:sub(1,-5).."-"..key..".txt"
 end
-local function ring_context(desync)
+local function ring_context(desync, force)
 	if not desync.arg.context then return "legacy", 0 end
-	local now, mono = os.time(), clock_getfloattime()
-	if mono<network_cache.checked or mono-network_cache.checked>=1 then
+	local mono = clock_getfloattime()
+	if force or mono<network_cache.checked or mono-network_cache.checked>=1 then
+		local now = os.time()
 		local key, composition
 		local dir = os.getenv("WRITABLE")
 		if dir and desync.arg.context=="network-context.txt" then
@@ -42,7 +43,7 @@ local function ring_context(desync)
 			if ok then key, composition = ring_network_key(text, now, RING_STARTED) end
 		end
 		if key~=network_cache.key or composition~=network_cache.composition then network_cache.revision=network_cache.revision+1 end
-		network_cache.key, network_cache.composition, network_cache.checked = key, composition, mono
+		network_cache.key, network_cache.composition, network_cache.checked, network_cache.epoch = key, composition, mono, now
 	end
 	local expected = desync.arg.state and desync.arg.state:match("^ring%-[a-z_0-9]+%-([a-f0-9]+)%-[a-f0-9]+%.txt$")
 	if not expected or #expected~=24 or expected:upper()~=network_cache.composition then return nil, network_cache.revision end
@@ -120,11 +121,21 @@ local function ring_mem(desync)
 	local context, revision = ring_context(desync)
 	local mem = memory[name]
 	if mem and mem.revision==revision and mem.context==context then return mem end
+	if mem and mem.store then mem.store:discard() end
 	mem = { keys = {}, count = 0, context=context, revision=revision }
 	memory[name] = mem
 	local dir, state = os.getenv("WRITABLE"), desync.arg.state
 	if dir and state and #state>0 then
 		mem.file = desync.arg.context and ring_state_path(dir, state, context) or (not desync.arg.context and dir.."/"..state or nil)
+		if desync.arg.context then
+			-- Не удерживаем packet/track до timer: только короткое описание ожидаемого контекста.
+			local probe={arg={state=state,context=desync.arg.context}}
+			mem.store=ring_store.new({file=mem.file,now=function() return network_cache.epoch end,validate=function()
+				local current, generation=ring_context(probe,true)
+				return context~=nil and current==context and generation==revision
+			end})
+			return mem
+		end
 		local ok, text = false, nil
 		if mem.file then ok, text = pcall(readfile, mem.file) end
 		if ok and text and #text<=262144 then
@@ -144,6 +155,11 @@ end
 local function ring_remember(desync, w)
 	local mem = ring_mem(desync)
 	if w.revision~=nil and w.revision~=mem.revision then return end
+	if mem.store then
+		if w.strategy==1 then mem.store:put(w.key,nil)
+		else mem.store:put(w.key,w.strategy);mem.store:put(w.net,w.strategy) end
+		return
+	end
 	local changed = false
 	local function put(key, n)
 		if not key or mem.keys[key]==n then return end
@@ -201,7 +217,7 @@ local function ring_conn(desync, crec)
 			if not hrec.ring_seen then
 				hrec.ring_seen = true
 				local mem = ring_mem(desync)
-				local n = mem.keys[key] or (w.net and mem.keys[w.net])
+				local n = mem.store and (mem.store:get(key) or (w.net and mem.store:get(w.net))) or (mem.keys[key] or (w.net and mem.keys[w.net]))
 				if n and hrec.ctstrategy and n<=hrec.ctstrategy and n~=hrec.nstrategy then
 					DLOG("ring: '"..key.."' starts from remembered strategy "..n)
 					hrec.nstrategy = n
