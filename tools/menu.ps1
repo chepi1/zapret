@@ -105,7 +105,7 @@ function Show-Header {
     $state = @($(if ($procs.Count) { 'Обход: запущен' + (Get-UptimeText $procs[0]) } else { 'Обход: остановлен' }),
         $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }),
         $(if (Get-OurService) { 'автозапуск с Windows' }),
-        $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'Telegram' } else { 'Telegram: не запущен' } }))
+        $(if ($s.telegram -eq 'on') { switch (Get-TgBridgeState) { 'Open' { 'Telegram' }; 'Unknown' { 'Telegram: состояние порта неизвестно' }; 'Closed' { 'Telegram: порт недоступен' }; default { 'Telegram: не запущен' } } }))
     Write-BoxTop (' zapret v' + $Script:Version + ' ')
     Write-BoxRow ('  ' + (@($state | Where-Object { $_ }) -join ' · ')) -Rgb @(255, 200, 220)
     if ($procs.Count) {

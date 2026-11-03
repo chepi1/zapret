@@ -1575,6 +1575,22 @@ function Get-ProxyEndpointState($Endpoint) {
     return 'Closed'
 }
 
+# Общий снимок локального порта для предупреждений, Telegram и проверки застрявших приложений.
+# Unknown сохраняется отдельно: отсутствие доказательства доступности не означает закрытый порт.
+function Get-LoopbackPortObservation($Endpoint, $Listeners = $null) {
+    if (-not $PSBoundParameters.ContainsKey('Listeners')) { $Listeners = Get-ProxyListeners }
+    $found = @($Listeners | Where-Object { $null -ne $_ } | Where-Object {
+        if ($_.Port -ne $Endpoint.Port) { return $false }
+        $ip = $_.Address
+        if ($Endpoint.Host -eq 'localhost') { return ([Net.IPAddress]::IsLoopback($ip) -or $ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any)) }
+        $expected = $null
+        if (-not [Net.IPAddress]::TryParse($Endpoint.Host, [ref]$expected) -or -not [Net.IPAddress]::IsLoopback($expected)) { return $false }
+        return ($ip.Equals($expected) -or ($ip.AddressFamily -eq $expected.AddressFamily -and ($ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any))))
+    }).Count -gt 0
+    $state = if ($found) { 'Open' } else { Get-ProxyEndpointState $Endpoint }
+    return [pscustomobject]@{ State=$state; Host=$Endpoint.Host; Port=$Endpoint.Port; ObservedUtc=[datetime]::UtcNow.ToString('o'); Evidence=$(if($found){'ListenerTable'}else{'LoopbackConnect'}) }
+}
+
 # Процесс клиента, настройки прокси и маршруты TUN — отдельные наблюдения, а не доказательство пути каждой игры.
 function Get-ProxyWarnings {
     $w = @()
@@ -1586,15 +1602,8 @@ function Get-ProxyWarnings {
         if ($endpoints.Count) {
             $listeners = Get-ProxyListeners
                 foreach ($endpoint in $endpoints) {
-                    $found = @($listeners | Where-Object { $null -ne $_ } | Where-Object {
-                        if ($_.Port -ne $endpoint.Port) { return $false }
-                        $ip = $_.Address
-                        if ($endpoint.Host -eq 'localhost') { return ([Net.IPAddress]::IsLoopback($ip) -or $ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any)) }
-                        $expected = [Net.IPAddress]::Parse($endpoint.Host)
-                        return ($ip.Equals($expected) -or ($ip.AddressFamily -eq $expected.AddressFamily -and ($ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any))))
-                    }).Count -gt 0
-                    $probe = if ($found) { 'Open' } else { Get-ProxyEndpointState $endpoint }
-                    $state = switch ($probe) {
+                    $observation = Get-LoopbackPortObservation $endpoint -Listeners $listeners
+                    $state = switch ($observation.State) {
                         'Open' { 'слушает (доступность сервера не проверялась)' }
                         'Closed' { 'не слушает: локальное соединение отклонено; включённый прокси может мешать приложениям' }
                         default { 'не удалось проверить локальный порт прокси' }
@@ -1758,9 +1767,12 @@ function Get-TgBridgeProcess {
     return $p
 }
 
+function Get-TgBridgeState {
+    if (-not (Get-TgBridgeProcess)) { return 'Stopped' }
+    return (Get-LoopbackPortObservation ([pscustomobject]@{Host='127.0.0.1';Port=(Get-TgConfig).Port})).State
+}
 function Test-TgBridgeRunning {
-    if (-not (Get-TgBridgeProcess)) { return $false }
-    return (Test-PortListening (Get-TgConfig).Port)
+    return (Get-TgBridgeState) -eq 'Open'
 }
 
 # Чей процесс слушает порт на 127.0.0.1 (если порт моста занят чужой программой) - имя или ''
@@ -1856,7 +1868,7 @@ function Test-TelegramDesktop {
 # Telegram настроен на прокси 127.0.0.1:<порт моста> (стучится в него), а там никто не слушает - Telegram без сети
 function Test-TelegramWaitsForProxy {
     $port = (Get-TgConfig).Port
-    if (Test-PortListening $port) { return $false }
+    if ((Get-LoopbackPortObservation ([pscustomobject]@{Host='127.0.0.1';Port=$port})).State -ne 'Closed') { return $false }
     $tg = @(Get-Process -Name 'Telegram' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
     if (-not $tg.Count) { return $false }
     return (@(Get-ProxyClientPids @($port) | Where-Object { $tg -contains $_ }).Count -gt 0)
@@ -1897,10 +1909,9 @@ function Get-LocalProxyPorts {
     return @($ports | Select-Object -Unique)
 }
 
-# Get-NetTCPConnection отвечает около 0,5 с - для шапки меню слишком долго; список слушающих портов из .NET - мгновенно
+# Совместимая bool-оболочка: положительный результат подтверждён; для вывода о закрытии нужен State=Closed.
 function Test-PortListening([int]$Port) {
-    try { return @([System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() | Where-Object { $_.Port -eq $Port }).Count -gt 0 }
-    catch { return $false }
+    return (Get-LoopbackPortObservation ([pscustomobject]@{Host='localhost';Port=$Port})).State -eq 'Open'
 }
 
 # PID программ с TCP-соединениями к 127.0.0.1:<порт прокси>. netstat в разы быстрее Get-NetTCPConnection; состояние
@@ -1958,7 +1969,8 @@ function Get-ProxyStuckApps([switch]$Cached) {
             if ($same) { $known += New-Object PSObject -Property @{ App = $f[0]; Line = $l } }
         }
     }
-    $alive = @($ports | Where-Object { Test-PortListening $_ })
+    $observations = @($ports | ForEach-Object { Get-LoopbackPortObservation ([pscustomobject]@{Host='localhost';Port=$_}) })
+    $alive = @($observations | Where-Object { $_.State -eq 'Open' } | ForEach-Object { $_.Port })
     if ($alive.Count) {
         $ids = @(Get-ProxyClientPids $alive)
         $lines = @($known | ForEach-Object { $_.Line })
@@ -1970,7 +1982,7 @@ function Get-ProxyStuckApps([switch]$Cached) {
             }
         }
         if ($lines.Count -or (Test-Path $file)) { Write-TextNoBom $file (($lines -join "`r`n") + "`r`n") }
-    } elseif ($ports.Count) {
+    } elseif ($ports.Count -and @($observations | Where-Object { $_.State -ne 'Closed' }).Count -eq 0) {
         $stuck = @($known | ForEach-Object { $_.App } | Select-Object -Unique)
         if ($stuck -notcontains 'Steam' -and (Test-SteamProxyLog $ports)) { $stuck += 'Steam' }
     }
@@ -3409,8 +3421,8 @@ function Get-AutotuneBlockers {
     if (-not $w.Count) {
         # системный прокси (Happ и т.п.) тесту не мешает: curl идёт мимо него. Мешает только VPN на весь трафик.
         $info = Get-DirectConnectionInfo
-        if (-not $info) { $w += 'нет интернета (ipwho.is и ipinfo.io не ответили)' }
-        elseif (-not $info.IsRussia) { $w += ('трафик идёт не напрямую: внешний IP не российский (' + $info.CountryCode + ')') }
+        if (-not $info) { $w += 'не удалось определить провайдера; автоподбор отложен, доступность интернета этим не установлена' }
+        elseif (-not $info.IsRussia) { $w += ('страна внешнего IP: ' + $info.CountryCode + '; проверьте маршрут перед автоподбором, геолокация сама по себе не доказывает VPN') }
     }
     return $w
 }
