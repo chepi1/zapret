@@ -14,6 +14,7 @@ $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'netstate.ps1')
 . (Join-Path $PSScriptRoot 'capture.ps1')
+. (Join-Path $PSScriptRoot 'linkguard.ps1')
 . (Join-Path $PSScriptRoot 'recovery.ps1')
 . (Join-Path $PSScriptRoot 'selection.ps1')
 . (Join-Path $PSScriptRoot 'processmetrics.ps1')
@@ -507,7 +508,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/capture.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/capture.ps1','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
@@ -927,7 +928,7 @@ function New-BypassArgList {
             # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
             $memoryName=if($Family){$Name+'_'+$Family}else{$Name}
             $stateArg = if ($Learn -and $Script:RingPersistAllowed) { ':context=network-context.txt:state=' + (Get-RingStateName $memoryName $ring) } else { '' }
-            $memArgs = if ($Learn) { ':key=' + $memoryName + $stateArg + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
+            $memArgs = if ($Learn) { ':key=' + $memoryName + $stateArg + ':link_guard=link-guard.txt:success_detector=ring_success:failure_detector=ring_failure' } else { '' }
             $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
             $n = 0

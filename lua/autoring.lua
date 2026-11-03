@@ -18,6 +18,33 @@ local RING_MAX_RECORDS = 2000
 local memory = {}
 local RING_STARTED = os.time()
 local network_cache = { checked=-math.huge, revision=0 }
+local link_cache = { checked=-math.huge, revision=0, event=0, deadline=0 }
+
+-- Отдельный короткий lease: сбой наблюдателя не может навсегда остановить обучение.
+function ring_link_guard(text, now, started)
+	if type(text)~="string" or #text>64 then return nil end
+	local stamp, event, until_time = text:match("^1 (%d+) (%d+) (%d+)\n$")
+	stamp, event, until_time = tonumber(stamp), tonumber(event), tonumber(until_time)
+	if not stamp or not event or not until_time or stamp>now or now-stamp>10 or (started and stamp<=started) or event>stamp or ((event==0)~=(until_time==0)) or (until_time~=0 and until_time<event) or until_time>stamp+20 then return nil end
+	return event, until_time, stamp
+end
+local function ring_link_context(desync)
+	if desync.arg.link_guard~="link-guard.txt" then return 0, false end
+	local mono=clock_getfloattime()
+	if mono<link_cache.checked or mono-link_cache.checked>=1 then
+		local now=os.time()
+		local event, until_time, stamp
+		local dir=os.getenv("WRITABLE")
+		if dir then
+			local ok,text=pcall(readfile,dir.."/link-guard.txt")
+			if ok then event,until_time,stamp=ring_link_guard(text,now,RING_STARTED) end
+		end
+		if event and event~=0 and event~=link_cache.event then link_cache.revision=link_cache.revision+1;link_cache.event=event end
+		link_cache.deadline=event and mono+math.max(0,math.min(until_time,stamp+10)-now) or 0
+		link_cache.checked=mono
+	end
+	return link_cache.revision, mono<link_cache.deadline
+end
 
 -- Маркер задаёт только непрозрачный сетевой ключ, не путь и не код. Старый процесс/watchdog не разрешает новую память.
 function ring_network_key(text, now, started)
@@ -233,6 +260,9 @@ end
 local function ring_skip(desync, crec)
 	if crec.nocheck then return true end
 	local w = ring_conn(desync, crec)
+	local link_revision, paused=ring_link_context(desync)
+	if w.link_revision==nil then w.link_revision=link_revision;w.link_tainted=paused end
+	if paused or w.link_tainted or w.link_revision~=link_revision then crec.nocheck=true;return true end
 	if w.revision~=nil and w.revision~=ring_mem(desync).revision then crec.nocheck=true; return true end
 	if w.strategy and w.strategy~=w.hrec.nstrategy then
 		DLOG("ring: connection started with strategy "..w.strategy..", '"..w.key.."' is at "..tostring(w.hrec.nstrategy)..". not counted")

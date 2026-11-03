@@ -51,6 +51,8 @@ Initialize-RingDir
 $marker=Get-PkgPath ($Script:RingDir+'/network-context.txt')
 $seed=Get-NetworkWatchRecord $known $known $now
 Write-NetworkWatchRecord $marker $seed | Out-Null
+$linkMarker=Get-PkgPath ($Script:RingDir+'/link-guard.txt');$linkSeed=('1 '+(ConvertTo-LinkEpoch $now)+" 0 0`n")
+Write-LinkGuardRecord $linkMarker $linkSeed | Out-Null
 $lease=[IO.File]::Open((Join-Path $Script:Runtime 'network-watch.lock'),'OpenOrCreate','ReadWrite','Read')
 $child=$null
 try{
@@ -59,6 +61,7 @@ try{
     $child=Microsoft.PowerShell.Management\Start-Process -FilePath $ps -ArgumentList $args0 -WindowStyle Hidden -PassThru
     if(-not $child.WaitForExit(10000)){throw 'Duplicate watchdog did not exit'}
     Check 'duplicate publisher leaves active marker intact' ($child.ExitCode -eq 0 -and [IO.File]::ReadAllText($marker) -ceq $seed)
+    Check 'duplicate publisher leaves active link guard intact' ([IO.File]::ReadAllText($linkMarker) -ceq $linkSeed)
 }finally{
     if($child -and -not $child.HasExited){Microsoft.PowerShell.Management\Stop-Process -Id $child.Id -Force}
     $lease.Dispose()

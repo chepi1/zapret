@@ -56,10 +56,14 @@ function Get-NetworkWatchRecord($Before,$After,[datetime]$Now=[datetime]::UtcNow
 }
 
 function Write-NetworkWatchRecord([string]$Path,[string]$Record) {
+    if($Record.Length -gt 128 -or $Record -notmatch '^3 \d+ (?:[A-F0-9]{64} [A-F0-9]{24}|- -)\n$'){return $false}
+    return Write-WatchRecordFile $Path $Record
+}
+function Write-WatchRecordFile([string]$Path,[string]$Record) {
     $temp=$Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
     try{
         $bytes=[Text.Encoding]::ASCII.GetBytes($Record)
-        if($bytes.Length -gt 128 -or $Record -notmatch '^3 \d+ (?:[A-F0-9]{64} [A-F0-9]{24}|- -)\n$'){return $false}
+        if($bytes.Length -gt 128){return $false}
         $stream=[IO.File]::Open($temp,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
         try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
         if([IO.File]::Exists($Path)){[IO.File]::Replace($temp,$Path,[NullString]::Value)}else{[IO.File]::Move($temp,$Path)}

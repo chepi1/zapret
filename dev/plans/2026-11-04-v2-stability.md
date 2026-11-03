@@ -41,16 +41,24 @@ Interfaces: Get-CaptureExclusion(string[] Lines) returns null or Count/Cidrs/IpA
 
 Files: tools/linkguard.ps1, tools/netwatch.ps1, tools/lib.ps1, lua/autoring.lua, dev/tests/linkguardtest.ps1, dev/tests/linkguardtest.lua, dev/tests/lua-unit.py, dev/tests/watchtest.ps1.
 
-Interfaces: Get-WifiLinkObservation() produces Known/Interfaces(Id,Up,HasGateway); Get-WifiWatchScope(State,Observation) scopes WLAN events; Get-WifiDisconnectEpoch(Ids,Now) reads only recent bounded local events; Get-WifiInterruptionState(State,Observation,EventEpoch,Now) pure reducer; Get-LinkGuardRecord(State,Now) produces bounded protocol1. Native Lua parser and cached generation/lease gate are opt-in via :link_guard=link-guard.txt on learning profiles only. Task1 shares only lib imports/input hash; no functional dependency.
+Interfaces: Get-WifiLinkObservation(TrackedIds=[]) produces Known/Interfaces(Id,Up,HasGateway), only routed Wi-Fi and retained tracked interfaces; Get-WifiWatchScope(State,Observation) scopes WLAN events; Get-WifiDisconnectEpoch(Ids,Now) reads only recent bounded local events; Get-WifiInterruptionState(State,Observation,EventEpoch,Now) pure reducer; Get-LinkGuardRecord(State,Now) produces bounded protocol1. Native Lua parser and cached generation/lease gate are opt-in via :link_guard=link-guard.txt on learning profiles only. Task1 shares only lib imports/input hash; no functional dependency.
 
-- [ ] RED: link transition/scoped event/unknown/expiry tests and real Lua detector integration.
-- [ ] GREEN: implement local observer/reducer/atomic publisher and connection tainting.
-- [ ] Focused tests, full offline suite, independent review; record skips and local integration.
+- [x] RED: link transition/scoped event/unknown/expiry tests and real Lua detector integration.
+- [x] GREEN: implement local observer/reducer/atomic publisher and connection tainting.
+- [x] Focused tests, full offline suite, independent review; record skips and local integration.
 
 ## Verification ledger
 
 Pre-flight: shared interfaces — lib.ps1 imports capture/linkguard and fingerprints both; Task2 leaves Task1 profile exclusion contract intact. Existing network-context protocol3 and legacy Lua calls remain compatible. Tests use TEMP package copies. Plan and ledger follow existing dev/plans convention; no separate workspace artifacts are needed outside ignored dist.
 
 Task1 complete (base efec02d, local capture commit): RED missing compiler in dist/v2-capture-red.log; GREEN capturetest and80 actual native packet cases in dist/v2-capture-capturetest.log. check/profiletest/astlint exit0; command line26546 chars. Bundled engine exports complete before/after filters with --wf-save in --dry-run; WinDivert DLL compiles/evaluates them without opening the driver. First candidate used group negation rejected by the real filter parser; De Morgan field tests match the documented grammar and pass exact boundary/TCP/inbound/IPv6 matrix. Files, malformed/mixed/large fallback, and later source edits verified. No live traffic intercepted and no measured latency claim.
+
+Task1 committed479c59a. Task2 base479c59a: RED missing reducer/parser in dist/v2-linkguard-red.log and v2-linkguard-lua-red.log. GREEN pure PS/event-XML tests plus real Lua detector integration; actual TEMP watcher loop publishes both markers from mocked observations. Duplicate watcher cannot overwrite either marker. Focused watchtest/watchluatest/contexttest/check/astlint exit0, CLI26624 chars. Native traffic interception and adapter disconnects were not performed.
+
+Real read-only API check exposed21 Windows Wi-Fi interface records, mostly inactive/virtual; the first16-total-interface cap returned Unknown incorrectly. RED fixture with25 inactive virtual adapters plus Wi-Fi Direct captured it. Corrected observation retains routed Wi-Fi and explicitly tracked interfaces, with active scopes first; cap applies to relevant interfaces. dist/v2-linkguard-virtual-green.log passes; actual API then reports Known=true,1 relevant/scoped interface. No raw interface identities exported and no event log enabled. Observer query failure remains Unknown.
+
+Final verification: dist/v2-stability-all.log, PS5.1 dev/tests/run-all.ps1 -Offline, exit0,41 groups,0 failed groups. Includes80 actual native packet-filter cases and developer Lua integration for generation/taint/expiry; native-admin Lua/store I/O/actual guard timer expiry remain explicit skips. No live Wi-Fi disruption, bypass restart, routing or adapter changes. In a separate3-call local observation sample, cold wall169ms and warm13–15ms; CPU counters are coarse, not a game benchmark. Existing5s watcher cadence retained.
+
+Final independent read-only review of efec02d through current Task2 found no actionable findings or deferred minors. Checked real circular nocheck semantics, immutable capture exclusions, heartbeat bounds, event scope, old-connection tainting and private marker contents. git diff --check clean. Current engine/watcher processes are not hot-reloaded or restarted by this development phase; activation on a later controlled startup/update must account for already-running watcher versions. Changes retained locally in codex/v2, no v2 publication.
 
 Sources inspected: [bol-van manual](https://github.com/bol-van/zapret2/blob/master/docs/manual.md), blob c5dd63257fde6eeda5dadb92c951f88ecc749e94; [WinDivert helpers](https://github.com/basil00/WinDivert/blob/master/doc/windivert.html), blob eab15d9fd0a8570dfbbd63fa4c4e4102f37ad6c8. Microsoft Windows administrative guidance identifies WLAN8003 as successful disconnection; tests use XML InterfaceGuid, never localized message text.
