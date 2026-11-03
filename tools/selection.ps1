@@ -102,7 +102,8 @@ function Write-ProbeJournal([string]$Path,[hashtable]$Metadata,$Rows,[ValidateRa
     foreach ($row in $Rows) {
         $entry=[ordered]@{Schema=1;RunId=$Metadata['RunId'];Seed=$Metadata['Seed'];Sequence=$Metadata.Sequence;Round=$Metadata['Round'];Stage=$Metadata['Stage'];StrategyId=$Metadata['StrategyId'];StrategyHash=$Metadata['StrategyHash'];CapturedNetworkKey=$Metadata['NetworkKey'];CapturedInputsHash=$Metadata['InputsHash'];Attempt=$Attempt;CapturedUtc=$captured
             Group=(Get-ProbeField $row 'Group');Name=(Get-ProbeField $row 'Name');TargetKey=(Get-ProbeKey $row);State=(Get-ProbeField $row 'State');Code=(Get-ProbeField $row 'Code');Exit=(Get-ProbeMetric $row 'Exit');Up=(Get-ProbeMetric $row 'Up');Down=(Get-ProbeMetric $row 'Down')
-            ConnMs=(Get-ProbeMetric $row 'ConnMs');TlsMs=(Get-ProbeMetric $row 'TlsMs');DnsMs=(Get-ProbeMetric $row 'DnsMs');FirstByteMs=(Get-ProbeMetric $row 'FirstByteMs');TotalMs=(Get-ProbeMetric $row 'TotalMs');StartedUtc=(Get-ProbeField $row 'StartedUtc');ObservedUtc=(Get-ProbeField $row 'ObservedUtc');ControlUncontaminated=$Metadata['ControlUncontaminated']}
+            ConnMs=(Get-ProbeMetric $row 'ConnMs');TlsMs=(Get-ProbeMetric $row 'TlsMs');DnsMs=(Get-ProbeMetric $row 'DnsMs');FirstByteMs=(Get-ProbeMetric $row 'FirstByteMs');TotalMs=(Get-ProbeMetric $row 'TotalMs');StartedUtc=(Get-ProbeField $row 'StartedUtc');ObservedUtc=(Get-ProbeField $row 'ObservedUtc');ControlUncontaminated=$Metadata['ControlUncontaminated']
+            StartedMs=(Get-ProbeMetric $row 'StartedMs');ObservedMs=(Get-ProbeMetric $row 'ObservedMs');ComparisonSlot=$Metadata['ComparisonSlot'];ComparisonBlock=$Metadata['ComparisonBlock'];ComparisonKind=$Metadata['ComparisonKind'];ComparisonArm=$Metadata['ComparisonArm']}
         [void]$lines.AppendLine(($entry | ConvertTo-Json -Compress))
     }
     $text=$lines.ToString()

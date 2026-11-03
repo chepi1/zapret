@@ -10,7 +10,8 @@
 # -ReportOnly: только отчёт (для проверки провайдера), настройки и круги не меняем.
 # -KeepPrimary: обновить проверенный рейтинг и круги, сохранив выбранную основную (для автонастройки).
 # -Full: все стратегии, иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
-param([int]$TimeoutSec = 5, [int]$Parallel = 16, [ValidateRange(1,10)][int]$Rounds = 1, [ValidateRange(-1,2147483647)][int]$Seed = -1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full)
+param([int]$TimeoutSec = 5, [int]$Parallel = 16, [ValidateRange(1,10)][int]$Rounds = 1, [ValidateRange(-1,2147483647)][int]$Seed = -1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full,
+    [string]$CompareA='', [string]$CompareB='', [ValidateRange(4,12)][int]$CompareBlocks=4)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
@@ -123,8 +124,10 @@ function Convert-CurlResult($Item) {
         $value=0.0;$index=$indices[$key]
         if ($parts.Count -gt $index -and [double]::TryParse($parts[$index],[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$value) -and -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and $value -ge 0) { $extra[$key]=[math]::Round($value*1000) }
     }
-    $startedUtc=$null
+    $startedUtc=$null;$startedMs=$null
     if ($Item.PSObject.Properties['Started']) { try { $startedUtc=([datetime]$Item.Started).ToUniversalTime().ToString('o') } catch { } }
+    if ($Item.PSObject.Properties['StartedTicks']) { $startedMs=1000.0*$Item.StartedTicks/[Diagnostics.Stopwatch]::Frequency }
+    $observedMs=1000.0*[Diagnostics.Stopwatch]::GetTimestamp()/[Diagnostics.Stopwatch]::Frequency
     $state = 'FAIL'
     if ($exit -eq 6) { $state = 'NA' }                                   # домен не резолвится: адрес не учитываем
     elseif ($code -ne '000') { $state = 'OK' }
@@ -133,13 +136,20 @@ function Convert-CurlResult($Item) {
     return New-Object PSObject -Property @{
         Group = $Item.T.Group; Name = $Item.T.Name; Url = $Item.T.Url; State = $state; Code = $code; Exit = $exit
         Up = $up; Down = $down; ConnMs = [math]::Round($conn * 1000); TlsMs = [math]::Round($tls * 1000)
-        DnsMs=$extra.DnsMs;FirstByteMs=$extra.FirstByteMs;TotalMs=$extra.TotalMs;StartedUtc=$startedUtc;ObservedUtc=[datetime]::UtcNow.ToString('o')
+        DnsMs=$extra.DnsMs;FirstByteMs=$extra.FirstByteMs;TotalMs=$extra.TotalMs;StartedUtc=$startedUtc;ObservedUtc=[datetime]::UtcNow.ToString('o');StartedMs=$startedMs;ObservedMs=$observedMs
         Tries = 1; Flaky = $false
     }
 }
 
 # Запускает curl.exe параллельно (не больше $Width, по умолчанию $Parallel, одновременно) и собирает результаты.
-function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]$Control) {
+function Assert-ProbeDeadline([long]$DeadlineTicks) {
+    if ($DeadlineTicks -gt 0 -and [Diagnostics.Stopwatch]::GetTimestamp() -ge $DeadlineTicks) {
+        $deadlineError=New-Object TimeoutException('Достигнут общий дедлайн запросов.')
+        $deadlineError.Data['Kind']='RunDeadline'
+        throw $deadlineError
+    }
+}
+function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]$Control, [long]$DeadlineTicks = 0) {
     if ($Width -le 0) { $Width = $Parallel }
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
@@ -147,8 +157,11 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
     foreach ($t in $Targets) { $queue.Enqueue($t) }
     $running = New-Object System.Collections.ArrayList
     $results = @()
+    try {
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+        Assert-ProbeDeadline $DeadlineTicks
         while ($queue.Count -gt 0 -and $running.Count -lt $Width) {
+            Assert-ProbeDeadline $DeadlineTicks
             $t = $queue.Dequeue()
             $a = '-s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4' +
                  ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect} %{time_namelookup} %{time_starttransfer} %{time_total}"'
@@ -161,21 +174,37 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
             $psi.UseShellExecute = $false
             $psi.CreateNoWindow = $true
             $psi.RedirectStandardOutput = $true
+            $startedTicks=[Diagnostics.Stopwatch]::GetTimestamp()
             $p = [System.Diagnostics.Process]::Start($psi)
-            [void]$running.Add((New-Object PSObject -Property @{ T = $t; P = $p; Out = $p.StandardOutput.ReadToEndAsync(); Started = (Get-Date) }))
+            [void]$running.Add((New-Object PSObject -Property @{ T = $t; P = $p; Out = $p.StandardOutput.ReadToEndAsync(); Started = (Get-Date);StartedTicks=$startedTicks }))
         }
         Start-Sleep -Milliseconds 100
+        Assert-ProbeDeadline $DeadlineTicks
         for ($i = $running.Count - 1; $i -ge 0; $i--) {
             $r = $running[$i]
-            if ($r.P.HasExited -or ((Get-Date) - $r.Started).TotalSeconds -gt ($TimeoutSec + 5)) {
-                if (-not $r.P.HasExited) { try { $r.P.Kill() } catch { } }
-                $r.P.WaitForExit()
+            if ($r.P.HasExited -or ([Diagnostics.Stopwatch]::GetTimestamp()-$r.StartedTicks)/[double][Diagnostics.Stopwatch]::Frequency -gt ($TimeoutSec + 5)) {
+                if (-not $r.P.HasExited) { $r.P.Kill() }
+                if (-not $r.P.WaitForExit(1000)) { throw 'curl не завершился после остановки.' }
                 $results += Convert-CurlResult $r
+                $r.P.Dispose()
                 $running.RemoveAt($i)
             }
         }
     }
     return $results
+    } catch {
+        $failure=$_
+        $failure.Exception.Data['ProbeProcessIds']=@($running | ForEach-Object { $_.P.Id })
+        $cancelled=@()
+        foreach ($r in $running) {
+            try { if (-not $r.P.HasExited) { $r.P.Kill() };[void]$r.P.WaitForExit(1000) } catch { }
+            $cancelled+=[pscustomobject]@{Group=$r.T.Group;Name=$r.T.Name;Url=$r.T.Url;State='CANCELLED';StartedMs=(1000.0*$r.StartedTicks/[Diagnostics.Stopwatch]::Frequency);ObservedMs=(1000.0*[Diagnostics.Stopwatch]::GetTimestamp()/[Diagnostics.Stopwatch]::Frequency);StartedUtc=$r.Started.ToUniversalTime().ToString('o');ObservedUtc=[datetime]::UtcNow.ToString('o')}
+        }
+        $failure.Exception.Data['Rows']=@($results)+$cancelled
+        throw
+    } finally {
+        foreach ($r in $running) { try { if (-not $r.P.HasExited) { $r.P.Kill() };[void]$r.P.WaitForExit(1000) } finally { $r.P.Dispose() } }
+    }
 }
 
 function Invoke-ControlWindow($Targets,[string]$PostFile,[string]$JournalFile,[hashtable]$Metadata,[switch]$Warmup) {
@@ -343,7 +372,108 @@ function Format-Summary($S, [string]$Prefix = '', [switch]$NoName) {
     return $line
 }
 
+# Explicit shadow mode shares the controller/finally, but never enters the normal scoring/apply path.
+function New-FinalistExperimentSpec([hashtable]$Settings,$Targets,[string]$AId,[string]$BId,[int]$PlanSeed,[int]$Blocks) {
+    if ($TimeoutSec -lt 1 -or $Parallel -lt 1) { throw 'Неверный тайм-аут или параллельность сравнения.' }
+    $all=@(Get-Strategies | Where-Object { $_.Missing.Count -eq 0 })
+    $a=@($all | Where-Object { $_.Id -eq $AId });$b=@($all | Where-Object { $_.Id -eq $BId })
+    if ($a.Count -ne 1 -or $b.Count -ne 1 -or $AId -eq $BId) { throw 'Для сравнения нужны две различные доступные стратегии: -CompareA ID -CompareB ID.' }
+    $fixed=$Settings.Clone();$fixed.auto='no'
+    $network=Get-NetworkObservation
+    $context=Get-TestResultContext $fixed $network
+    if ($null -eq $context) { throw 'Контекст сети неизвестен; достоверное сравнение сейчас невозможно.' }
+    $parameters=@{Mode='finalists-v1';TimeoutSec=$TimeoutSec;Parallel=([math]::Min(4,$Parallel));Blocks=$Blocks;Configuration=$context.InputsHash;Settings=(@($fixed.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$fixed[$_] }) -join '|')}
+    $inputs=Get-ScoreInputsHash $Targets $parameters
+    if ($PlanSeed -lt 0) { $PlanSeed=Get-Random -Minimum 0 -Maximum ([int]::MaxValue) }
+    $plan=New-FinalistPlan $AId $BId (Get-StrategyFingerprint $AId) (Get-StrategyFingerprint $BId) $Targets $network.Key $inputs $PlanSeed $Blocks ([guid]::NewGuid().ToString('N'))
+    foreach ($id in @($AId,$BId)) {
+        $dry=Test-ConfigDry $fixed $id -NoAuto
+        if (-not $dry.Ok) { throw ('Конфигурация сравнения отклонена до остановки обхода: '+$dry.Output) }
+    }
+    return [pscustomobject]@{Plan=$plan;Parameters=$parameters;Network=$network;Settings=$fixed;AName=$a[0].Name;BName=$b[0].Name}
+}
+function Write-FinalistArtifact([string]$Path,[string]$Text) {
+    $stream=[IO.File]::Open($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+    try { $bytes=[Text.Encoding]::UTF8.GetBytes($Text);$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true) } finally { $stream.Dispose() }
+}
+function Assert-FinalistExperiment($Plan,$Targets,[hashtable]$Parameters,$NetworkBefore,[hashtable]$Settings,$Clock) {
+    if ($Clock.Elapsed.TotalMinutes -ge 30) { throw 'Достигнут предел сравнения:30 минут; результат не применяется.' }
+    Assert-BypassControlAllowed
+    $current=$Parameters.Clone()
+    $current.Configuration=Get-ProbeField (Get-TestResultContext $Settings (Get-NetworkObservation)) 'InputsHash'
+    if (-not (Test-ScoreInputs $Plan.CapturedInputsHash $Targets $current @{$Plan.AId=$Plan.AHash;$Plan.BId=$Plan.BHash} -NetworkBefore $NetworkBefore)) { throw 'Сеть или файлы изменились во время сравнения; результат отклонён.' }
+}
+function Invoke-FinalistBatch($Targets,[string]$PostFile,[int]$Width,[long]$DeadlineTicks,[string]$JournalFile,[hashtable]$Metadata,[int]$Attempt) {
+    try {
+        $rows=@(Invoke-CurlBatch $Targets $PostFile $Width -DeadlineTicks $DeadlineTicks)
+        Write-ProbeJournal $JournalFile $Metadata $rows $Attempt
+        return $rows
+    } catch {
+        if ($_.Exception.Data.Contains('Rows')) {
+            $aborted=$Metadata.Clone();$aborted.Stage='comparison-aborted'
+            Write-ProbeJournal $JournalFile $aborted $_.Exception.Data['Rows'] $Attempt
+        }
+        throw
+    }
+}
+function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFile,$Plan,[hashtable]$InputsParameters,$NetworkBefore,[ref]$ActiveProcess) {
+    $fixed=$Settings.Clone();$fixed.auto='no'
+    $width=[math]::Min(4,$Parallel)
+    $lifetime=Get-TestInstanceLifetimeMs @($Targets).Count $width $TimeoutSec
+    $clock=[Diagnostics.Stopwatch]::StartNew()
+    $deadlineTicks=[Diagnostics.Stopwatch]::GetTimestamp()+[long]([Diagnostics.Stopwatch]::Frequency*1800.0)
+    $base=Join-Path $Script:Runtime ('comparison-'+$Plan.RunId)
+    $planFile=$base+'.plan.json';$journalFile=$base+'.attempts.jsonl';$resultFile=$base+'.result.json'
+    foreach ($path in @($planFile,$journalFile,$resultFile)) { if (Test-Path -LiteralPath $path) { throw 'Такой RunId уже существует; свидетельства не перезаписаны.' } }
+    Write-FinalistArtifact $planFile ($Plan | ConvertTo-Json -Depth 8)
+    Write-FinalistArtifact $journalFile ''
+    $metadata=@{RunId=$Plan.RunId;Seed=$Plan.Seed;Sequence=0;Round=0;NetworkKey=$Plan.CapturedNetworkKey;InputsHash=$Plan.CapturedInputsHash}
+    foreach ($slot in $Plan.Slots) {
+        Assert-FinalistExperiment $Plan $Targets $InputsParameters $NetworkBefore $fixed $clock
+        if (@(Get-OurProcesses).Count) { throw 'Перед следующим запуском остался процесс обхода; сравнение прервано.' }
+        $metadata.StrategyId=$slot.StrategyId;$metadata.StrategyHash=$slot.StrategyHash
+        $metadata.ComparisonSlot=$slot.Index;$metadata.ComparisonBlock=$slot.Block;$metadata.ComparisonKind=$slot.Kind;$metadata.ComparisonArm=$slot.Arm
+        Write-Color ('Сравнение: запуск '+$slot.Index+'/'+$Plan.Slots.Count+' ('+$slot.Kind+', '+$slot.Arm+').') Gray
+        try {
+            $remainingMs=[math]::Floor(1000.0*($deadlineTicks-[Diagnostics.Stopwatch]::GetTimestamp())/[Diagnostics.Stopwatch]::Frequency)
+            if ($remainingMs -lt 1000) { throw 'Недостаточно времени для следующего запуска.' }
+            $ActiveProcess.Value=Start-TestInstance $fixed $slot.StrategyId -Final -LifetimeMs ([int][math]::Min($lifetime,$remainingMs))
+            if (-not $ActiveProcess.Value -or $ActiveProcess.Value.HasExited) { throw 'Тестовый движок не запустился.' }
+            foreach ($stage in @('comparison-warmup','comparison')) {
+                $metadata.Stage=$stage
+                $rows=@(Invoke-FinalistBatch $Targets $PostFile $width $deadlineTicks $journalFile $metadata 1)
+                if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился во время запросов.' }
+                Assert-FinalistExperiment $Plan $Targets $InputsParameters $NetworkBefore $fixed $clock
+            }
+            $again=@($Targets | Where-Object { $key=Get-ProbeKey $_;@($rows | Where-Object { (Get-ProbeKey $_) -ceq $key -and $_.State -ne 'OK' }).Count -gt 0 })
+            if ($again.Count) {
+                $retry=@(Invoke-FinalistBatch $again $PostFile $width $deadlineTicks $journalFile $metadata 2)
+                if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился во время повторных запросов.' }
+            }
+        } finally {
+            if ($ActiveProcess.Value) {
+                if (-not $ActiveProcess.Value.HasExited) { Stop-Process -Id $ActiveProcess.Value.Id -Force -ErrorAction Stop }
+                if (-not $ActiveProcess.Value.WaitForExit(5000)) { throw 'Тестовый процесс не завершился; его PID сохранён для очистки.' }
+                $ActiveProcess.Value=$null
+            }
+        }
+        Assert-FinalistExperiment $Plan $Targets $InputsParameters $NetworkBefore $fixed $clock
+    }
+    $evidence=@([IO.File]::ReadLines($journalFile) | ForEach-Object { $_ | ConvertFrom-Json })
+    # Published only after every slot's liveness/context check and PID cleanup succeeded.
+    $completion=New-FinalistCompletion $Plan $evidence
+    $line=($completion | ConvertTo-Json -Compress)+"`n"
+    if ((Get-Item -LiteralPath $journalFile).Length+[Text.Encoding]::UTF8.GetByteCount($line) -gt 67108864) { throw 'Недостаточно места в бюджете журнала для подтверждения завершения.' }
+    [IO.File]::AppendAllText($journalFile,$line,(New-Object Text.UTF8Encoding($false)))
+    $evidence+=$completion
+    $assessment=Get-FinalistAssessment $Plan $evidence
+    Write-FinalistArtifact $resultFile ($assessment | ConvertTo-Json -Depth 10)
+    return [pscustomobject]@{Assessment=$assessment;PlanFile=$planFile;JournalFile=$journalFile;ResultFile=$resultFile}
+}
+
 # ---------------- main ----------------
+$comparisonMode=[bool]($CompareA -or $CompareB)
+if ($comparisonMode -and ($CompareA -notmatch '^\d+$' -or $CompareB -notmatch '^\d+$' -or $CompareA -eq $CompareB -or $CompareBlocks%2)) { throw 'Нужны два разных ID (-CompareA/-CompareB) и чётное число блоков4..12.' }
 
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add('zapret v' + $Script:Version + ' - автоподбор ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
@@ -381,6 +511,8 @@ if ($targets.Count -eq 0) { Write-Color 'Нет адресов для прове
 $postFile = Get-PostFile
 
 $settings = Get-Settings
+$comparisonSpec=$null
+if ($comparisonMode) { $comparisonSpec=New-FinalistExperimentSpec $settings $targets $CompareA $CompareB $Seed $CompareBlocks }
 if (-not (Enter-BypassControl 'strategy-test')) { Write-Color 'Автоподбор отложен: другая операция управляет обходом.' Yellow; exit 1 }
 $wasRunning = @(Get-OurProcesses).Count -gt 0
 # Дальше обход выключен. Что бы ни случилось - ошибка, отказ winws2, Ctrl+C посреди теста, - тестовый winws2 не
@@ -388,6 +520,13 @@ $wasRunning = @(Get-OurProcesses).Count -gt 0
 $p = $null
 try {
     Stop-Bypass
+    if ($comparisonMode) {
+        Write-Color ('Фиксированные стратегии, автосмена выключена: A='+$comparisonSpec.AName+'; B='+$comparisonSpec.BName+'.') Cyan
+        $comparison=Invoke-FinalistExperiment $comparisonSpec.Settings $targets $postFile $comparisonSpec.Plan $comparisonSpec.Parameters $comparisonSpec.Network ([ref]$p)
+        Write-Color ('Shadow-результат: '+$comparison.Assessment.Status+'. Настройки и рейтинг не применяются.') Cyan
+        Write-Color ('Отчёт: '+$comparison.ResultFile) Gray
+        exit 0
+    }
     Enable-TcpTimestamps
     Update-RuntimeLists | Out-Null
 
