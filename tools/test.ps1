@@ -206,9 +206,22 @@ function Merge-Retry($Rows, $Retry) {
     return $Rows
 }
 
-function Start-TestInstance([hashtable]$Settings, [string]$Alt) {
+function Test-FinalCandidateRows($Expected, $Actual) {
+    $required = @($Expected | Where-Object { $_.State -eq 'OK' })
+    $failed = @()
+    foreach ($row in $required) {
+        $matches = @($Actual | Where-Object { $_.Group -eq $row.Group -and $_.Name -eq $row.Name })
+        if (-not $matches.Count -or @($matches | Where-Object { $_.State -ne 'OK' -or ($row.Group -eq 'Clean' -and $_.TlsMs -gt $row.TlsMs + 500) }).Count) {
+            $failed += ($row.Group + '/' + $row.Name)
+        }
+    }
+    return [pscustomobject]@{ Ok=($required.Count -gt 0 -and $failed.Count -eq 0); Failed=@($failed | Select-Object -Unique) }
+}
+
+function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final) {
     Assert-BypassControlAllowed
-    $cmd = Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any'
+    $cmd = if ($Final) { Get-BypassCmdLine -Settings $Settings -Name 'final-check' -Alt $Alt }
+           else { Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any' }
     # winws2 (cygwin) изредка падает при старте без причины - тогда стратегия выпадала из теста. Пробуем до трёх раз.
     for ($try = 1; $try -le 3; $try++) {
         Assert-BypassControlAllowed
@@ -532,7 +545,7 @@ try {
     Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
     Write-TextNoBom (Join-Path $Script:Runtime 'test-best.txt') ($best.Id + "`r`n")
     # рейтинг для круга автосмены: порядок по "пробито минус вред", слабые в круг не попадают
-    if ($base) { Save-TestRank $base $alts; Save-TestCover $table }
+    # Рейтинг и круги публикуются только после проверки рабочей комбинации ниже.
     Write-Color ('Отчёт сохранён: ' + $repFile) Gray
 
     $apply = $true
@@ -553,10 +566,53 @@ try {
         }
         $apply = Read-YesNo ("Сделать {0} основной?" -f $pick.Name)
     }
-    if ($apply) {
-        $settings.alt = $pick.Id
-        Save-Settings $settings
-        Write-Color ("Основная стратегия: {0}." -f $pick.Name) Green
+    if (-not $ReportOnly) {
+        $candidate = $settings.Clone()
+        if ($apply) { $candidate.alt = $pick.Id }
+        $previous = @{}
+        foreach ($file in @($Script:RankFile, $Script:CoverFile)) {
+            $path = Get-PkgPath $file
+            $previous[$path] = if (Test-Path -LiteralPath $path) { [IO.File]::ReadAllBytes($path) } else { $null }
+        }
+        $accepted = $false
+        try {
+            if ($base) { Save-TestRank $base $alts; Save-TestCover $table }
+            $Script:RingCache = @{}
+            Assert-BypassControlAllowed
+            if (-not $table.ContainsKey($candidate.alt)) { throw 'Рабочая стратегия не была измерена в этом прогоне.' }
+            Write-Color 'Проверяю итоговую комбинацию с рабочими списками, IPSet и автосменой...' Cyan
+            $p = Start-TestInstance $candidate $candidate.alt -Final
+            if (-not $p) { throw 'Итоговая конфигурация не запустилась; прежние настройки сохраняются.' }
+            $finalRows = @(Invoke-CurlBatch $targets $postFile)
+            $expected = @($table[$candidate.alt]) + @($table['0'] | Where-Object { $_.Group -eq 'Clean' })
+            $check = Test-FinalCandidateRows $expected $finalRows
+            if ($p.HasExited) { throw 'Процесс завершился во время итоговой проверки.' }
+            Stop-Process -Id $p.Id -Force -ErrorAction Stop
+            if (-not $p.WaitForExit(5000)) { throw 'Не удалось остановить итоговую проверку.' }
+            $p = $null
+            if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) { throw 'Входные файлы изменились во время итоговой проверки.' }
+            if (-not $check.Ok) { throw ('Итоговая комбинация не подтверждена: ' + ($check.Failed -join ', ')) }
+            Assert-BypassControlAllowed
+            if ($apply) { Save-Settings $candidate; $settings = $candidate }
+            $accepted = $true
+            $finalLine = 'Итоговая комбинация подтверждена в рабочем режиме.'
+        } catch {
+            $apply = $false
+            $finalLine = 'Итоговая проверка отклонена; прежний рейтинг сохранён. ' + $_.Exception.Message
+        } finally {
+            if (-not $accepted) {
+                foreach ($path in $previous.Keys) {
+                    if ($null -eq $previous[$path]) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }
+                    else { [IO.File]::WriteAllBytes($path, $previous[$path]) }
+                }
+                $Script:RingCache = @{}
+            }
+        }
+        Write-Color $finalLine $(if ($accepted) { 'Green' } else { 'Yellow' })
+        $report.Add($finalLine)
+        Write-TextNoBom $repFile (($report -join "`r`n") + "`r`n")
+        Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
+        if ($p) { throw 'Итоговый процесс требует завершения; восстановление выполняется в finally.' }
     }
     $inRing = @()
     foreach ($sec in @('general', 'google', 'discord_media', 'game_tcp')) { $inRing += @(Get-RotationOrder $settings.alt $sec | ForEach-Object { $_.Id }) }
@@ -564,7 +620,7 @@ try {
     Write-Color ('Круг автосмены для сайтов: ' + ((Get-RotationOrder $settings.alt 'general' | ForEach-Object { $_.Name }) -join ' > ')) Gray
     foreach ($x in @(Get-RingsText $settings)) { Write-Color ('Свой круг - ' + $x) Gray }
     if ($outRing.Count) { Write-Color ('Слабые на вашем провайдере, ни в один круг не входят: ' + ($outRing -join ', ')) Gray }
-    if ($ReportOnly) { Write-Color 'Круг применится, когда обход будет запущен или перезапущен.' DarkGray }
+    if ($ReportOnly) { Write-Color 'Режим отчёта: настройки и круги не изменены.' DarkGray }
     if ($wasRunning -or $apply) { Start-Bypass | Out-Null }
 } finally {
     if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } ; Start-Sleep -Milliseconds 700 }
