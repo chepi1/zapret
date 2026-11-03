@@ -48,25 +48,30 @@ function Test-ScoreInputs { return $true }
 function Invoke-CurlBatch { return $script:actual }
 function Run-FinalBlock($Rows, [switch]$KeepPrimary, [switch]$OnlyReport) {
     $script:actual=$Rows; $script:savedSettings=0
-    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11'}; $choice=@{Noise=$false}; $apply=$true; $ReportOnly=[bool]$OnlyReport; $NoPrompt=$true
+    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11';Name='Кандидат'}; $choice=@{Noise=$false}; $apply=$true; $ReportOnly=[bool]$OnlyReport; $NoPrompt=$true
+    $primaryNameBefore='Прежняя стратегия'
     . $script:selectionBlock
     $base=@{}; $alts=@(); $table=@{'12'=$before;'11'=$before;'0'=@((Row Clean normal OK))}
     $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}; $testLifetimeMs=120000; $resultContext='fixture context'
     $metadata=@{RunId='fixture';Sequence=0};$journalFile=Join-Path $Script:Runtime 'final-raw-fixture.jsonl'
     $report=New-Object 'System.Collections.Generic.List[string]'
+    $report.Add('fixture heading')
     $repFile=Join-Path $Script:Runtime 'final-fixture.txt'
     Write-TextNoBom (Get-PkgPath $Script:RankFile) 'old rank'
     Write-TextNoBom (Get-PkgPath $Script:CoverFile) 'old cover'
     . $script:finalBlock
-    return [pscustomobject]@{Rank=[IO.File]::ReadAllText((Get-PkgPath $Script:RankFile));Cover=[IO.File]::ReadAllText((Get-PkgPath $Script:CoverFile));Saved=$script:savedSettings;Applied=$apply}
+    return [pscustomobject]@{Rank=[IO.File]::ReadAllText((Get-PkgPath $Script:RankFile));Cover=[IO.File]::ReadAllText((Get-PkgPath $Script:CoverFile));Saved=$script:savedSettings;Applied=$apply;Header=$(if ($report.Count -gt 1) { $report[1] } else { '' })}
 }
 $rejected=Run-FinalBlock @((Row YouTube video FAIL),(Row Clean normal OK))
 Check 'rejected replay restores exact previous rank and coverage' ($rejected.Rank -eq 'old rank' -and $rejected.Cover -eq 'old cover')
 Check 'rejected replay never saves settings' ($rejected.Saved -eq 0 -and -not $rejected.Applied)
+Check 'rejected replay report starts with retained primary and names rejected candidate' ($rejected.Header.StartsWith('Основная после теста: Прежняя стратегия.') -and $rejected.Header.Contains('Кандидат') -and $rejected.Header.Contains('YouTube/video') -and $rejected.Header.Contains('не применена'))
 $passed=Run-FinalBlock $before
 Check 'confirmed replay publishes rank and chosen settings' ($passed.Rank -eq 'new rank' -and $passed.Cover -eq 'new cover' -and $passed.Saved -eq 1)
+Check 'successful replay report names the newly applied primary' ($passed.Header.StartsWith('Основная после теста: Кандидат.') -and $passed.Header -match 'Применена')
 $kept=Run-FinalBlock $before -KeepPrimary
 Check 'scheduled selection publishes confirmed circles while retaining primary' ($kept.Rank -eq 'new rank' -and $kept.Cover -eq 'new cover' -and $kept.Saved -eq 0 -and -not $kept.Applied)
+Check 'scheduled replay report names retained primary rather than average candidate' ($kept.Header.StartsWith('Основная после теста: Прежняя стратегия.') -and $kept.Header -match 'Сохранена')
 $reportOnlyResult=Run-FinalBlock $before -OnlyReport
 Check 'provider report publishes neither ranking nor settings' ($reportOnlyResult.Rank -eq 'old rank' -and $reportOnlyResult.Cover -eq 'old cover' -and $reportOnlyResult.Saved -eq 0)
 function Test-ScoreInputs { return $false }

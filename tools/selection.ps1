@@ -1,4 +1,30 @@
 ﻿# Measurement evidence helpers. No processes, network requests or settings writes on import.
+function Get-PrimaryDecisionText($Choice,[hashtable]$Averages,[string]$CurrentName,[double]$Margin,[switch]$ReportOnly,[switch]$KeepPrimary) {
+    if ($ReportOnly) { return ('Решение по основной: '+$CurrentName+' сохраняется — режим отчёта.') }
+    if ($KeepPrimary) { return ('Решение по основной: '+$CurrentName+' сохраняется; рейтинг и круги автосмены обновляются после итоговой проверки.') }
+    $top=$Choice.Top;$mean=Format-Points $Averages[$top.Id].Avg;$runs=$Averages[$top.Id].Runs
+    if ($Choice.Current -and $top.Id -eq $Choice.Current.Id) {
+        return ('Решение по основной: '+$CurrentName+' сохраняется — она лидирует по среднему баллу '+$mean+'; совместимых прогонов: '+$runs+'.')
+    }
+    if ($Choice.Noise) {
+        $current=Format-Points $Averages[$Choice.Current.Id].Avg
+        $gap=Format-Points ($Averages[$top.Id].Avg-$Averages[$Choice.Current.Id].Avg)
+        return ('Решение по основной: '+$CurrentName+' сохраняется. По среднему впереди '+$top.Name+' ('+$mean+'), у основной '+$current+'; преимущество '+$gap+' меньше порога смены '+(Format-Points $Margin)+'.')
+    }
+    $line='Решение по основной: по среднему предлагается '+$top.Name+' ('+$mean+'; совместимых прогонов: '+$runs+'). Применение возможно после итоговой проверки рабочего режима.'
+    if (-not $Choice.Current) { $line+=' Текущая основная в этом прогоне не проверялась.' }
+    return $line
+}
+function Get-PrimaryResultText([string]$PrimaryName,[string]$CandidateName,[ValidateSet('Applied','Kept','Rejected','ReportOnly','QualityRejected')][string]$Status,[string]$Details='') {
+    $head='Основная после теста: '+$PrimaryName+'. '
+    switch ($Status) {
+        'Applied' { return ($head+'Применена после итоговой проверки рабочего режима.') }
+        'Kept' { return ($head+'Сохранена; итоговая комбинация подтверждена в рабочем режиме.') }
+        'Rejected' { return ($head+'Итоговая комбинация с «'+$CandidateName+'» отклонена, смена не применена. Прежние настройки и рейтинг сохранены. '+$Details) }
+        'ReportOnly' { return ($head+'Сохранена — режим отчёта.') }
+        'QualityRejected' { return ($head+'Сохранена: результаты измерений отклонены. '+$Details) }
+    }
+}
 function New-TestMeasurementOrder($Strategies, [ValidateRange(1,10)][int]$Rounds, [ValidateRange(0,2147483647)][int]$Seed) {
     $all=@($Strategies)
     if (-not $all.Count) { throw 'Нет стратегий для измерения.' }

@@ -363,7 +363,7 @@ function Format-Summary($S, [string]$Prefix = '', [switch]$NoName) {
         if ($x.Freeze) { $t += (' (замерзаний ' + $x.Freeze + ')') }
         $parts += $t
     }
-    $head = if ($NoName) { '        ' } else { '  {0,-4}{1,-19}' -f $Prefix, $S.Name }
+    $head = if ($NoName) { '        ' } else { '  {0,-4}{1,-19} ' -f $Prefix, $S.Name }
     $score = if ($S.Id -eq '0') { ' ' * 11 } else { 'балл {0,-6}' -f (Format-Points $S.Score) }
     $line = $head + $score + ('| пробито {0}/{1}' -f (Format-Points $S.Ok), $S.Total)
     if ($S.HarmTotal) { $line += (' | вред {0}/{1}' -f $S.Harm, $S.HarmTotal) }
@@ -511,6 +511,8 @@ if ($targets.Count -eq 0) { Write-Color 'Нет адресов для прове
 $postFile = Get-PostFile
 
 $settings = Get-Settings
+$primaryBefore=Get-Strategy $settings.alt
+$primaryNameBefore=if ($primaryBefore) { $primaryBefore.Name } else { 'стратегия из настроек' }
 $comparisonSpec=$null
 if ($comparisonMode) { $comparisonSpec=New-FinalistExperimentSpec $settings $targets $CompareA $CompareB $Seed $CompareBlocks }
 if (-not (Enter-BypassControl 'strategy-test')) { Write-Color 'Автоподбор отложен: другая операция управляет обходом.' Yellow; exit 1 }
@@ -672,12 +674,13 @@ try {
     $alts = @($summary | Where-Object { $_.Id -ne '0' })
 
     Write-Host ''
-    Write-Color 'Итог - лучшие сверху. Балл = пробито - вред:' Cyan
+    Write-Color 'Результаты текущего прогона, по баллу. Балл = пробито - вред:' Cyan
     Write-Color '  пробито - сколько заблокированных адресов открылось (замерзание - соединение встало на 16-20 КБ);' Cyan
     Write-Color ('  вред - сколько обычных сайтов дважды не открылось или стало медленнее больше чем на {0} мс;' -f $HarmSlowMs) Cyan
     Write-Color '  .5 - адрес открылся только со второй попытки, за него полбалла.' Cyan
+    Write-Color '  Основная выбирается по среднему совместимых прогонов с порогом смены; причина решения будет ниже.' Gray
     $report.Add('')
-    $report.Add('Итог - лучшие сверху. Балл = пробито - вред:')
+    $report.Add('Результаты текущего прогона, по баллу. Балл = пробито - вред:')
     $rank = 0
     foreach ($s in (@($base) + @($alts | Sort-Object @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } }, @{ Expression = { [array]::IndexOf($orderIds, $_.Id) } }))) {
         if (-not $s) { continue }
@@ -719,7 +722,7 @@ try {
     $best = $alts | Sort-Object @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } }, @{ Expression = { [array]::IndexOf($orderIds, $_.Id) } } | Select-Object -First 1
     Write-Host ''
     # строка начинается с "Лучший результат:" - по ней автонастройка находит итог в test-last.txt
-    $bestLine = "Лучший результат: {0} - балл {1} (пробито {2}/{3}, вред {4}/{5})" -f $best.Name, (Format-Points $best.Score), (Format-Points $best.Ok), $best.Total, $best.Harm, $best.HarmTotal
+    $bestLine = "Лучший результат: {0} - балл {1} (пробито {2}/{3}, вред {4}/{5}); текущий прогон" -f $best.Name, (Format-Points $best.Score), (Format-Points $best.Ok), $best.Total, $best.Harm, $best.HarmTotal
     Write-Color $bestLine Green
     if ($best.Harm) { Write-Color ('  вред: ' + ($best.HarmList -join ', ')) Yellow }
     # почему не та, что пробила больше всех: у неё вред
@@ -731,7 +734,11 @@ try {
         Write-Color $why Gray
     }
     $tied = @($alts | Where-Object { $_.Id -ne $best.Id -and $_.Score -eq $best.Score } | ForEach-Object { $_.Name })
-    if ($tied.Count) { Write-Color ('  Столько же баллов у: ' + ($tied -join ', ') + '. При равенстве выбрана та, что реже замерзает, затем из основных стратегий.') Gray }
+    if ($tied.Count) {
+        $tieLine='В этом прогоне столько же баллов у: '+($tied -join ', ')+'. Порядок при равенстве: меньше замерзаний, затем приоритет стратегии.'
+        Write-Color $tieLine Gray
+        $report.Add($tieLine)
+    }
     $freezeLine = $null
     if ($base -and $base.Groups.Contains('DPI') -and $base.Groups['DPI'].Freeze -gt 0) {
         $freezeLine = 'Без обхода провайдер заморозил {0} из {1} проверочных хостингов: это тот блок, из-за которого вылетают игры.' -f $base.Groups['DPI'].Freeze, $base.Groups['DPI'].Total
@@ -748,6 +755,9 @@ try {
         $qualityLine=if ($controlAssessment.Status -eq 'Changed') { 'Контрольные HTTPS-запросы изменились во время автоподбора. Новый рейтинг не применён; сравнение нужно повторить.' } else { 'Недостаточно повторяемых контрольных запросов. Новый рейтинг не применён; это не доказывает отсутствие интернета.' }
         Write-Color $qualityLine Yellow
         $report.Add($qualityLine)
+        $outcomeLine=Get-PrimaryResultText $primaryNameBefore '' QualityRejected $qualityLine
+        Write-Color $outcomeLine Yellow
+        $report.Insert(1,$outcomeLine)
         Write-TextNoBom $repFile (($report -join "`r`n")+"`r`n")
         Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
         exit $(if ($ReportOnly) { 0 } else { 1 })
@@ -761,14 +771,17 @@ try {
     else { $report.Add('История средних баллов: только этот провайдер, набор адресов и версия стратегии.') }
     $avg = Get-AverageScores $alts $scoreContext
     $choice = Get-PrimaryChoice $alts $avg $settings.alt $orderIds
+    $decisionLine=Get-PrimaryDecisionText $choice $avg $primaryNameBefore $Script:ScoreMargin -ReportOnly:$ReportOnly -KeepPrimary:$KeepPrimary
     $avgTop = @($alts | Sort-Object @{ Expression = { $avg[$_.Id].Avg }; Descending = $true } | Select-Object -First 5 |
         ForEach-Object { '{0} {1} ({2})' -f $_.Name, (Format-Points $avg[$_.Id].Avg), $avg[$_.Id].Runs })
     $avgLine = ('Средний балл за последние прогоны (до {0}), в скобках их число: ' -f $Script:ScoreRuns) + ($avgTop -join ', ')
     Write-Color $avgLine Gray
+    Write-Color $decisionLine Gray
     # лучший результат - и в файл отчёта (он уже записан выше вместе с подробностями)
     $report.Insert(1, $bestLine)
     $at = 2
     $report.Insert($at, $avgLine); $at++
+    $report.Insert($at, $decisionLine); $at++
     if ($why) { $report.Insert($at, $why); $at++ }
     if ($freezeLine) { $report.Insert($at, $freezeLine); $at++ }
     if ($ipLine) { $report.Insert($at, $ipLine) }
@@ -785,12 +798,9 @@ try {
         $apply = $false
     } elseif ($KeepPrimary) {
         $apply = $false
-        Write-Color 'Основная стратегия сохранена; проверяю обновлённые круги.' Gray
     } elseif ($pick.Id -eq $settings.alt) {
-        Write-Color ('{0} уже основная{1}.' -f $pick.Name, $(if ($best.Id -ne $pick.Id) { ': по среднему баллу она лучшая' })) Green
         $apply = $false
     } elseif ($choice.Noise) {
-        Write-Color ('По среднему баллу впереди {0} ({1}), у основной {2} - {3}. Разница меньше {4}: это случайный разброс между прогонами, основная не меняется.' -f $pick.Name, (Format-Points $avg[$pick.Id].Avg), $choice.Current.Name, (Format-Points $avg[$choice.Current.Id].Avg), $Script:ScoreMargin) Green
         $apply = $false
     } elseif (-not $NoPrompt) {
         # автоподбор проверяет сайты, а игру в матче - нет: стратегию, проверенную в игре, он менять не должен молча
@@ -799,10 +809,16 @@ try {
             Write-Color ('Автоподбор проверяет сайты, а игру в матче проверить не может. Если игра с {0} идёт без статтеров, основную лучше не менять.' -f $(if ($cur) { $cur.Name } else { 'текущей' })) Yellow
         }
         $apply = Read-YesNo ("Сделать {0} основной?" -f $pick.Name)
+        if (-not $apply) {
+            $declinedLine='Смена основной отклонена пользователем; сохраняется '+$primaryNameBefore+'.'
+            Write-Color $declinedLine Gray
+            $report.Add($declinedLine)
+        }
     }
     if (-not $ReportOnly) {
         $candidate = $settings.Clone()
         if ($apply) { $candidate.alt = $pick.Id }
+        $candidateName=if ($apply) { $pick.Name } else { $primaryNameBefore }
         $previous = @{}
         foreach ($file in @($Script:RankFile, $Script:CoverFile)) {
             $path = Get-PkgPath $file
@@ -833,10 +849,10 @@ try {
             if ($base) { Save-TestRank $base $alts $resultContext; Save-TestCover $table $resultContext }
             if ($apply) { Save-Settings $candidate; $settings = $candidate }
             $accepted = $true
-            $finalLine = 'Итоговая комбинация подтверждена в рабочем режиме.'
+            $finalLine=Get-PrimaryResultText $candidateName $candidateName $(if ($apply) { 'Applied' } else { 'Kept' })
         } catch {
             $apply = $false
-            $finalLine = 'Итоговая проверка отклонена; прежний рейтинг сохранён. ' + $_.Exception.Message
+            $finalLine=Get-PrimaryResultText $primaryNameBefore $candidateName Rejected $_.Exception.Message
         } finally {
             $Script:TestResultPreview = $null
             $Script:RingCache = @{}
@@ -850,9 +866,17 @@ try {
         }
         Write-Color $finalLine $(if ($accepted) { 'Green' } else { 'Yellow' })
         $report.Add($finalLine)
+        $report.Insert(1,$finalLine)
         Write-TextNoBom $repFile (($report -join "`r`n") + "`r`n")
         Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
         if ($p) { throw 'Итоговый процесс требует завершения; восстановление выполняется в finally.' }
+    }
+    if ($ReportOnly) {
+        $finalLine=Get-PrimaryResultText $primaryNameBefore '' ReportOnly
+        Write-Color $finalLine Gray
+        $report.Insert(1,$finalLine)
+        Write-TextNoBom $repFile (($report -join "`r`n") + "`r`n")
+        Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
     }
     $inRing = @()
     foreach ($sec in @('general', 'google', 'discord_media', 'game_tcp')) { $inRing += @(Get-RotationOrder $settings.alt $sec | ForEach-Object { $_.Id }) }

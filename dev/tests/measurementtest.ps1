@@ -76,6 +76,7 @@ $Script:Runtime=$Case
 $report=New-Object 'System.Collections.Generic.List[string]'
 $repFile=Join-Path $Case 'report.txt'
 $wasRunning=$false;$ReportOnly=$false;$alts=@();$scoreContext='fixture';$scoreFingerprints=@{}
+$primaryNameBefore='Прежняя стратегия';$report.Add('fixture heading')
 $controlAssessment=[pscustomobject]@{CanApply=(-not $Changed);Status=$(if ($Changed) {'Changed'} else {'Stable'});Reasons=@('latency-shift')}
 function Add-ScoreHistory { [IO.File]::WriteAllText((Join-Path $Case 'history-written.txt'),'written');return $true }
 function Start-Bypass { throw 'must not touch live bypass' }
