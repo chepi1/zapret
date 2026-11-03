@@ -14,7 +14,8 @@ $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'netstate.ps1')
 $Script:RingNetworkKey = 'unknown-' + [guid]::NewGuid().ToString('N')
-$Script:RingPersistAllowed = $false
+$Script:RingPersistAllowed = $true
+$Script:RingCompositionKey = ''
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -404,7 +405,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
@@ -518,10 +519,18 @@ function Initialize-RingDir {
     if ($deny.Count) { & (Join-Path $env:SystemRoot 'System32\icacls.exe') $d /reset /T /C /Q 2>&1 | Out-Null }
 }
 function Get-RingStateName([string]$Section, $Ring) {
-    $sig = $Script:RingNetworkKey + '|' + (@($Ring | ForEach-Object { $_.Id + ':' + $_.Name + ':' + (Get-StrategyFingerprint $_.Id) }) -join ',')
-    $md5 = [System.Security.Cryptography.MD5]::Create()
-    $hex = [BitConverter]::ToString($md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($sig))).Replace('-', '').Substring(0, 8).ToLower()
-    return ('ring-{0}-{1}.txt' -f $Section, $hex)
+    if($Script:RingCompositionKey -notmatch '^[A-Fa-f0-9]{64}$'){throw 'Состав памяти автосмены не подтверждён.'}
+    # Ключ сети добавляет Lua по свежему heartbeat; сохранённая ImagePath не фиксирует прежнюю сеть.
+    $sig = $Script:RingCompositionKey + '|' + (@($Ring | ForEach-Object { $_.Id + ':' + $_.Name + ':' + (Get-StrategyFingerprint $_.Id) }) -join ',')
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { $hex = [BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($sig))).Replace('-', '').Substring(0, 24).ToLower() }
+    finally { $sha.Dispose() }
+    return ('ring-{0}-{1}-{2}.txt' -f $Section, $Script:RingCompositionKey.Substring(0,24).ToLowerInvariant(), $hex)
+}
+function Get-RingCompositionKey([hashtable]$Settings) {
+    $settingsKey=@($Settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$Settings[$_] }) -join '|'
+    $target=[pscustomobject]@{Group='ring';Name='composition';Url='local'}
+    return Get-ScoreInputsHash @($target) @{Settings=$settingsKey}
 }
 # Круг поменялся (новый автоподбор) - появляется новый файл. Старые оставляем на случай возврата, но не больше 8
 function Remove-OldRingMemory {
@@ -691,6 +700,13 @@ function New-BypassArgList {
     if ($primary.Missing.Count -gt 0) { throw ("В {0} нет секций: {1}" -f $primary.File, ($primary.Missing -join ', ')) }
     # с автосменой у каждого профиля свой круг (Get-RotationOrder по секции), без неё - ровно основная, как у Flowseal
     $auto = ($Settings.auto -eq 'on') -and -not $NoAuto
+    if ($auto) {
+        $compositionSettings=$Settings.Clone()
+        $compositionSettings.alt=$altId
+        if($IpsetMode){$compositionSettings.ipset=$IpsetMode}
+        $Script:RingCompositionKey = Get-RingCompositionKey $compositionSettings
+        if (-not $Script:RingCompositionKey) { throw 'Не удалось подтвердить состав конфигурации для памяти автосмены.' }
+    }
     $ipMode = if ($IpsetMode) { $IpsetMode } else { $Settings.ipset }
     $gameTcp = @('all', 'tcp') -contains $Settings.game
     $gameUdp = @('all', 'udp') -contains $Settings.game
@@ -769,7 +785,7 @@ function New-BypassArgList {
             $a.Add('--in-range=-s5556')
             # имя файла памяти - по составу круга: номера стратегий значат своё только в этом составе. Игра - без памяти
             # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
-            $stateArg = if ($Script:RingPersistAllowed) { ':state=' + (Get-RingStateName $Name $ring) } else { '' }
+            $stateArg = if ($Script:RingPersistAllowed) { ':context=network-context.txt:state=' + (Get-RingStateName $Name $ring) } else { '' }
             $memArgs = if ($Learn) { ':key=' + $Name + $stateArg + ':success_detector=ring_success:failure_detector=ring_failure' } else { '' }
             $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
@@ -847,7 +863,11 @@ function ConvertTo-WinCmdLine([string[]]$ArgList) {
 # Командная строка winws2. Копия по одному параметру в строке кладётся в runtime\args-<Name>.txt для диагностики.
 function Get-BypassCmdLine {
     param([hashtable]$Settings, [string]$Name = 'active', [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [switch]$DryRun, [string]$DebugFile)
-    $list = New-BypassArgList -Settings $Settings -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun:$DryRun -DebugFile $DebugFile
+    $previousPersistence = $Script:RingPersistAllowed
+    try {
+        if ($Name -in @('test','final-check','diag')) { $Script:RingPersistAllowed = $false }
+        $list = New-BypassArgList -Settings $Settings -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun:$DryRun -DebugFile $DebugFile
+    } finally { $Script:RingPersistAllowed = $previousPersistence }
     Write-TextNoBom (Join-Path $Script:Runtime ('args-' + $Name + '.txt')) (($list -join "`r`n") + "`r`n")
     $cmd = ConvertTo-WinCmdLine $list
     # предел командной строки Windows - 32767 символов; пути к файлам повторяются в каждом профиле
@@ -1181,8 +1201,6 @@ function Get-ServiceBinPath([string]$CmdLine) {
 # Запускает обход с текущими настройками. Возвращает $true, если winws2 жив через 3 секунды.
 function Start-BypassCore([switch]$Quiet) {
     Set-RingNetworkContext (Get-NetworkObservation)
-    # Сохранённая ImagePath службы не может обновить контекст после смены сети/перезагрузки.
-    if (Get-OurService) { $Script:RingPersistAllowed = $false }
     # обход снова включают - уведомление "обход не работает" опять имеет смысл (см. пункт 2 меню)
     Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
@@ -1227,6 +1245,7 @@ function Start-BypassCore([switch]$Quiet) {
         $alive = Show-StartFailure $err $since
     }
     if ($alive) {
+        if (-not (Start-NetworkWatcher)) { Add-BypassAction 'network-watch' 'Не запущен; память остаётся только в RAM до свежего heartbeat.' }
         Remove-Item (Join-Path $Script:Runtime 'start-error.txt') -Force -ErrorAction SilentlyContinue
         Set-HighPriority
         Remove-OldRingMemory
@@ -1398,7 +1417,12 @@ function Install-BypassService {
         -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic | Out-Null
     & sc.exe failure $Script:ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
     $err = Start-OurService
-    if (Wait-BypassAlive) { Set-HighPriority; return $true }
+    if (Wait-BypassAlive) {
+        Set-HighPriority
+        if (-not (Install-NetworkWatchTask)) { Write-Color 'Наблюдатель сети не добавлен в автозапуск; до свежего heartbeat память будет только в RAM.' Yellow }
+        Start-NetworkWatcher | Out-Null
+        return $true
+    }
     Write-Color 'Служба не запустилась и удалена.' Red
     Show-StartFailure $err $since -RemoveService | Out-Null
     return $false
@@ -1453,6 +1477,7 @@ function Remove-BypassService {
 
     Stop-Bypass
     if (Get-OurService) { & sc.exe delete $Script:ServiceName | Out-Null }
+    Remove-NetworkWatchTask
     Remove-WinDivertDriver | Out-Null
 
     } finally { Exit-BypassControl }
@@ -2647,16 +2672,19 @@ function Test-ServiceHealthRows($Rows) {
     }
     return $true
 }
-function Save-ServiceHealth($Rows, [string]$Identity) {
+function Save-ServiceHealth($Rows, [string]$Identity, $NetworkBefore = $null) {
     try {
         if (-not $Identity -or $Identity -cne (Get-BypassIdentity @(Get-OurProcesses)) -or -not (Test-ServiceHealthRows $Rows)) { return $false }
-        $data = New-Object PSObject -Property @{ Identity=$Identity; CheckedUtc=[datetime]::UtcNow.ToString('o'); Rows=@($Rows) }
+        $network = Get-NetworkObservation -Machine
+        if (-not $network.Known -or $network.Key -notmatch '^[A-Fa-f0-9]{64}$') { return $false }
+        if ($null -ne $NetworkBefore -and -not(Test-NetworkObservation $NetworkBefore $network)) { return $false }
+        $data = New-Object PSObject -Property @{ Identity=$Identity; NetworkKey=$network.Key; CheckedUtc=[datetime]::UtcNow.ToString('o'); Rows=@($Rows) }
         Write-TextNoBom (Join-Path $Script:Runtime 'service-health.json') ($data | ConvertTo-Json -Depth 4)
         return $true
     } catch { return $false }
 }
 function Get-ServiceHealthSummary($Processes) {
-    $unknown = New-Object PSObject -Property @{ State='Unknown'; Text='HTTPS: для этого запуска нет свежей проверки. Проверить — пункт 5.' }
+    $unknown = New-Object PSObject -Property @{ State='Unknown'; Text='HTTPS: для текущего запуска и подключения нет свежей проверки. Проверить — пункт 5.' }
     try {
         $identity = Get-BypassIdentity $Processes
         $path = Join-Path $Script:Runtime 'service-health.json'
@@ -2666,6 +2694,8 @@ function Get-ServiceHealthSummary($Processes) {
         $checked = [DateTimeOffset]::Parse([string]$data.CheckedUtc, [Globalization.CultureInfo]::InvariantCulture)
         $age = ([datetime]::UtcNow - $checked.UtcDateTime).TotalSeconds
         if ($age -lt 0 -or $age -gt 600) { return $unknown }
+        $network = Get-NetworkObservation -Machine
+        if (-not $network.Known -or $data.NetworkKey -cne $network.Key) { return $unknown }
         $bad = @($data.Rows | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
         $text = 'HTTPS: последняя проверка {0}, ответили {1}/{2}' -f $checked.ToLocalTime().ToString('HH:mm'), ($data.Rows.Count - $bad.Count), $data.Rows.Count
         if ($bad.Count) { $text += '; без ответа: ' + ($bad -join ', ') }
@@ -2676,9 +2706,10 @@ function Update-ServiceHealth {
     try {
         $identity = Get-BypassIdentity @(Get-OurProcesses)
         if (-not $identity) { return $false }
+        $networkBefore = Get-NetworkObservation -Machine
         $jobs = Start-ServiceProbes -TimeoutSec 3
         $rows = @(Get-ServiceProbeResults $jobs)
-        return (Save-ServiceHealth $rows $identity)
+        return (Save-ServiceHealth $rows $identity -NetworkBefore $networkBefore)
     } catch { return $false }
 }
 function Start-ServiceProbes([int]$TimeoutSec = 8) {

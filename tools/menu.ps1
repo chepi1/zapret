@@ -633,6 +633,7 @@ function Show-PcCheck {
     $vpnOn = @(Get-TunAdapters).Count -gt 0
     $pinJobs = if ($vpnOn) { $null } else { Start-HostsPinProbes }
     $healthIdentity = Get-BypassIdentity @(Get-OurProcesses)
+    $healthNetwork = Get-NetworkObservation -Machine
     $svcJobs = Start-ServiceProbes
     Write-Color '1/5 Подключение' Cyan
     Show-ConnectionCheck | Out-Null
@@ -689,7 +690,7 @@ function Show-PcCheck {
     $svcOn = @(Get-OurProcesses).Count -gt 0
     if (-not $svcOn) { Write-Color '  (обход остановлен - проверка без него)' Gray }
     $svcRows = @(Get-ServiceProbeResults $svcJobs)
-    Save-ServiceHealth $svcRows $healthIdentity | Out-Null
+    Save-ServiceHealth $svcRows $healthIdentity -NetworkBefore $healthNetwork | Out-Null
     foreach ($x in $svcRows) {
         $txt = if ($x.Ok) { 'HTTPS ответ получен, TLS {0} мс' -f $x.Ms } else { 'проверка HTTPS не прошла' }
         Write-Color ('  {0,-24} {1}' -f $x.Name, $txt) $(if ($x.Ok) { 'Green' } else { 'Yellow' })

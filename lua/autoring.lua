@@ -16,6 +16,38 @@
 
 local RING_MAX_RECORDS = 2000
 local memory = {}
+local RING_STARTED = os.time()
+local network_cache = { checked=-math.huge, revision=0 }
+
+-- Маркер задаёт только непрозрачный сетевой ключ, не путь и не код. Старый процесс/watchdog не разрешает новую память.
+function ring_network_key(text, now, started)
+	if type(text)~="string" or #text>128 then return nil end
+	local stamp, key, composition = text:match("^3 (%d+) ([A-Fa-f0-9]+) ([A-Fa-f0-9]+)\n$")
+	stamp = tonumber(stamp)
+	if not stamp or not key or #key~=64 or not composition or #composition~=24 or stamp>now or now-stamp>20 or (started and stamp<=started) then return nil end
+	return key:upper(), composition:upper()
+end
+function ring_state_path(dir, state, key)
+	if not dir or not state or not state:match("^[%w_-]+%.txt$") or not key or not key:match("^[A-F0-9]+$") or #key~=64 then return nil end
+	return dir.."/"..state:sub(1,-5).."-"..key..".txt"
+end
+local function ring_context(desync)
+	if not desync.arg.context then return "legacy", 0 end
+	local now, mono = os.time(), clock_getfloattime()
+	if mono<network_cache.checked or mono-network_cache.checked>=1 then
+		local key, composition
+		local dir = os.getenv("WRITABLE")
+		if dir and desync.arg.context=="network-context.txt" then
+			local ok, text = pcall(readfile, dir.."/network-context.txt")
+			if ok then key, composition = ring_network_key(text, now, RING_STARTED) end
+		end
+		if key~=network_cache.key or composition~=network_cache.composition then network_cache.revision=network_cache.revision+1 end
+		network_cache.key, network_cache.composition, network_cache.checked = key, composition, mono
+	end
+	local expected = desync.arg.state and desync.arg.state:match("^ring%-[a-z_]+%-([a-f0-9]+)%-[a-f0-9]+%.txt$")
+	if not expected or #expected~=24 or expected:upper()~=network_cache.composition then return nil, network_cache.revision end
+	return network_cache.key, network_cache.revision
+end
 
 -- Поддельный сброс. На ClientHello с запрещённым именем фильтр отвечает сбросом от имени сервера, раньше настоящего ответа.
 -- Настоящий сервер при этом отвечает дальше, но Windows уже поверила сбросу и закрыла соединение. Подделку видно:
@@ -85,18 +117,21 @@ end
 -- winws2 может писать после снижения своих прав
 local function ring_mem(desync)
 	local name = desync.arg.key or desync.func_instance
+	local context, revision = ring_context(desync)
 	local mem = memory[name]
-	if mem then return mem end
-	mem = { keys = {}, count = 0 }
+	if mem and mem.revision==revision and mem.context==context then return mem end
+	mem = { keys = {}, count = 0, context=context, revision=revision }
 	memory[name] = mem
 	local dir, state = os.getenv("WRITABLE"), desync.arg.state
 	if dir and state and #state>0 then
-		mem.file = dir.."/"..state
-		local ok, text = pcall(readfile, mem.file)
-		if ok and text then
+		mem.file = desync.arg.context and ring_state_path(dir, state, context) or (not desync.arg.context and dir.."/"..state or nil)
+		local ok, text = false, nil
+		if mem.file then ok, text = pcall(readfile, mem.file) end
+		if ok and text and #text<=262144 then
 			for key, n in string.gmatch(text, "(%S+) (%d+)") do
+				if mem.count>=RING_MAX_RECORDS then break end
+				if not mem.keys[key] then mem.count = mem.count+1 end
 				mem.keys[key] = tonumber(n)
-				mem.count = mem.count+1
 			end
 			DLOG("ring: loaded "..mem.count.." records from '"..mem.file.."'")
 		end
@@ -108,6 +143,7 @@ end
 -- и переписывается редко
 local function ring_remember(desync, w)
 	local mem = ring_mem(desync)
+	if w.revision~=nil and w.revision~=mem.revision then return end
 	local changed = false
 	local function put(key, n)
 		if not key or mem.keys[key]==n then return end
@@ -156,6 +192,12 @@ local function ring_conn(desync, crec)
 		local key = hrec and standard_hostkey(desync)
 		if key then
 			w.hrec, w.key, w.net = hrec, key, ring_subnet(desync)
+			local mem = ring_mem(desync)
+			if desync.arg.context and hrec.ring_revision~=mem.revision then
+				hrec.nstrategy, hrec.failure_counter, hrec.failure_time_last = 1, 0, 0
+				hrec.ring_seen, hrec.ring_ok, hrec.ring_revision = nil, nil, mem.revision
+			end
+			w.revision = mem.revision
 			if not hrec.ring_seen then
 				hrec.ring_seen = true
 				local mem = ring_mem(desync)
@@ -175,6 +217,7 @@ end
 local function ring_skip(desync, crec)
 	if crec.nocheck then return true end
 	local w = ring_conn(desync, crec)
+	if w.revision~=nil and w.revision~=ring_mem(desync).revision then crec.nocheck=true; return true end
 	if w.strategy and w.strategy~=w.hrec.nstrategy then
 		DLOG("ring: connection started with strategy "..w.strategy..", '"..w.key.."' is at "..tostring(w.hrec.nstrategy)..". not counted")
 		crec.nocheck = true

@@ -2,6 +2,7 @@
 if (Test-Path (Join-Path $Pkg '.git')) { throw 'Run on a package copy.' }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
+function Start-NetworkWatcher { return $true }
 $Script:ControlMutexName='Local\zapret-starttest-'+[guid]::NewGuid().ToString('N')
 $originals = @{}
 $originalStop = ${function:Stop-Bypass}
@@ -85,6 +86,7 @@ Remove-Item Function:\sc.exe,Function:\Get-CimInstance
 foreach ($n in $originals.Keys) { Set-Item ('function:' + $n) $originals[$n] }
 Remove-Item Function:\Invoke-Native
 . (Join-Path $Pkg 'tools\lib.ps1')
+function Start-NetworkWatcher { return $true }
 function Get-OurService { return $null }
 function Get-RunningGames { return @() }
 function Stop-Bypass { $script:stops++ }

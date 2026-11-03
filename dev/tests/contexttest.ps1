@@ -7,12 +7,20 @@ $fails=0
 function Check($Name,$Ok){if($Ok){Write-Host ('ok '+$Name)}else{Write-Host ('FAIL '+$Name);$script:fails++}}
 $script:network='wifi-one';$script:gateway='192.168.1.1';$script:proxy='';$script:broken=$false
 function Get-NetConnectionProfile { if($script:broken){throw 'denied'};[pscustomobject]@{Name=$script:network;InterfaceIndex=7;IPv4Connectivity='Internet';IPv6Connectivity='NoTraffic'} }
-function Get-NetRoute { [pscustomobject]@{InterfaceIndex=7;DestinationPrefix='0.0.0.0/0';NextHop=$script:gateway;RouteMetric=10} }
+$script:extraRoutes=@();$script:assigned=@('192.168.1.100')
+function Get-LocalAssignedAddresses { return $script:assigned }
+function Get-NetRoute { [pscustomobject]@{InterfaceIndex=7;DestinationPrefix='0.0.0.0/0';NextHop=$script:gateway;RouteMetric=10};$script:extraRoutes }
 function Get-DnsClientServerAddress { [pscustomobject]@{InterfaceIndex=7;AddressFamily=2;ServerAddresses=@('192.168.1.1')} }
 function Get-WindowsProxySettings { [pscustomobject]@{Known=$true;Proxy=$script:proxy;Pac='';AutoDetect=$false} }
 $one=Get-NetworkObservation
 Check 'known context has opaque key' ($one.Known -and $one.Key -match '^[A-F0-9]{64}$')
 Check 'same inputs have stable context' ((Get-NetworkObservation).Key -eq $one.Key)
+$script:extraRoutes=@([pscustomobject]@{InterfaceIndex=90;DestinationPrefix='203.0.113.0/24';NextHop='0.0.0.0';RouteMetric=1})
+Check 'on-link split TUN route changes network context' ((Get-NetworkObservation).Key -ne $one.Key)
+$script:extraRoutes=@([pscustomobject]@{InterfaceIndex=7;DestinationPrefix='192.168.1.100/32';NextHop='0.0.0.0';RouteMetric=1})
+Check 'own DHCP host route is not a new network' ((Get-NetworkObservation).Key -eq $one.Key)
+$script:extraRoutes=@();$script:assigned=@('192.168.1.101')
+Check 'DHCP address change alone does not invalidate context' ((Get-NetworkObservation).Key -eq $one.Key)
 Check 'export does not expose network name or gateway' (($one|ConvertTo-Json -Compress) -notmatch 'wifi-one|192.168.1.1')
 $script:network='wifi-two'
 Check 'WiFi change invalidates context' ((Get-NetworkObservation).Key -ne $one.Key)
@@ -36,12 +44,13 @@ $Script:RingNetworkKey=$one.Key
 Set-RingNetworkContext $one
 $settings=Get-Settings; $settings.auto='on'
 $argsText=(New-BypassArgList -Settings $settings) -join ' '
-Check 'unmonitored startup cannot reuse a stored network memory file' ($argsText -notmatch ':state=')
+Check 'startup uses dynamic watchdog context instead of static network key' ($argsText -match ':context=network-context.txt:state=')
+Check 'final verification cannot modify persisted production memory' ((Get-BypassCmdLine -Settings $settings -Name 'final-check') -notmatch ':state=')
 Check 'in-memory adaptive detectors remain enabled' ($argsText -match 'success_detector=ring_success')
 $ring=@([pscustomobject]@{Id='50';Name='unchanged'})
 $first=Get-RingStateName general $ring
 $Script:RingNetworkKey='different'
-Check 'ring memory separated by network' ((Get-RingStateName general $ring) -ne $first)
+Check 'service command line does not freeze network identity' ((Get-RingStateName general $ring) -eq $first)
 $Script:RingNetworkKey=$one.Key
 $file=Join-Path $Script:StratDir 'alt50.txt';$original=[IO.File]::ReadAllBytes($file)
 try{[IO.File]::AppendAllText($file,"`n# changed");Check 'same-name strategy edit separates ring memory' ((Get-RingStateName general $ring) -ne $first)}finally{[IO.File]::WriteAllBytes($file,$original)}

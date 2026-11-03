@@ -7,11 +7,18 @@ function Check($Name,$Ok) { if($Ok){Write-Host ('ok   '+$Name)}else{Write-Host (
 if (-not (Get-Command Save-ServiceHealth -ErrorAction SilentlyContinue)) { Write-Host 'FAIL service health snapshot is missing';exit 1 }
 $script:healthProcess = New-Object PSObject -Property @{Id=101;StartTime=(Get-Date).AddMinutes(-1)}
 function Get-OurProcesses { return @($script:healthProcess | Where-Object { $_ }) }
+$script:healthNetwork='A'*64
+function Get-NetworkObservation { return [pscustomobject]@{Known=$true;Key=$script:healthNetwork;ObservedUtc=[datetime]::UtcNow.ToString('o')} }
 $rows=@($Script:ServiceProbes.Keys | ForEach-Object {New-Object PSObject -Property @{Name=$_;Ok=$true;Ms=100}})
 $identity=Get-BypassIdentity @(Get-OurProcesses)
 Check 'store complete observation for current process' (Save-ServiceHealth $rows $identity)
 $summary=Get-ServiceHealthSummary @(Get-OurProcesses)
 Check 'fresh observation contains passed count and time' ($summary.State -eq 'Good' -and $summary.Text -match '7/7' -and $summary.Text -match '\d\d:\d\d')
+$networkBefore=Get-NetworkObservation
+$script:healthNetwork='B'*64
+Check 'network change invalidates health without PID restart' ((Get-ServiceHealthSummary @(Get-OurProcesses)).State -eq 'Unknown')
+Check 'network changing during probes cannot publish old reachability' (-not (Save-ServiceHealth $rows $identity -NetworkBefore $networkBefore))
+$script:healthNetwork='A'*64
 $path=Join-Path $Script:Runtime 'service-health.json'
 $original=[IO.File]::ReadAllText($path)
 $script:healthProcess.Id=102
