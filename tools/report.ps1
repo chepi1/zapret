@@ -26,6 +26,13 @@ $r.Add('zapret v' + $Script:Version + ' - отчёт ' + (Get-Date -Format 'yyyy
 $r.Add('Папка: ' + $Script:Root)
 try { $os = Get-CimInstance Win32_OperatingSystem -ErrorAction Stop; $r.Add('Windows: ' + $os.Caption + ' ' + $os.Version) } catch { }
 
+Add-Section 'Короткий диагноз на начало отчёта'
+$lastError = Join-Path $Script:Runtime 'start-error.txt'
+$errorText = if (Test-Path $lastError) { [IO.File]::ReadAllText($lastError) } else { '' }
+foreach ($line in @(Get-BypassDiagnosis (@(Get-OurProcesses).Count -gt 0) $errorText @(Get-RunningGames) @(Get-ProxyWarnings))) { $r.Add($line) }
+if ($errorText) { $r.Add('Время записи последней ошибки: ' + (Get-Item $lastError).LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) }
+Add-File 'Последние действия управления' (Join-Path $Script:Runtime 'control-actions.log') 8
+
 Add-Section 'Настройки'
 $r.Add('Стратегия: ' + (Get-AltText $s))
 foreach ($x in @(Get-RingsText $s)) { $r.Add('  свой круг - ' + $x) }
@@ -88,7 +95,7 @@ if ($sites) {
     Add-File 'Журнал автосписка (последние строки)' (Join-Path $Script:Runtime 'autohostlist-debug.log') 60
 } else { $r.Add('(список сайтов не добавлен)') }
 
-Add-File 'Параметры winws2 (последний запуск)' (Join-Path $Script:Runtime 'args-active.txt')
+Add-File 'Параметры winws2 (последняя попытка запуска)' (Join-Path $Script:Runtime 'args-active.txt')
 Add-File 'Последний сбой запуска обхода' (Join-Path $Script:Runtime 'start-error.txt')
 Add-Section ('Падения обхода за {0} дней' -f $Script:CrashDays)
 $crashes = @(Get-BypassCrashes (Get-Date).AddDays(-$Script:CrashDays))

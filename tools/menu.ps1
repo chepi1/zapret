@@ -39,7 +39,9 @@ function Confirm-GameRunning([string]$What) {
     if (-not $games.Count) { return $true }
     Write-Color ('Запущена игра: ' + ($games -join ', ') + '.') Yellow
     Write-Color ($What + ' может оборвать матч, а при античите обход может не запуститься, пока игра не закрыта (ошибка 0x8032000A).') Yellow
-    return (Read-YesNo 'Всё равно продолжить?')
+    $approved = Read-YesNo 'Всё равно продолжить?'
+    $Script:GameControlApproved = [bool]$approved
+    return $approved
 }
 
 # Настройка уже сохранена, применяется перезапуском обхода. Посреди игры спрашиваем; при отказе она заработает позже
@@ -100,12 +102,16 @@ function Show-Header {
     $s = Get-Settings
     $st = Get-Strategy $s.alt
     $procs = @(Get-OurProcesses)
-    $state = @($(if ($procs.Count) { 'Обход: РАБОТАЕТ' + (Get-UptimeText $procs[0]) } else { 'Обход: остановлен' }),
+    $state = @($(if ($procs.Count) { 'Обход: запущен' + (Get-UptimeText $procs[0]) } else { 'Обход: остановлен' }),
         $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }),
         $(if (Get-OurService) { 'автозапуск с Windows' }),
         $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'Telegram' } else { 'Telegram: не запущен' } }))
     Write-BoxTop (' zapret v' + $Script:Version + ' ')
     Write-BoxRow ('  ' + (@($state | Where-Object { $_ }) -join ' · ')) -Rgb @(255, 200, 220)
+    if ($procs.Count) {
+        $health = Get-ServiceHealthSummary $procs
+        Write-BoxRow ('  ' + $health.Text) $(if ($health.State -eq 'Partial') { 'Yellow' } else { 'Gray' })
+    }
     $bad = @(Test-PackageIntegrity -Cached)
     if ($bad.Count) { Write-BoxRow ('  ! Файлы zapret2 изменены (' + ($bad -join ', ') + '): обход не запустится. Скачайте сборку заново.') Red }
     if (Test-AutotuneRunning) { Write-BoxRow '  ! Идёт автонастройка по расписанию: обход включится сам через несколько минут.' Yellow }
@@ -592,15 +598,23 @@ function Exclude-TrackedGame {
 }
 
 function Start-Diagnostics {
+    if (-not (Enter-BypassControl 'Start-Diagnostics')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     Stop-Bypass
     Write-Color 'Подробный лог пишет каждый пакет и сам по себе поднимает пинг. Включайте его только для поиска ошибки.' Yellow
     $dbg = Read-YesNo 'Писать подробный лог в runtime\debug.log?'
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $a = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'diag.ps1') + '"' + $(if ($dbg) { ' -DebugLog' } else { '' })
-    Start-Process -FilePath $ps -ArgumentList $a -WorkingDirectory $Script:Root
+    Write-Color 'Диагностика выполняется в отдельном окне; закройте его для продолжения.' Cyan
+    Assert-BypassControlAllowed
+    Start-Process -Wait -FilePath $ps -ArgumentList $a -WorkingDirectory $Script:Root
     Write-Color 'Открыл окно winws2. Если в нём ошибка, по ней видно, что мешает (антивирус, другой обход, файлы).' Cyan
     Write-Color 'Для обычной работы закройте то окно и запустите обход пунктом 1.' Cyan
     Pause-Menu
+
+    } finally { Exit-BypassControl }
 }
 
 # Одна проверка обходов вместо нескольких пунктов: подключение (VPN, прокси, ускорители, другой обход), IPv6,
@@ -618,6 +632,7 @@ function Show-PcCheck {
     # через туннель VPN проверка адресов проходит на любом адресе и ничего не значит
     $vpnOn = @(Get-TunAdapters).Count -gt 0
     $pinJobs = if ($vpnOn) { $null } else { Start-HostsPinProbes }
+    $healthIdentity = Get-BypassIdentity @(Get-OurProcesses)
     $svcJobs = Start-ServiceProbes
     Write-Color '1/5 Подключение' Cyan
     Show-ConnectionCheck | Out-Null
@@ -674,8 +689,9 @@ function Show-PcCheck {
     $svcOn = @(Get-OurProcesses).Count -gt 0
     if (-not $svcOn) { Write-Color '  (обход остановлен - проверка без него)' Gray }
     $svcRows = @(Get-ServiceProbeResults $svcJobs)
+    Save-ServiceHealth $svcRows $healthIdentity | Out-Null
     foreach ($x in $svcRows) {
-        $txt = if ($x.Ok) { 'работает, TLS {0} мс' -f $x.Ms } else { 'не открылся' }
+        $txt = if ($x.Ok) { 'HTTPS ответ получен, TLS {0} мс' -f $x.Ms } else { 'проверка HTTPS не прошла' }
         Write-Color ('  {0,-24} {1}' -f $x.Name, $txt) $(if ($x.Ok) { 'Green' } else { 'Yellow' })
     }
     $svcBad = @($svcRows | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
@@ -782,6 +798,8 @@ function Show-PcCheck {
 # ---------------- действия и цикл меню ----------------
 # Действия по имени: одно место для главного экрана и подменю
 function Invoke-MenuAction([string]$Name) {
+    $Script:GameControlApproved = $false
+    try {
     $touches = @{ start = 'Запуск обхода'; stop = 'Остановка обхода'; test = 'Автоподбор выключает обход и'; service = 'Смена автозапуска перезапускает обход и'
         update = 'Обновление перезапускает обход и'; provider = 'Проверка провайдера выключает обход и'; diag = 'Диагностика выключает обход и'; uninstall = 'Удаление выключает обход и' }
     if ($touches.ContainsKey($Name) -and -not (Confirm-GameRunning $touches[$Name])) {
@@ -861,6 +879,10 @@ function Invoke-MenuAction([string]$Name) {
         'uninstall' { Remove-ZapretFromWindows }
         'ping' { Show-GamePing; Pause-Menu }
     }
+    } catch {
+        Write-Color $_.Exception.Message Yellow
+        Pause-Menu
+    } finally { $Script:GameControlApproved = $false }
 }
 
 # Пинг до игровых серверов: время TCP-подключения, по минимуму из четырёх попыток
@@ -894,6 +916,10 @@ function Show-GamePing {
 
 # Всё, что сборка ставила в Windows, - одним пунктом. После этого папку можно просто удалить.
 function Remove-ZapretFromWindows {
+    if (-not (Enter-BypassControl 'Remove-ZapretFromWindows')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     Write-Host ''
     Write-Color 'Будет убрано: обход и драйвер WinDivert, служба автозапуска, задачи планировщика (автонастройка, уведомления,' Yellow
     Write-Color 'мост Telegram), записи zapret в hosts и особые права на папки сборки. Настройки и отчёты в runtime останутся.' Yellow
@@ -917,6 +943,8 @@ function Remove-ZapretFromWindows {
     Write-Color 'Готово: zapret убран из Windows. Папку можно удалить (сначала закройте это окно).' Green
     if ($tg) { Write-Color 'В Telegram Desktop выключите прокси: Настройки -> Продвинутые настройки -> Тип соединения -> Системный. Иначе он останется без сети.' Yellow }
     Pause-Menu
+
+    } finally { Exit-BypassControl }
 }
 
 # Буквы версий до zapret 1.0 (NBA2K27-zapret2) работают с любого экрана - для тех, кто к ним привык. Русская раскладка - та же клавиша.

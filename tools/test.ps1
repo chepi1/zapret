@@ -207,9 +207,11 @@ function Merge-Retry($Rows, $Retry) {
 }
 
 function Start-TestInstance([hashtable]$Settings, [string]$Alt) {
+    Assert-BypassControlAllowed
     $cmd = Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any'
     # winws2 (cygwin) изредка падает при старте без причины - тогда стратегия выпадала из теста. Пробуем до трёх раз.
     for ($try = 1; $try -le 3; $try++) {
+        Assert-BypassControlAllowed
         $p = Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden -PassThru
         Start-Sleep -Seconds 2
         if (-not $p.HasExited) { return $p }
@@ -321,6 +323,7 @@ if ($targets.Count -eq 0) { Write-Color 'Нет адресов для прове
 $postFile = Get-PostFile
 
 $settings = Get-Settings
+if (-not (Enter-BypassControl 'strategy-test')) { Write-Color 'Автоподбор отложен: другая операция управляет обходом.' Yellow; exit 1 }
 $wasRunning = @(Get-OurProcesses).Count -gt 0
 # Дальше обход выключен. Что бы ни случилось - ошибка, отказ winws2, Ctrl+C посреди теста, - тестовый winws2 не
 # остаётся работать, а обход включается обратно, если работал до теста.
@@ -345,6 +348,11 @@ try {
 
     # быстрый проверяет и круги целиком, полный - вообще всё: выпавшая из круга стратегия может в него вернуться
     $strategies = @(Get-TestStrategies -Full:$Full)
+    $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; Rounds=$Rounds }
+    $scoreInputs = Get-ScoreInputsHash $targets $scoreParameters
+    $scoreContext = Get-ScoreContext $info $targets $scoreParameters
+    $scoreFingerprints = @{}
+    foreach ($strategy in $strategies) { $scoreFingerprints[$strategy.Id] = Get-StrategyFingerprint $strategy.Id }
     $orderIds = @(Get-AllStrategiesOrdered | ForEach-Object { $_.Id })
     # Windows могла перезапустить службу после сбоя при остановке - тестовый winws2 с тем же фильтром не запустится
     if (@(Get-OurProcesses).Count) { Stop-Bypass }
@@ -411,6 +419,13 @@ try {
     }
 
     # ---------- итог ----------
+    if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) {
+        $changed = 'Файлы изменились во время автоподбора. Результаты не применены и не добавлены в историю; повторите проверку после завершения правок.'
+        Write-Color $changed Yellow
+        $report.Add($changed)
+        Write-TextNoBom (Join-Path $Script:Runtime 'test-last.txt') ($report -join "`r`n")
+        exit 1
+    }
     $summary = @()
     $cleanBase = if ($table.ContainsKey('0')) { Get-CleanBaseline $table['0'] } else { $null }
     foreach ($id in $table.Keys) {
@@ -493,8 +508,14 @@ try {
         Write-Color $ipLine Gray
     }
     # Баллы плавают от прогона к прогону: основную выбираем по среднему за последние прогоны, а не по этому одному
-    Add-ScoreHistory $alts
-    $avg = Get-AverageScores $alts
+    $historySaved = Add-ScoreHistory $alts $scoreContext $scoreFingerprints
+    if (-not $historySaved) {
+        if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints)) { throw 'Стратегии или код изменились перед сохранением. Результаты не применены; повторите автоподбор после завершения правок.' }
+        $scoreContext = ''
+        Write-Color 'Совместимая история недоступна: сравниваю только текущий прогон.' Yellow
+    }
+    else { $report.Add('История средних баллов: только этот провайдер, набор адресов и версия стратегии.') }
+    $avg = Get-AverageScores $alts $scoreContext
     $choice = Get-PrimaryChoice $alts $avg $settings.alt $orderIds
     $avgTop = @($alts | Sort-Object @{ Expression = { $avg[$_.Id].Avg }; Descending = $true } | Select-Object -First 5 |
         ForEach-Object { '{0} {1} ({2})' -f $_.Name, (Format-Points $avg[$_.Id].Avg), $avg[$_.Id].Runs })
@@ -547,5 +568,7 @@ try {
     if ($wasRunning -or $apply) { Start-Bypass | Out-Null }
 } finally {
     if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } ; Start-Sleep -Milliseconds 700 }
-    if ($wasRunning -and @(Get-OurProcesses).Count -eq 0) { Start-Bypass -Quiet | Out-Null }
+    try {
+        if ($wasRunning -and @(Get-OurProcesses).Count -eq 0) { Start-Bypass -Quiet | Out-Null }
+    } finally { Exit-BypassControl }
 }

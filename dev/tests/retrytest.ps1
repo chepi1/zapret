@@ -81,23 +81,23 @@ $Script:ScoreHistoryFile = 'runtime/dev-scores-check.txt'
 function Alt([string]$Id, $Name, $Score, $Freeze = 0) { New-Object PSObject -Property @{ Id = $Id; Name = $Name; Score = [double]$Score; Freeze = $Freeze } }
 $order = @('50', '58', '60')
 $r1 = @((Alt 50 'белый 1' 47), (Alt 58 'белый 4' 46))
-Add-ScoreHistory $r1
-$av = Get-AverageScores $r1
+Add-ScoreHistory $r1 test-context | Out-Null
+$av = Get-AverageScores $r1 test-context
 $c = Get-PrimaryChoice $r1 $av '50' $order
 Check 'one run: leader stays' ($c.Top.Id -eq '50' -and -not $c.Noise -and $av['50'].Runs -eq 1)
 $r2 = @((Alt 50 'белый 1' 44), (Alt 58 'белый 4' 47.5))
-Add-ScoreHistory $r2
-$av = Get-AverageScores $r2
+Add-ScoreHistory $r2 test-context | Out-Null
+$av = Get-AverageScores $r2 test-context
 $c = Get-PrimaryChoice $r2 $av '50' $order
 Check ('noise: avg 45.5 vs 46.75 got ' + $av['50'].Avg + ' ' + $av['58'].Avg) ($av['50'].Avg -eq 45.5 -and $av['58'].Avg -eq 46.75 -and $c.Top.Id -eq '58' -and $c.Noise -and $c.Current.Id -eq '50')
 $r3 = @((Alt 50 'белый 1' 44), (Alt 58 'белый 4' 48))
-Add-ScoreHistory $r3
-$av = Get-AverageScores $r3
+Add-ScoreHistory $r3 test-context | Out-Null
+$av = Get-AverageScores $r3 test-context
 $c = Get-PrimaryChoice $r3 $av '50' $order
 Check 'clear gap: change offered' ($c.Top.Id -eq '58' -and -not $c.Noise -and $av['58'].Runs -eq 3)
 $r4 = @((Alt 50 'белый 1' 46), (Alt 58 'белый 4' 48))
-Add-ScoreHistory $r4
-$av = Get-AverageScores $r4
+Add-ScoreHistory $r4 test-context | Out-Null
+$av = Get-AverageScores $r4 test-context
 Check ('only last 3 runs got ' + $av['50'].Runs + ' ' + (Format-Points $av['50'].Avg)) ($av['50'].Runs -eq 3 -and [math]::Abs($av['50'].Avg - 134 / 3) -lt 0.001)
 $c = Get-PrimaryChoice $r4 $av '60' $order
 Check 'primary not tested: no noise block' ($c.Top.Id -eq '58' -and -not $c.Noise -and -not $c.Current)
@@ -108,8 +108,8 @@ Check 'tie: primary wins' ((Get-PrimaryChoice $tie $tieAvg '58' $order).Top.Id -
 $old = (Get-Date).AddDays(-40).ToString('yyyy-MM-dd HH:mm')
 $new = (Get-Date).AddDays(-1).ToString('yyyy-MM-dd HH:mm')
 Write-TextNoBom (Get-PkgPath $Script:ScoreHistoryFile) ("# comment`r`n$old|50|a|10`r`n$new|50|b|20`r`n$new|50|a|30`r`nbroken line`r`n$new|50|a|x`r`n")
-$av = Get-AverageScores @((Alt 50 'a' 32))
-Check ('old, renamed and broken skipped got ' + $av['50'].Avg) ($av['50'].Avg -eq 30 -and $av['50'].Runs -eq 1)
+$av = Get-AverageScores @((Alt 50 'a' 32)) test-context
+Check ('old, renamed and broken skipped got ' + $av['50'].Avg) ($av['50'].Avg -eq 32 -and $av['50'].Runs -eq 1)
 Remove-Item (Get-PkgPath $Script:ScoreHistoryFile)
 $Script:ScoreHistoryFile = 'runtime/test-scores.txt'
 

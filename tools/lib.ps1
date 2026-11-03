@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.8'
+$Script:Version     = '1.9'
 $Script:Utf8NoBom   = New-Object System.Text.UTF8Encoding($false)
 
 # Порты Discord как у Flowseal: TCP для discord.media, UDP для голоса
@@ -385,12 +385,48 @@ function Test-StrategyTested($St, $Rank) {
 }
 
 # Баллы автоподбора плавают от прогона к прогону: на одном ПК за вечер - до 3 баллов. Основную стратегию поэтому сравниваем
-# по среднему за последние прогоны. Строка файла: дата|номер|имя|балл (номер и имя вместе, как в tested-strategies)
+# по среднему совместимых прогонов. Формат v2: дата|номер|имя|балл|контекст|SHA256 стратегии.
 $Script:ScoreHistoryFile = 'runtime/test-scores.txt'
 $Script:ScoreRuns = 3       # сколько последних прогонов каждой стратегии усредняем
 $Script:ScoreMaxDays = 30   # прогоны старше забываем: за это время у провайдера всё могло поменяться
 $Script:ScoreMargin = 2     # меньшая разница средних - случайность, основная не меняется
 
+function Get-StrategyFingerprint([string]$Id) {
+    if ($Id -notmatch '^\d+$') { return '' }
+    try { return (Get-FileHash -LiteralPath (Join-Path $Script:StratDir ('alt' + $Id + '.txt')) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return '' }
+}
+function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
+    try {
+        if (-not @($Targets).Count) { return '' }
+        $parts = @('score-inputs-v2', $Script:Version)
+        $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
+        foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
+        $files = @('tools/test.ps1','tools/lib.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        foreach ($file in $files) {
+            $parts += (Get-FileHash -LiteralPath (Join-Path $Script:Root $file) -Algorithm SHA256 -ErrorAction Stop).Hash
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($parts -join "`n")))).Replace('-','') } finally { $sha.Dispose() }
+    } catch { return '' }
+}
+function Get-ScoreContext($Connection, $Targets, [hashtable]$Parameters = @{}) {
+    try {
+        $asn = [regex]::Match([string]$Connection.As, '(?i)^\s*AS\d+\b').Value.Trim().ToUpperInvariant()
+        $country = ([string]$Connection.CountryCode).ToUpperInvariant()
+        $inputs = Get-ScoreInputsHash $Targets $Parameters
+        if (-not $asn -or $country -notmatch '^[A-Z]{2}$' -or -not $inputs) { return '' }
+        # Публичный IP не сохраняется, дополнительных запросов к провайдерским сервисам нет.
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($asn + '|' + $country + '|' + $inputs)))).Replace('-','') } finally { $sha.Dispose() }
+    } catch { return '' }
+}
+function Test-ScoreInputs([string]$Before, $Targets, [hashtable]$Parameters, [hashtable]$Fingerprints) {
+    if (-not $Before -or $Before -cne (Get-ScoreInputsHash $Targets $Parameters)) { return $false }
+    foreach ($id in $Fingerprints.Keys) {
+        if (-not $Fingerprints[$id] -or $Fingerprints[$id] -cne (Get-StrategyFingerprint $id)) { return $false }
+    }
+    return $true
+}
 function Get-ScoreHistory {
     $min = (Get-Date).AddDays(-$Script:ScoreMaxDays)
     $inv = [Globalization.CultureInfo]::InvariantCulture
@@ -398,32 +434,58 @@ function Get-ScoreHistory {
     foreach ($l in @(Get-ListLines (Get-PkgPath $Script:ScoreHistoryFile))) {
         $p = $l -split '[|]'
         $d = [datetime]::MinValue; $x = 0.0
-        if ($p.Count -ne 4) { continue }
-        if (-not [datetime]::TryParseExact($p[0], 'yyyy-MM-dd HH:mm', $inv, [Globalization.DateTimeStyles]::None, [ref]$d) -or $d -lt $min) { continue }
-        if (-not [double]::TryParse($p[3], [Globalization.NumberStyles]::Float, $inv, [ref]$x)) { continue }
-        $rows += New-Object PSObject -Property @{ Date = $p[0]; Id = $p[1]; Name = $p[2]; Score = $x }
+        if (@(4,6) -notcontains $p.Count) { continue }
+        if (-not [datetime]::TryParseExact($p[0], 'yyyy-MM-dd HH:mm', $inv, [Globalization.DateTimeStyles]::None, [ref]$d) -or $d -lt $min -or $d -gt (Get-Date).AddMinutes(1)) { continue }
+        if (-not [double]::TryParse($p[3], [Globalization.NumberStyles]::Float, $inv, [ref]$x) -or [double]::IsNaN($x) -or [double]::IsInfinity($x)) { continue }
+        $context = ''; $fingerprint = ''
+        if ($p.Count -eq 6) {
+            if ($p[4] -notmatch '^[A-Za-z0-9_-]{1,64}$' -or $p[5] -notmatch '^[A-Fa-f0-9]{64}$') { continue }
+            $context = $p[4]; $fingerprint = $p[5]
+        }
+        $rows += New-Object PSObject -Property @{ Date=$p[0]; Id=$p[1]; Name=$p[2]; Score=$x; Context=$context; Fingerprint=$fingerprint }
     }
     return $rows
 }
-
-# $Alts - итоги автоподбора (Get-RunSummary)
-function Add-ScoreHistory($Alts) {
-    $now = Get-Date -Format 'yyyy-MM-dd HH:mm'
-    $rows = @(Get-ScoreHistory) + @($Alts | ForEach-Object { New-Object PSObject -Property @{ Date = $now; Id = $_.Id; Name = $_.Name; Score = $_.Score } })
-    $keep = @($rows | Group-Object { $_.Id + '|' + $_.Name } | ForEach-Object { $_.Group | Select-Object -Last $Script:ScoreRuns })
-    $lines = @('# Баллы последних прогонов автоподбора: дата|номер|имя|балл. Удалите файл - среднее начнётся заново') +
-        @($keep | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.Date, $_.Id, $_.Name, (Format-Points $_.Score) })
-    Write-TextNoBom (Get-PkgPath $Script:ScoreHistoryFile) (($lines -join "`r`n") + "`r`n")
+function Add-ScoreHistory($Alts, [string]$Context = '', [hashtable]$Expected = @{}) {
+    if ($Context -notmatch '^[A-Za-z0-9_-]{1,64}$') { return $false }
+    try {
+        $now = Get-Date -Format 'yyyy-MM-dd HH:mm'
+        $added = @()
+        foreach ($a in $Alts) {
+            $fingerprint = Get-StrategyFingerprint $a.Id
+            if (-not $fingerprint) { return $false }
+            if ($Expected.Count -and (-not $Expected.ContainsKey($a.Id) -or $Expected[$a.Id] -cne $fingerprint)) { return $false }
+            $added += New-Object PSObject -Property @{ Date=$now; Id=$a.Id; Name=$a.Name; Score=$a.Score; Context=$Context; Fingerprint=$fingerprint }
+        }
+        $path = Get-PkgPath $Script:ScoreHistoryFile
+        if ((Test-Path $path) -and -not (Test-Path ($path + '.v1.bak'))) {
+            $legacy = @([IO.File]::ReadAllLines($path) | Where-Object { -not $_.StartsWith('#') -and ($_ -split '[|]').Count -eq 4 })
+            if ($legacy.Count) { [IO.File]::Copy($path, ($path + '.v1.bak'), $false) }
+        }
+        $rows = @(Get-ScoreHistory) + $added
+        $keep = @($rows | Group-Object { $_.Id + '|' + $_.Name + '|' + $_.Context + '|' + $_.Fingerprint } | ForEach-Object { $_.Group | Select-Object -Last $Script:ScoreRuns })
+        $lines = @('# История: дата|номер|имя|балл|контекст|SHA256 стратегии; записи v1 сохранены, но не усредняются с v2')
+        foreach ($row in $keep) {
+            $line = '{0}|{1}|{2}|{3}' -f $row.Date,$row.Id,$row.Name,(Format-Points $row.Score)
+            if ($row.Context) { $line += '|' + $row.Context + '|' + $row.Fingerprint }
+            $lines += $line
+        }
+        Write-TextNoBom $path (($lines -join "`r`n") + "`r`n")
+        return $true
+    } catch { return $false }
 }
-
-# Номер стратегии -> средний балл (Avg) и число прогонов (Runs)
-function Get-AverageScores($Alts) {
-    $hist = @(Get-ScoreHistory)
+function Get-AverageScores($Alts, [string]$Context = '') {
+    $hist = @()
+    if ($Context) { try { $hist = @(Get-ScoreHistory) } catch { } }
     $avg = @{}
     foreach ($a in $Alts) {
-        $vals = @($hist | Where-Object { $_.Id -eq $a.Id -and $_.Name -eq $a.Name } | ForEach-Object { $_.Score } | Select-Object -Last $Script:ScoreRuns)
+        $fingerprint = Get-StrategyFingerprint $a.Id
+        $vals = @()
+        if ($Context -and $fingerprint) {
+            $vals = @($hist | Where-Object { $_.Id -eq $a.Id -and $_.Name -eq $a.Name -and $_.Context -ceq $Context -and $_.Fingerprint -eq $fingerprint } | ForEach-Object { $_.Score } | Select-Object -Last $Script:ScoreRuns)
+        }
         if (-not $vals.Count) { $vals = @($a.Score) }
-        $avg[$a.Id] = New-Object PSObject -Property @{ Avg = ($vals | Measure-Object -Average).Average; Runs = $vals.Count }
+        $avg[$a.Id] = New-Object PSObject -Property @{ Avg=($vals | Measure-Object -Average).Average; Runs=$vals.Count }
     }
     return $avg
 }
@@ -855,7 +917,96 @@ function Enable-TcpTimestamps {
     & netsh interface tcp set global timestamps=enabled 2>&1 | Out-Null
 }
 
+
+# Один владелец управления на папку; вложенные вызовы в том же скрипте допустимы.
+if (-not (Get-Variable ControlDepth -Scope Script -ErrorAction SilentlyContinue)) {
+    $Script:ControlDepth = 0
+    $Script:ControlHandle = $null
+}
+if (-not (Get-Variable GameControlApproved -Scope Script -ErrorAction SilentlyContinue)) { $Script:GameControlApproved = $false }
+function Enter-BypassControl([string]$Action) {
+    if ($Script:ControlDepth -gt 0) { $Script:ControlDepth++; return $true }
+    $handle = $null
+    try {
+        $handle = [IO.File]::Open((Join-Path $Script:Runtime 'control.lock'), 'OpenOrCreate', 'ReadWrite', 'Read')
+        $bytes = [Text.Encoding]::UTF8.GetBytes(('{0} {1} {2}' -f $PID, (Get-Date -Format s), $Action))
+        $handle.SetLength(0); $handle.Write($bytes, 0, $bytes.Length); $handle.Flush()
+        $Script:ControlHandle = $handle; $Script:ControlDepth = 1
+        return $true
+    } catch {
+        if ($handle) { $handle.Dispose() }
+        return $false
+    }
+}
+function Exit-BypassControl {
+    if ($Script:ControlDepth -le 0) { return }
+    $Script:ControlDepth--
+    if ($Script:ControlDepth -eq 0) { $Script:ControlHandle.Dispose(); $Script:ControlHandle = $null }
+}
+function Assert-BypassControlAllowed {
+    $games = @(Get-RunningGames)
+    if ($games.Count -and -not $Script:GameControlApproved) {
+        throw ('Действие отложено: запущена игра (' + ($games -join ', ') + '). Закройте игру и повторите запуск.')
+    }
+}
+function Add-BypassAction([string]$Action, [string]$Result) {
+    try {
+        $path = Join-Path $Script:Runtime 'control-actions.log'
+        $old = @(if (Test-Path $path) { [IO.File]::ReadAllLines($path) | Select-Object -Last 79 })
+        $line = '{0} pid={1} {2}: {3}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID, $Action, ($Result -replace '[\r\n]+', ' ')
+        Write-TextNoBom $path ((@($old) + @($line)) -join "`r`n")
+    } catch { } # Неудача журнала не должна ломать управление обходом.
+}
+function Get-StartFailureKind([string]$Text) {
+    if ($Text -match '(?i)referenced by other objects|0x8032000A|ссылаются другие объекты') { return 'FilterBusy' }
+    if ($Text -match '(?i)\b577\b|\b1275\b|signature|подпис') { return 'DriverBlocked' }
+    if ($Text -match '(?i)access is denied|отказано в доступе') { return 'AccessDenied' }
+    return 'Unknown'
+}
+function Get-BypassDiagnosis([bool]$Running, [string]$StartError, [string[]]$Games, [string[]]$Proxy) {
+    if ($Running) {
+        'Обход: процесс работает.'
+        (Get-ServiceHealthSummary @(Get-OurProcesses)).Text
+    }
+    else {
+        'Обход: процесс не работает.'
+        if ($StartError) {
+            if ((Get-StartFailureKind $StartError) -eq 'FilterBusy') { 'Последняя ошибка: 0x8032000A — сетевой объект занят; причина удержания не установлена.' }
+            else { 'Последняя записанная ошибка запуска: см. раздел ниже.' }
+        } else { 'Ошибки запуска не записаны: обход мог быть остановлен вручную.' }
+    }
+    if ($Games.Count) { 'Открыты игры/античиты: ' + ($Games -join ', ') }
+    if ($Proxy.Count) { 'Признаки прокси/VPN (не доказательство активного туннеля): ' + ($Proxy -join '; ') }
+}
+function Start-Bypass([switch]$Quiet) {
+    if (-not (Enter-BypassControl 'start')) { Write-Color 'Запуск отложен: другая операция управляет обходом. Повторите после её завершения.' Yellow; return $false }
+    try {
+        Assert-BypassControlAllowed
+        Add-BypassAction 'start' 'начало'
+        $ok = Start-BypassCore -Quiet:$Quiet
+        Add-BypassAction 'start' $(if ($ok) { 'запущен' } else { 'не запущен; проверьте последний сбой' })
+        return $ok
+    } catch {
+        Add-BypassAction 'start' $_.Exception.Message
+        Write-Color $_.Exception.Message Yellow
+        return $false
+    } finally { Exit-BypassControl }
+}
 function Stop-Bypass([switch]$Unload) {
+    if (-not (Enter-BypassControl 'stop')) { throw 'Другая операция управляет обходом; остановка отменена.' }
+    try {
+        Assert-BypassControlAllowed
+        Add-BypassAction 'stop' 'начало'
+        $result = Stop-BypassCore -Unload:$Unload
+        Add-BypassAction 'stop' 'завершено'
+        return $result
+    } catch {
+        Add-BypassAction 'stop' $_.Exception.Message
+        throw
+    } finally { Exit-BypassControl }
+}
+
+function Stop-BypassCore([switch]$Unload) {
     $svc = Get-OurService
     $svcUp = $svc -and $svc.Status -ne 'Stopped'
     $since = Get-Date
@@ -887,6 +1038,12 @@ function Stop-Bypass([switch]$Unload) {
             }
         }
     }
+    # Ошибка остановки не разрешает выгрузку драйвера или запуск второго экземпляра.
+    $remaining = @(Get-OurProcesses)
+    if ($svc) { $svc.Refresh() }
+    if ($remaining.Count -or ($svc -and $svc.Status -ne 'Stopped')) {
+        throw 'Предыдущий обход не удалось остановить. Новый экземпляр не запущен; проверьте права и журнал Windows.'
+    }
     if ($Unload) { return (Remove-WinDivertDriver) }
 }
 
@@ -906,14 +1063,17 @@ $Script:CrashDays = 7   # за сколько дней проверка обхо
 function Wait-BypassAlive([int]$TimeoutMs = 4000, [int]$AliveMs = 1200) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $since = -1
+    $identity = ''
     while ($sw.ElapsedMilliseconds -lt $TimeoutMs) {
-        if (@(Get-OurProcesses).Count) {
-            if ($since -lt 0) { $since = $sw.ElapsedMilliseconds }
+        $processes = @(Get-OurProcesses)
+        if ($processes.Count -eq 1) {
+            $next = [string]$processes[0].Id
+            if ($identity -ne $next) { $identity = $next; $since = $sw.ElapsedMilliseconds }
             elseif ($sw.ElapsedMilliseconds - $since -ge $AliveMs) { return $true }
-        } else { $since = -1 }
+        } else { $identity = ''; $since = -1 }
         Start-Sleep -Milliseconds 150
     }
-    return (@(Get-OurProcesses).Count -gt 0)
+    return $false
 }
 
 # ---------- драйвер WinDivert ----------
@@ -993,17 +1153,13 @@ function Get-ServiceBinPath([string]$CmdLine) {
 }
 
 # Запускает обход с текущими настройками. Возвращает $true, если winws2 жив через 3 секунды.
-function Start-Bypass([switch]$Quiet) {
+function Start-BypassCore([switch]$Quiet) {
     # обход снова включают - уведомление "обход не работает" опять имеет смысл (см. пункт 2 меню)
     Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
     $settings = Get-Settings
-    Stop-Bypass
-    Repair-WinDivertService
-    Enable-TcpTimestamps
-    Update-RuntimeLists
-
+    Update-RuntimeLists | Out-Null
     try { $cmd = Get-BypassCmdLine -Settings $settings }
     catch { Write-Color $_.Exception.Message Red; return $false }
     $dry = Test-ConfigDry $settings -CmdLine $cmd
@@ -1012,6 +1168,11 @@ function Start-Bypass([switch]$Quiet) {
         Write-Host $dry.Output
         return $false
     }
+
+    Assert-BypassControlAllowed
+    Stop-Bypass
+    Repair-WinDivertService
+    Enable-TcpTimestamps
 
     $svc = Get-OurService
     $since = Get-Date
@@ -1022,19 +1183,22 @@ function Start-Bypass([switch]$Quiet) {
         $err = Start-OurService
     } else {
         # без окна: ошибки запуска видны через Инструменты -> 5 (диагностика)
+        Assert-BypassControlAllowed
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
     }
     $alive = Wait-BypassAlive
-    if (-not $alive -and -not $svc) {
+    if (-not $alive -and -not $svc -and @(Get-OurProcesses).Count -eq 0) {
         # winws2 (cygwin) изредка падает при старте без причины - ещё одна попытка (у службы есть свой перезапуск)
+        Assert-BypassControlAllowed
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
         $alive = Wait-BypassAlive
     }
     if (-not $alive) {
-        Write-Color $(if ($svc) { 'Служба обхода не запустилась.' } else { 'winws2 завершился сразу после запуска.' }) Red
+        Write-Color $(if ($svc) { 'Не удалось подтвердить стабильную работу службы обхода.' } else { 'Не удалось подтвердить стабильный запуск winws2.' }) Red
         $alive = Show-StartFailure $err $since
     }
     if ($alive) {
+        Remove-Item (Join-Path $Script:Runtime 'start-error.txt') -Force -ErrorAction SilentlyContinue
         Set-HighPriority
         Remove-OldRingMemory
         # адреса серверов игр - уже через обход, как их увидит игра
@@ -1044,8 +1208,13 @@ function Start-Bypass([switch]$Quiet) {
             Write-Color ('Обход запущен: ' + (Get-AltText $settings)) Green
             foreach ($x in @(Get-RingsText $settings)) { Write-Color ('  свой круг - ' + $x) Gray }
             Write-Color ('Game Filter: ' + (Get-GameText $settings) + '. IPSet: ' + $settings.ipset) Gray
-            if (@(Get-ProxyWarnings).Count) { Write-Color 'Запущен прокси/VPN: трафик через него обход не видит. Для игры выйдите из клиента полностью.' Yellow }
+            foreach ($warning in @(Get-ProxyWarnings)) { Write-Color ('Прокси/VPN: ' + $warning) Yellow }
             foreach ($b in @(Get-GameBoosters)) { Write-Color ('Запущен игровой ускоритель ' + $b + ': он ' + $Script:BoosterHint + '.') Yellow }
+            if (@(Get-RunningGames).Count -eq 0) {
+                Update-ServiceHealth | Out-Null
+                $health = Get-ServiceHealthSummary @(Get-OurProcesses)
+                Write-Color $health.Text $(if ($health.State -eq 'Partial') { 'Yellow' } else { 'Gray' })
+            }
         }
     }
     return $alive
@@ -1053,7 +1222,7 @@ function Start-Bypass([switch]$Quiet) {
 
 # Start-Service, но вместо исключения - текст ошибки Windows ('' - служба запустилась)
 function Start-OurService {
-    try { Start-Service -Name $Script:ServiceName -ErrorAction Stop; return '' }
+    try { Assert-BypassControlAllowed; Start-Service -Name $Script:ServiceName -ErrorAction Stop; return '' }
     catch {
         $e = $_.Exception
         while ($e.InnerException) { $e = $e.InnerException }
@@ -1084,7 +1253,7 @@ function Get-StartFailureHints([string]$Text) {
     # FWP_E_IN_USE (0x8032000A): у Windows остались фильтры прошлого запуска. Было при перезапуске обхода посреди игры с античитом
     if ($Text -match '(?i)referenced by other objects|0x8032000A|ссылаются другие объекты') {
         $games = @(Get-RunningGames)
-        $msg = 'Драйвер WinDivert не смог поставить фильтры: Windows держит фильтры прошлого запуска (0x8032000A).'
+        $msg = 'Драйвер WinDivert не смог поставить фильтры: сетевой объект занят (0x8032000A). Причина удержания по этому коду не определяется.'
         if ($games.Count) { $msg += ' Так бывает, если перезапускать обход при открытой игре с античитом, а сейчас открыто: ' + ($games -join ', ') + '. Закройте игру, запустите обход (пункт 1), потом игру. Не поможет - перезагрузите ПК.' }
         else { $msg += ' Перезагрузите ПК и запускайте обход до игры.' }
         $h += $msg
@@ -1099,6 +1268,10 @@ function Get-StartFailureHints([string]$Text) {
 # -RemoveService - служба только что поставлена и не запустилась: она удаляется, а не остаётся сбоить при каждом старте.
 # Возвращает $true, если обход в итоге запущен без службы.
 function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$RemoveService) {
+    if (-not (Enter-BypassControl 'Show-StartFailure')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     $lines = New-Object System.Collections.Generic.List[string]
     if ($StartError) { $lines.Add('Windows: ' + $StartError) }
     $svc = $null
@@ -1121,12 +1294,21 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
         if ($RemoveService) { & sc.exe delete $Script:ServiceName | Out-Null }
         else { & sc.exe config $Script:ServiceName start= disabled | Out-Null }
     }
-    $cmd = Get-BypassCmdLine -Settings (Get-Settings)
-    $r = Invoke-Native $Script:Exe $cmd $Script:Bin 5
-    if ($svc -and -not $RemoveService) { & sc.exe config $Script:ServiceName start= auto | Out-Null }
+    $restoreMode = if ($svc) { switch ($svc.StartMode) { 'Manual' { 'demand' } 'Disabled' { 'disabled' } default { 'auto' } } } else { '' }
+    try {
+        $cmd = Get-BypassCmdLine -Settings (Get-Settings)
+        $kind = Get-StartFailureKind ($lines -join "`n")
+        if ($kind -eq 'Unknown') { Assert-BypassControlAllowed; $r = Invoke-Native $Script:Exe $cmd $Script:Bin 5 }
+        else { $r = $null }
+    } finally {
+        if ($svc -and -not $RemoveService) { & sc.exe config $Script:ServiceName start= $restoreMode | Out-Null }
+    }
     $fallback = $false
-    if ($r.TimedOut) {
+    if ($kind -ne 'Unknown') {
+        $lines.Add('Отдельный запуск без службы не выполнялся: ошибка уже определена (' + $kind + ').')
+    } elseif ($r.TimedOut) {
         $lines.Add('winws2 без службы запускается и работает: сбой только у службы Windows')
+        Assert-BypassControlAllowed
         Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
         Start-Sleep -Seconds 2
         $fallback = @(Get-OurProcesses).Count -gt 0
@@ -1146,6 +1328,8 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
     $save = @(('Обход не запустился {0}, Windows {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $os)) + @($lines) + @($hints)
     Write-TextNoBom (Join-Path $Script:Runtime 'start-error.txt') (($save -join "`r`n") + "`r`n")
     return $fallback
+
+    } finally { Exit-BypassControl }
 }
 
 function Get-AltText([hashtable]$Settings) {
@@ -1162,20 +1346,23 @@ function Get-AltText([hashtable]$Settings) {
 }
 
 function Install-BypassService {
+    if (-not (Enter-BypassControl 'Install-BypassService')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
     $settings = Get-Settings
-    Stop-Bypass
-    if (Get-OurService) { & sc.exe delete $Script:ServiceName | Out-Null; Start-Sleep -Seconds 1 }
-
-    Enable-TcpTimestamps
     Update-RuntimeLists | Out-Null
     try { $cmd = Get-BypassCmdLine -Settings $settings }
     catch { Write-Color $_.Exception.Message Red; return $false }
     $dry = Test-ConfigDry $settings -CmdLine $cmd
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; return $false }
 
+    Stop-Bypass
+    if (Get-OurService) { & sc.exe delete $Script:ServiceName | Out-Null; Start-Sleep -Seconds 1 }
+    Enable-TcpTimestamps
     $binPath = Get-ServiceBinPath $cmd
     $since = Get-Date
     New-Service -Name $Script:ServiceName -BinaryPathName $binPath -DisplayName $Script:ServiceDisplayName `
@@ -1186,6 +1373,8 @@ function Install-BypassService {
     Write-Color 'Служба не запустилась и удалена.' Red
     Show-StartFailure $err $since -RemoveService | Out-Null
     return $false
+
+    } finally { Exit-BypassControl }
 }
 
 # Сборка называлась NBA2K27-zapret2: служба и задача автонастройки прежних версий переносятся под новые имена
@@ -1195,6 +1384,16 @@ $Script:LegacyAutotuneTask = 'NBA2K27-zapret2 autotune'
 
 function Update-LegacyNames {
     $old = Get-Service -Name $Script:LegacyServiceName -ErrorAction SilentlyContinue
+    $oldTask = $null
+    if ((Test-TaskExists $Script:LegacyAutotuneTask) -ne $false) {
+        try { $oldTask = Get-ScheduledTask -TaskName $Script:LegacyAutotuneTask -ErrorAction Stop } catch { }
+    }
+    if (-not $old -and -not $oldTask) { return }
+    if (@(Get-RunningGames).Count) { Write-Color 'Перенос прежней службы отложен до закрытия игры.' Yellow; return }
+    if (-not (Enter-BypassControl 'Update-LegacyNames')) { Write-Color 'Перенос прежней службы отложен: другая операция управляет обходом.' Yellow; return }
+    try {
+        Assert-BypassControlAllowed
+
     if ($old) {
         Write-Color ('Сборка переименована в zapret: служба автозапуска ' + $Script:LegacyServiceName + ' переносится под новым именем...') Gray
         if ($old.Status -ne 'Stopped') {
@@ -1207,10 +1406,6 @@ function Update-LegacyNames {
             else { Write-Color 'Новую службу поставить не вышло - включите автозапуск заново: Настройки -> 6.' Yellow }
         }
     }
-    $oldTask = $null
-    if ((Test-TaskExists $Script:LegacyAutotuneTask) -ne $false) {
-        try { $oldTask = Get-ScheduledTask -TaskName $Script:LegacyAutotuneTask -ErrorAction Stop } catch { }
-    }
     if ($oldTask) {
         try { Unregister-ScheduledTask -TaskName $Script:LegacyAutotuneTask -Confirm:$false -ErrorAction Stop } catch { }
         if (-not (Get-AutotuneTask)) {
@@ -1218,12 +1413,20 @@ function Update-LegacyNames {
             else { Write-Color 'Автонастройку перенести не вышло - включите заново: Настройки -> 7.' Yellow }
         }
     }
+
+    } catch { Write-Color $_.Exception.Message Yellow } finally { Exit-BypassControl }
 }
 
 function Remove-BypassService {
+    if (-not (Enter-BypassControl 'Remove-BypassService')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     Stop-Bypass
     if (Get-OurService) { & sc.exe delete $Script:ServiceName | Out-Null }
     Remove-WinDivertDriver | Out-Null
+
+    } finally { Exit-BypassControl }
 }
 
 # ---------- другие обходы ----------
@@ -1277,31 +1480,149 @@ function Resolve-ForeignBypass([switch]$NoPrompt) {
 
 # ---------- прокси, VPN и прямое подключение ----------
 
-# Прокси и VPN: трафик через них zapret не видит, и пинг через них выше.
+# Текущее состояние Windows, а не оставшиеся ProxyServer/AutoConfigURL в реестре.
+# API только читает настройки; PAC не загружается и не исполняется.
+function Get-WindowsProxySettings {
+    try {
+        if (-not ('ZapretProxy.Reader' -as [type])) {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace ZapretProxy {
+    public static class Reader {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct Config {
+            [MarshalAs(UnmanagedType.Bool)] public bool AutoDetect;
+            public IntPtr Pac, Proxy, Bypass;
+        }
+        [DllImport("winhttp.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WinHttpGetIEProxyConfigForCurrentUser(out Config config);
+        [DllImport("kernel32.dll")] private static extern IntPtr GlobalFree(IntPtr value);
+        public static string[] Read() {
+            Config c = new Config();
+            try {
+                if (!WinHttpGetIEProxyConfigForCurrentUser(out c)) return null;
+                return new string[] { c.AutoDetect ? "1" : "0",
+                    Marshal.PtrToStringUni(c.Pac) ?? "", Marshal.PtrToStringUni(c.Proxy) ?? "" };
+            } finally {
+                if (c.Pac != IntPtr.Zero) GlobalFree(c.Pac);
+                if (c.Proxy != IntPtr.Zero) GlobalFree(c.Proxy);
+                if (c.Bypass != IntPtr.Zero) GlobalFree(c.Bypass);
+            }
+        }
+    }
+}
+'@ -ErrorAction Stop
+        }
+        $values = [ZapretProxy.Reader]::Read()
+        if ($null -ne $values) {
+            return [pscustomobject]@{ Known = $true; AutoDetect = ($values[0] -eq '1'); Pac = $values[1]; Proxy = $values[2] }
+        }
+    } catch { }
+    return [pscustomobject]@{ Known = $false; AutoDetect = $false; Pac = ''; Proxy = '' }
+}
+
+function Get-ProxyListeners {
+    try { return ,@([Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()) }
+    catch { return $null }
+}
+
+function Get-ProxyEnvironment {
+    foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')) {
+        if ([Environment]::GetEnvironmentVariable($v)) { $v }
+    }
+}
+
+# Только loopback-адреса: не делаем сетевых запросов к удалённым прокси и не выводим пароли/URL.
+function Get-ProxyLoopbackEndpoints([string]$Proxy) {
+    foreach ($entry in @($Proxy -split '[;\s]+')) {
+        $address = $entry -replace '^\w+=', ''
+        if ($address -notmatch '^\w+://') { $address = 'http://' + $address }
+        $uri = $null
+        if (-not [uri]::TryCreate($address, [UriKind]::Absolute, [ref]$uri)) { continue }
+        $hostName = $uri.DnsSafeHost.Trim('[', ']')
+        $ip = $null
+        if ($hostName -eq 'localhost' -or ([Net.IPAddress]::TryParse($hostName, [ref]$ip) -and [Net.IPAddress]::IsLoopback($ip))) {
+            if ($uri.Port -gt 0) { [pscustomobject]@{ Host = $hostName; Port = $uri.Port } }
+        }
+    }
+}
+
+# Подтверждение отсутствующего в таблице порта: только loopback, без HTTP/SOCKS-запроса и DNS.
+function Get-ProxyEndpointState($Endpoint) {
+    $addresses = @()
+    if ($Endpoint.Host -eq 'localhost') { $addresses = @([Net.IPAddress]::Loopback, [Net.IPAddress]::IPv6Loopback) }
+    else {
+        $ip = $null
+        if (-not [Net.IPAddress]::TryParse($Endpoint.Host, [ref]$ip) -or -not [Net.IPAddress]::IsLoopback($ip)) { return 'Unknown' }
+        $addresses = @($ip)
+    }
+    $unknown = $false
+    foreach ($address in $addresses) {
+        $client = $null
+        try {
+            $client = New-Object Net.Sockets.TcpClient($address.AddressFamily)
+            $task = $client.ConnectAsync($address, $Endpoint.Port)
+            if ($task.Wait(200) -and $client.Connected) { return 'Open' }
+            $unknown = $true
+        } catch {
+            $errorCause = $_.Exception.GetBaseException()
+            if ($errorCause -isnot [Net.Sockets.SocketException] -or $errorCause.SocketErrorCode -ne [Net.Sockets.SocketError]::ConnectionRefused) { $unknown = $true }
+        } finally { if ($client) { $client.Dispose() } }
+    }
+    if ($unknown) { return 'Unknown' }
+    return 'Closed'
+}
+
+# Процесс клиента, настройки прокси и маршруты TUN — отдельные наблюдения, а не доказательство пути каждой игры.
 function Get-ProxyWarnings {
     $w = @()
-    try {
-        $is = Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction Stop
-        if (($is.PSObject.Properties.Name -contains 'ProxyEnable') -and $is.ProxyEnable -eq 1) {
-            $srv = if ($is.PSObject.Properties.Name -contains 'ProxyServer') { $is.ProxyServer } else { '?' }
-            $w += "системный прокси Windows: $srv"
+    $settings = Get-WindowsProxySettings
+    if (-not $settings.Known) { $w += 'не удалось прочитать текущие настройки прокси Windows' }
+    if ($settings.Proxy) {
+        $w += 'системный прокси Windows включён; используется приложениями, которые учитывают эту настройку'
+        $endpoints = @(Get-ProxyLoopbackEndpoints $settings.Proxy)
+        if ($endpoints.Count) {
+            $listeners = Get-ProxyListeners
+                foreach ($endpoint in $endpoints) {
+                    $found = @($listeners | Where-Object { $null -ne $_ } | Where-Object {
+                        if ($_.Port -ne $endpoint.Port) { return $false }
+                        $ip = $_.Address
+                        if ($endpoint.Host -eq 'localhost') { return ([Net.IPAddress]::IsLoopback($ip) -or $ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any)) }
+                        $expected = [Net.IPAddress]::Parse($endpoint.Host)
+                        return ($ip.Equals($expected) -or ($ip.AddressFamily -eq $expected.AddressFamily -and ($ip.Equals([Net.IPAddress]::Any) -or $ip.Equals([Net.IPAddress]::IPv6Any))))
+                    }).Count -gt 0
+                    $probe = if ($found) { 'Open' } else { Get-ProxyEndpointState $endpoint }
+                    $state = switch ($probe) {
+                        'Open' { 'слушает (доступность сервера не проверялась)' }
+                        'Closed' { 'не слушает: локальное соединение отклонено; включённый прокси может мешать приложениям' }
+                        default { 'не удалось проверить локальный порт прокси' }
+                    }
+                    $w += ('локальный прокси {0}:{1} — {2}' -f $endpoint.Host, $endpoint.Port, $state)
+                }
         }
-        if (($is.PSObject.Properties.Name -contains 'AutoConfigURL') -and $is.AutoConfigURL) { $w += "PAC-скрипт прокси: $($is.AutoConfigURL)" }
-    } catch { }
-    foreach ($v in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')) {
-        $val = [Environment]::GetEnvironmentVariable($v)
-        if ($val) { $w += "переменная $v = $val" }
     }
-    foreach ($a in @(Get-TunAdapters)) { $w += "VPN/TUN-адаптер: $($a.Name) ($($a.InterfaceDescription))" }
+    if ($settings.Pac) { $w += 'PAC-скрипт Windows включён; использование прокси зависит от правил скрипта и приложения' }
+    if ($settings.AutoDetect) { $w += 'автоопределение прокси Windows включено; наличие прокси не подтверждено' }
+    foreach ($v in @(Get-ProxyEnvironment)) { $w += "задана переменная $v; её используют только поддерживающие прокси приложения" }
+    foreach ($a in @(Get-TunAdapters)) { $w += "VPN/TUN-адаптер с маршрутами (или маршруты недоступны): $($a.Name); путь конкретной игры зависит от маршрутизации" }
     foreach ($p in @(Get-Process -Name $Script:ProxyProcessNames -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ProcessName -Unique)) {
-        $w += "запущен клиент прокси/VPN: $p"
+        $w += "запущен клиент $p; подключение по одному процессу не подтверждено"
     }
     return @($w | Select-Object -Unique)
 }
 
 function Get-TunAdapters {
     try {
-        return @(Get-NetAdapter -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wintun|TAP-Windows|WireGuard|sing-box|Clash|Mihomo|Meta Tunnel|Hiddify|Happ|AmneziaWG|OpenVPN|Xray' -or $_.Name -match 'tun|wg') })
+        $adapters = @(Get-NetAdapter -IncludeHidden -ErrorAction Stop | Where-Object { $_.Status -eq 'Up' -and ($_.InterfaceDescription -match 'Wintun|TAP-Windows|WireGuard|sing-box|Clash|Mihomo|Meta Tunnel|Hiddify|Happ|AmneziaWG|OpenVPN|Xray' -or $_.Name -match '(^|[-_ ])(tun|wg)(\d|[-_ ]|$)') })
+        if (-not $adapters.Count) { return @() }
+        # Ошибка чтения маршрутов не должна разрешать опасный автоподбор под возможным TUN.
+        try { $routes = @(Get-NetRoute -PolicyStore ActiveStore -ErrorAction Stop) } catch { return $adapters }
+        return @($adapters | Where-Object {
+            $index = $_.ifIndex
+            @($routes | Where-Object { $_.InterfaceIndex -eq $index -and $_.DestinationPrefix -notmatch '^(fe[89ab]|ff|127\.|169\.254\.|224\.|255\.|::1/)' }).Count -gt 0
+        })
     } catch { return @() }
 }
 
@@ -1906,16 +2227,16 @@ function Show-ConnectionCheck {
         Write-Color ('  Внешний IP: {0}  ({1}, {2})' -f $info.Ip, $info.Country, $info.City) White
         Write-Color ('  Провайдер:  {0}  [{1}]' -f $info.Isp, $info.As) White
         if (-not $info.IsRussia) {
-            Write-Color '  ! Интернет видит не российский адрес: трафик идёт через VPN/прокси. Обход и тест в таком режиме бессмысленны.' Red
+            Write-Color '  ! Внешний IP не российский. Проверьте VPN и маршруты перед подбором обхода; страна IP сама по себе не доказывает наличие VPN.' Red
             $ok = $false
         } else {
-            Write-Color '  Прямое подключение через провайдера: OK' Green
+            Write-Color '  Внешний IP относится к России; это не исключает прокси или VPN.' Gray
         }
     } else {
         Write-Color '  Не удалось узнать внешний IP (ipwho.is и ipinfo.io не ответили).' Yellow
     }
     if ($tun.Count) {
-        Write-Color '  ! Включён VPN в режиме TUN: игра пойдёт через него, а не напрямую. Выйдите из VPN-клиента полностью.' Red
+        Write-Color '  ! Найден активный VPN/TUN-адаптер с маршрутами либо маршруты недоступны. Перед подбором проверьте режим TUN; путь игры зависит от правил VPN.' Yellow
         $ok = $false
     }
     foreach ($x in $proxy) { Write-Color ('  ! ' + $x) Yellow }
@@ -2272,6 +2593,53 @@ $Script:ServiceProbes = [ordered]@{
     'NBA 2K27: запись матча'  = 'https://api.quago.io/'
 }
 
+function Get-BypassIdentity($Processes) {
+    if (@($Processes).Count -ne 1) { return '' }
+    try { return ('{0}:{1}' -f $Processes[0].Id, $Processes[0].StartTime.ToUniversalTime().Ticks) } catch { return '' }
+}
+function Test-ServiceHealthRows($Rows) {
+    if (@($Rows).Count -ne $Script:ServiceProbes.Count) { return $false }
+    $names = @{}
+    foreach ($row in $Rows) {
+        if (-not $Script:ServiceProbes.Contains([string]$row.Name) -or $names.ContainsKey([string]$row.Name) -or $row.Ok -isnot [bool]) { return $false }
+        $names[[string]$row.Name] = $true
+    }
+    return $true
+}
+function Save-ServiceHealth($Rows, [string]$Identity) {
+    try {
+        if (-not $Identity -or $Identity -cne (Get-BypassIdentity @(Get-OurProcesses)) -or -not (Test-ServiceHealthRows $Rows)) { return $false }
+        $data = New-Object PSObject -Property @{ Identity=$Identity; CheckedUtc=[datetime]::UtcNow.ToString('o'); Rows=@($Rows) }
+        Write-TextNoBom (Join-Path $Script:Runtime 'service-health.json') ($data | ConvertTo-Json -Depth 4)
+        return $true
+    } catch { return $false }
+}
+function Get-ServiceHealthSummary($Processes) {
+    $unknown = New-Object PSObject -Property @{ State='Unknown'; Text='HTTPS: для этого запуска нет свежей проверки. Проверить — пункт 5.' }
+    try {
+        $identity = Get-BypassIdentity $Processes
+        $path = Join-Path $Script:Runtime 'service-health.json'
+        if (-not $identity -or -not (Test-Path $path) -or (Get-Item $path).Length -gt 16384) { return $unknown }
+        $data = [IO.File]::ReadAllText($path) | ConvertFrom-Json
+        if ($data.Identity -cne $identity -or -not (Test-ServiceHealthRows $data.Rows)) { return $unknown }
+        $checked = [DateTimeOffset]::Parse([string]$data.CheckedUtc, [Globalization.CultureInfo]::InvariantCulture)
+        $age = ([datetime]::UtcNow - $checked.UtcDateTime).TotalSeconds
+        if ($age -lt 0 -or $age -gt 600) { return $unknown }
+        $bad = @($data.Rows | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
+        $text = 'HTTPS: последняя проверка {0}, ответили {1}/{2}' -f $checked.ToLocalTime().ToString('HH:mm'), ($data.Rows.Count - $bad.Count), $data.Rows.Count
+        if ($bad.Count) { $text += '; без ответа: ' + ($bad -join ', ') }
+        return (New-Object PSObject -Property @{ State=$(if ($bad.Count) { 'Partial' } else { 'Good' }); Text=$text })
+    } catch { return $unknown }
+}
+function Update-ServiceHealth {
+    try {
+        $identity = Get-BypassIdentity @(Get-OurProcesses)
+        if (-not $identity) { return $false }
+        $jobs = Start-ServiceProbes -TimeoutSec 3
+        $rows = @(Get-ServiceProbeResults $jobs)
+        return (Save-ServiceHealth $rows $identity)
+    } catch { return $false }
+}
 function Start-ServiceProbes([int]$TimeoutSec = 8) {
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
@@ -2878,6 +3246,10 @@ function Install-UpdateFiles([string]$Src, [string]$Dst, [string]$Backup, $Plan,
 # Скачивает, проверяет и ставит релиз $Rel (из Get-ZapretRelease). Перед заменой старые файлы копируются
 # в runtime\update\<номер>\backup и при сбое возвращаются. Возвращает $true, если обновлено.
 function Install-ZapretUpdate($Rel) {
+    if (-not (Enter-BypassControl 'Install-ZapretUpdate')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    try {
+        Assert-BypassControlAllowed
+
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
     $dir = Join-Path (Join-Path $Script:Runtime 'update') ([guid]::NewGuid().ToString('N'))
@@ -2919,6 +3291,8 @@ function Install-ZapretUpdate($Rel) {
     if ([IO.Path]::GetDirectoryName($cleanup) -eq [IO.Path]::GetFullPath($dir)) { Remove-Item -LiteralPath $cleanup -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Color ('Обновлено до zapret {0}: файлов заменено {1}, старых стратегий убрано {2}. Меню откроется заново.' -f $Rel.Tag, $plan.Count, $remove.Count) Green
     return $true
+
+    } finally { Exit-BypassControl }
 }
 
 # Новая версия самой сборки по сохранённой проверке: тег вида v1.2 или $null

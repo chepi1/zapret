@@ -56,8 +56,8 @@ try {
 } finally {
     # тест сам включает обход обратно; это - на случай, если он упал посередине
     if ($wasRunning -and @(Get-OurProcesses).Count -eq 0) {
-        Start-Bypass -Quiet | Out-Null
-        Add-AutotuneLog 'обход включён обратно после сбоя теста'
+        if (Start-Bypass -Quiet) { Add-AutotuneLog 'обход включён обратно после сбоя теста' }
+        else { Add-AutotuneLog 'обход не восстановлен: запуск отклонён или завершился ошибкой; см. control-actions.log и start-error.txt' }
     }
     try { Stop-Transcript | Out-Null } catch { }
     Remove-Item $lock -Force -ErrorAction SilentlyContinue
