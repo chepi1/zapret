@@ -13,6 +13,7 @@ $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'netstate.ps1')
+. (Join-Path $PSScriptRoot 'capture.ps1')
 . (Join-Path $PSScriptRoot 'recovery.ps1')
 . (Join-Path $PSScriptRoot 'selection.ps1')
 . (Join-Path $PSScriptRoot 'processmetrics.ps1')
@@ -506,7 +507,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/capture.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
@@ -831,6 +832,12 @@ function New-BypassArgList {
     $a.Add("--wf-tcp-out=$tcpPorts")
     $a.Add("--wf-udp-out=$udpPorts")
     $a.Add('--wf-raw-part=@' + (Get-PkgPath 'windivert/quic_initial_ietf.txt'))
+    # Take-Two уже исключены во всех профилях. Небольшой IPv4 список фиксируется одинаково
+    # в kernel filter и native профилях: редактирование файла не рассинхронизирует текущий запуск.
+    $takeTwoFile=Get-PkgPath 'lists/ipset-taketwo.txt'
+    $captureExclusion=$null
+    try{if((Get-Item -LiteralPath $takeTwoFile -ErrorAction Stop).Length -le 8192){$captureExclusion=Get-CaptureExclusion ([IO.File]::ReadAllLines($takeTwoFile))}}catch{}
+    if($captureExclusion){$a.Add('--wf-raw-filter='+$captureExclusion.Filter)}
 
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-lib.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-antidpi.lua'))
@@ -859,7 +866,7 @@ function New-BypassArgList {
         ('--hostlist-exclude=' + (Get-PkgPath 'lists/list-exclude-user.txt')))
     # серверы 2K (Take-Two) исключены во всех профилях, даже в IPSet any. Серверы Valve - нет: NBA 2K27 ходит через
     # ретрансляторы Steam у хостингов из ipset-all, и без обхода их режут (в 1.2-1.3 их исключение давало статтеры в игре)
-    $ipGames = @('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-taketwo.txt'))
+    $ipGames = @(if($captureExclusion){$captureExclusion.IpArgument}else{'--ipset-exclude='+$takeTwoFile})
     $ipEx = @(
         ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-exclude.txt')),
         ('--ipset-exclude=' + (Get-PkgPath 'lists/ipset-exclude-user.txt'))) + $ipGames
