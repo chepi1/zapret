@@ -382,10 +382,10 @@ function New-FinalistExperimentSpec([hashtable]$Settings,$Targets,[string]$AId,[
     $network=Get-NetworkObservation
     $context=Get-TestResultContext $fixed $network
     if ($null -eq $context) { throw 'Контекст сети неизвестен; достоверное сравнение сейчас невозможно.' }
-    $parameters=@{Mode='finalists-v1';TimeoutSec=$TimeoutSec;Parallel=([math]::Min(4,$Parallel));Blocks=$Blocks;Configuration=$context.InputsHash;Settings=(@($fixed.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$fixed[$_] }) -join '|')}
+    $parameters=@{Mode='finalists-v2';TimeoutSec=$TimeoutSec;Parallel=([math]::Min(4,$Parallel));Blocks=$Blocks;Configuration=$context.InputsHash;Settings=(@($fixed.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$fixed[$_] }) -join '|')}
     $inputs=Get-ScoreInputsHash $Targets $parameters
     if ($PlanSeed -lt 0) { $PlanSeed=Get-Random -Minimum 0 -Maximum ([int]::MaxValue) }
-    $plan=New-FinalistPlan $AId $BId (Get-StrategyFingerprint $AId) (Get-StrategyFingerprint $BId) $Targets $network.Key $inputs $PlanSeed $Blocks ([guid]::NewGuid().ToString('N'))
+    $plan=New-FinalistPlan $AId $BId (Get-StrategyFingerprint $AId) (Get-StrategyFingerprint $BId) $Targets $network.Key $inputs $PlanSeed $Blocks ([guid]::NewGuid().ToString('N')) -MeasureResources
     foreach ($id in @($AId,$BId)) {
         $dry=Test-ConfigDry $fixed $id -NoAuto
         if (-not $dry.Ok) { throw ('Конфигурация сравнения отклонена до остановки обхода: '+$dry.Output) }
@@ -418,6 +418,7 @@ function Invoke-FinalistBatch($Targets,[string]$PostFile,[int]$Width,[long]$Dead
 }
 function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFile,$Plan,[hashtable]$InputsParameters,$NetworkBefore,[ref]$ActiveProcess) {
     $fixed=$Settings.Clone();$fixed.auto='no'
+    $measureResources=$Plan.Protocol -eq 'finalists-v2'
     $width=[math]::Min(4,$Parallel)
     $lifetime=Get-TestInstanceLifetimeMs @($Targets).Count $width $TimeoutSec
     $clock=[Diagnostics.Stopwatch]::StartNew()
@@ -439,16 +440,29 @@ function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFi
             if ($remainingMs -lt 1000) { throw 'Недостаточно времени для следующего запуска.' }
             $ActiveProcess.Value=Start-TestInstance $fixed $slot.StrategyId -Final -LifetimeMs ([int][math]::Min($lifetime,$remainingMs))
             if (-not $ActiveProcess.Value -or $ActiveProcess.Value.HasExited) { throw 'Тестовый движок не запустился.' }
+            if ($measureResources) {
+                Write-ProcessResourceJournal $journalFile $metadata Ready (Get-ProcessResourceSample $ActiveProcess.Value)
+                if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился при чтении счётчиков.' }
+            }
             foreach ($stage in @('comparison-warmup','comparison')) {
                 $metadata.Stage=$stage
                 $rows=@(Invoke-FinalistBatch $Targets $PostFile $width $deadlineTicks $journalFile $metadata 1)
                 if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился во время запросов.' }
                 Assert-FinalistExperiment $Plan $Targets $InputsParameters $NetworkBefore $fixed $clock
+                if ($measureResources -and $stage -eq 'comparison-warmup') {
+                    Write-ProcessResourceJournal $journalFile $metadata Warm (Get-ProcessResourceSample $ActiveProcess.Value)
+                    if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился при чтении счётчиков.' }
+                }
             }
             $again=@($Targets | Where-Object { $key=Get-ProbeKey $_;@($rows | Where-Object { (Get-ProbeKey $_) -ceq $key -and $_.State -ne 'OK' }).Count -gt 0 })
             if ($again.Count) {
                 $retry=@(Invoke-FinalistBatch $again $PostFile $width $deadlineTicks $journalFile $metadata 2)
                 if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился во время повторных запросов.' }
+            }
+            if ($measureResources) {
+                Assert-FinalistExperiment $Plan $Targets $InputsParameters $NetworkBefore $fixed $clock
+                Write-ProcessResourceJournal $journalFile $metadata End (Get-ProcessResourceSample $ActiveProcess.Value)
+                if ($ActiveProcess.Value.HasExited) { throw 'Тестовый движок завершился при чтении счётчиков.' }
             }
         } finally {
             if ($ActiveProcess.Value) {
@@ -526,6 +540,7 @@ try {
         Write-Color ('Фиксированные стратегии, автосмена выключена: A='+$comparisonSpec.AName+'; B='+$comparisonSpec.BName+'.') Cyan
         $comparison=Invoke-FinalistExperiment $comparisonSpec.Settings $targets $postFile $comparisonSpec.Plan $comparisonSpec.Parameters $comparisonSpec.Network ([ref]$p)
         Write-Color ('Shadow-результат: '+$comparison.Assessment.Status+'. Настройки и рейтинг не применяются.') Cyan
+        foreach ($line in @(Format-FinalistResourceSummary $comparison.Assessment.Resources)) { Write-Color $line Gray }
         Write-Color ('Отчёт: '+$comparison.ResultFile) Gray
         exit 0
     }

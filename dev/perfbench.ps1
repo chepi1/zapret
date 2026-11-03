@@ -2,6 +2,7 @@
 param([Parameter(Mandatory=$true)][string]$PlanFile,[Parameter(Mandatory=$true)][string]$JournalFile,[Parameter(Mandatory=$true)][string]$OutFile)
 $ErrorActionPreference='Stop'
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/selection.ps1')
+. (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/processmetrics.ps1')
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'tools/comparison.ps1')
 foreach ($file in @($PlanFile,$JournalFile)) {
     $item=Get-Item -LiteralPath $file -ErrorAction Stop

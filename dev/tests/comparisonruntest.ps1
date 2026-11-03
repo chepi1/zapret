@@ -34,11 +34,11 @@ function Invoke-CurlBatch($Targets,$PostFile,$Width=0,[long]$DeadlineTicks=0) {
     $script:batchCalls++;$script:probeWidths+=,$Width;$script:probeDeadlines+=,$DeadlineTicks
     if ($script:denyJournal -and -not $script:deniedStream) { $script:deniedStream=[IO.File]::Open($journalFile,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None) }
     $slot=$plan.Slots[$script:launches.Count-1]
-    $time=$slot.Index*1000+$script:batchCalls*10
+    $time=$slot.Index*10000+$script:batchCalls*200
     foreach ($target in $Targets) {
         $state=if ($script:failFirst -and $metadata.Stage -eq 'comparison' -and $slot.Index -eq 5 -and $script:batchCalls%2 -eq 0) { 'FAIL' } else { 'OK' }
         $tls=if ($slot.Kind -eq 'Compare' -and $slot.Arm -eq 'B') {60} else {100}
-        [pscustomobject]@{Group=$target.Group;Name=$target.Name;Url=$target.Url;State=$state;TlsMs=$tls;StartedMs=$time;ObservedMs=($time+1)}
+        [pscustomobject]@{Group=$target.Group;Name=$target.Name;Url=$target.Url;State=$state;TlsMs=$tls;StartedMs=$time;ObservedMs=($time+110)}
     }
     if ($script:dieDuringProbe) { $script:fakeProcess.HasExited=$true }
     if ($script:dieAtLast -and $slot.Index -eq 24 -and $metadata.Stage -eq 'comparison') { $script:fakeProcess.HasExited=$true }
@@ -106,12 +106,13 @@ $branch=$ast.Find({param($node) $node -is [Management.Automation.Language.IfStat
 if (-not $branch) { throw 'FAIL no separate shadow execution branch' }
 $childPath=Join-Path $Script:Runtime 'comparison-branch-child.ps1'
 $prefix=@'
-param($Case,[switch]$Compare)
+param($Case,$Pkg,[switch]$Compare)
 $ErrorActionPreference='Stop'
+. (Join-Path $Pkg 'tools/comparison.ps1')
 $comparisonMode=[bool]$Compare;$targets=@();$postFile='';$p=$null
 $comparisonSpec=[pscustomobject]@{Settings=@{};Plan='fixture';Parameters=@{};Network='fixture';AName='Reference';BName='Candidate'}
 function Write-Color { }
-function Invoke-FinalistExperiment { return [pscustomobject]@{Assessment=[pscustomobject]@{Status='Inconclusive'};ResultFile='fixture.json'} }
+function Invoke-FinalistExperiment { return [pscustomobject]@{Assessment=[pscustomobject]@{Status='Inconclusive';Resources=[pscustomobject]@{Status='NotRequested'}};ResultFile='fixture.json'} }
 try {
 '@
 $suffix=@'
@@ -122,8 +123,35 @@ $suffix=@'
 $ps=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
 foreach ($mode in @('shadow','ordinary')) {
     $case=Join-Path $Script:Runtime ('branch-'+$mode)
-    $argsLine='-NoProfile -ExecutionPolicy Bypass -File '+(ConvertTo-WinArg $childPath)+' -Case '+(ConvertTo-WinArg $case)+$(if ($mode -eq 'shadow') {' -Compare'} else {''})
+    $argsLine='-NoProfile -ExecutionPolicy Bypass -File '+(ConvertTo-WinArg $childPath)+' -Case '+(ConvertTo-WinArg $case)+' -Pkg '+(ConvertTo-WinArg $Pkg)+$(if ($mode -eq 'shadow') {' -Compare'} else {''})
     $run=Invoke-Native $ps $argsLine $Script:Runtime 10
     Check ($mode+' branch preserves exit/finally and scoring separation') ($run.ExitCode -eq 0 -and (Test-Path ($case+'.finally')) -and (Test-Path ($case+'.scored')) -eq ($mode -eq 'ordinary'))
 }
+$script:resourceReads=0;$script:resourceUnknown=$false;$script:denyResourceRecord=$false;$script:resourceLock=$null
+function Get-ProcessResourceSample($ObservedProcess) {
+    if (-not [object]::ReferenceEquals($ObservedProcess,$script:fakeProcess)) { throw 'Resource sampler received a process it does not own' }
+    $script:resourceReads++
+    if ($script:denyResourceRecord -and -not $script:resourceLock) { $script:resourceLock=[IO.File]::Open($journalFile,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None) }
+    $slot=$plan.Slots[$script:launches.Count-1];$phase=($script:resourceReads-1)%3
+    [pscustomobject]@{Schema=1;ResourceStatus=$(if ($script:resourceUnknown) {'Unavailable'} else {'Ready'});ResourceReason=$(if ($script:resourceUnknown) {'counter-unavailable'} else {''});ProcessId=$ObservedProcess.Id;ProcessStartKey=$(if ($script:resourceUnknown) {$null} else {(639000000000000000L+$slot.Index).ToString([Globalization.CultureInfo]::InvariantCulture)})
+        ObservedMs=($slot.Index*10000+$script:batchCalls*200+120);ReadDurationMs=0.1;CpuTotalMs=$(if ($script:resourceUnknown) {$null} else {@(0,3,5)[$phase]});PrivateBytes=$(if ($script:resourceUnknown) {$null} else {33554432});WorkingSetBytes=16777216;OsPeakWorkingSetBytes=67108864}
+}
+$plan=New-FinalistPlan '12' '13' ('C'*64) ('D'*64) $targets ('A'*64) ('B'*64) 42 4 ([guid]::NewGuid().ToString('N')) -MeasureResources
+$script:launches=@();$script:batchCalls=0;$active=$null
+$measured=Invoke-FinalistExperiment $settings $targets '' $plan @{} ([pscustomobject]@{Key=('A'*64)}) ([ref]$active)
+$cost=Get-ProbeField $measured.Assessment 'Resources'
+Check 'v2 runner samples only its owned engine at ready warm and end boundaries' ($script:resourceReads -eq 72 -and $null -eq $active)
+Check 'v2 runner separates warmup CPU from measured CPU in its saved assessment' ($cost -and $cost.Status -eq 'Ready' -and $cost.A.CpuTimeMsSum -eq 16 -and $cost.B.CpuTimeMsSum -eq 16 -and $cost.Windows[0].Warmup.CpuTimeMs -eq 3)
+$recorded=@([IO.File]::ReadLines($measured.JournalFile) | ForEach-Object { $_ | ConvertFrom-Json })
+Check 'resource observations share the completed journal and exact slot identities' ($recorded.Count -eq 217 -and @($recorded | Where-Object { $_.Stage -eq 'comparison-resource' }).Count -eq 72 -and $recorded[-1].ResourceSamples -eq 72)
+$replayFile=Join-Path $Script:Runtime 'resource-replay.json'
+& (Join-Path $Pkg 'dev/perfbench.ps1') -PlanFile $measured.PlanFile -JournalFile $measured.JournalFile -OutFile $replayFile | Out-Null
+$replay=[IO.File]::ReadAllText($replayFile) | ConvertFrom-Json
+Check 'offline replay reproduces CPU evidence without querying a process' ($replay.Resources.Status -eq 'Ready' -and $replay.Resources.A.CpuTimeMsSum -eq 16 -and $script:resourceReads -eq 72)
+$plan.RunId=[guid]::NewGuid().ToString('N');$script:launches=@();$script:batchCalls=0;$script:resourceReads=0;$script:resourceUnknown=$true;$active=$null
+$unknown=Invoke-FinalistExperiment $settings $targets '' $plan @{} ([pscustomobject]@{Key=('A'*64)}) ([ref]$active)
+Check 'unavailable OS counters do not masquerade as zero or suppress valid HTTPS evidence' ($unknown.Assessment.CanRecommend -and $unknown.Assessment.Resources.Status -eq 'Unavailable' -and $null -eq $unknown.Assessment.Resources.A.CpuTimeMsSum)
+$plan.RunId=[guid]::NewGuid().ToString('N');$script:launches=@();$script:batchCalls=0;$script:resourceReads=0;$script:resourceUnknown=$false;$script:denyResourceRecord=$true;$active=$null;$blocked=$false
+try { Invoke-FinalistExperiment $settings $targets '' $plan @{} ([pscustomobject]@{Key=('A'*64)}) ([ref]$active) | Out-Null } catch { $blocked=$true } finally { if ($script:resourceLock) { $script:resourceLock.Dispose() };$script:denyResourceRecord=$false }
+Check 'real resource journal failure cleans the engine before probing or finalization' ($blocked -and $null -eq $active -and $script:batchCalls -eq 0 -and -not (Test-Path (Join-Path $Script:Runtime ('comparison-'+$plan.RunId+'.result.json'))))
 if ($fails) { exit 1 }

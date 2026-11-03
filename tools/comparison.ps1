@@ -18,7 +18,7 @@ function New-FinalistSlots([string]$AId,[string]$BId,[string]$AHash,[string]$BHa
     }
     return $slots.ToArray()
 }
-function New-FinalistPlan([string]$AId,[string]$BId,[string]$AHash,[string]$BHash,$Targets,[string]$NetworkKey,[string]$InputsHash,[int]$Seed,[int]$Blocks,[string]$RunId) {
+function New-FinalistPlan([string]$AId,[string]$BId,[string]$AHash,[string]$BHash,$Targets,[string]$NetworkKey,[string]$InputsHash,[int]$Seed,[int]$Blocks,[string]$RunId,[switch]$MeasureResources) {
     if ($AId -notmatch '^\d+$' -or $BId -notmatch '^\d+$' -or $AId -eq $BId -or $RunId -notmatch '^[A-Fa-f0-9]{32}$') { throw 'invalid-candidates' }
     foreach ($hash in @($AHash,$BHash,$NetworkKey,$InputsHash)) { if ($hash -notmatch '^[A-Fa-f0-9]{64}$') { throw 'unknown-comparison-context' } }
     $seen=@{};$targetKeys=@()
@@ -29,9 +29,11 @@ function New-FinalistPlan([string]$AId,[string]$BId,[string]$AHash,[string]$BHas
         $targetKeys+=[pscustomobject]@{Key=$key;Group=[string]$target.Group;Name=[string]$target.Name}
     }
     if (-not $targetKeys.Count) { throw 'missing-targets' }
-    return [pscustomobject]@{Schema=1;Protocol='finalists-v1';RunId=$RunId;Seed=$Seed;Blocks=$Blocks;AId=$AId;BId=$BId;AHash=$AHash;BHash=$BHash
+    $plan=[pscustomobject]@{Schema=1;Protocol='finalists-v1';RunId=$RunId;Seed=$Seed;Blocks=$Blocks;AId=$AId;BId=$BId;AHash=$AHash;BHash=$BHash
         CapturedNetworkKey=$NetworkKey;CapturedInputsHash=$InputsHash;Targets=$targetKeys;RequiredGroups=@($targetKeys.Group | Sort-Object -Unique)
         Slots=@(New-FinalistSlots $AId $BId $AHash $BHash $Seed $Blocks)}
+    if ($MeasureResources) { $plan.Protocol='finalists-v2';$plan | Add-Member NoteProperty ResourcePolicy 'process-v1' }
+    return $plan
 }
 function Get-FinalistBlockDelta([double[]]$Values,[double[]]$Times,[string]$Pattern) {
     if ($Values.Count -ne 4 -or $Times.Count -ne 4 -or $Pattern -notin @('ABBA','BAAB') -or $Times[3] -le $Times[0]) { throw 'invalid-block' }
@@ -48,11 +50,17 @@ function Get-FinalistEvidenceHash($Rows) {
     foreach ($row in $Rows) {
         $stage=Get-ProbeField $row 'Stage'
         if ($stage -eq 'comparison-complete') { continue }
-        if ($stage -notin @('comparison','comparison-warmup')) { throw 'invalid-evidence-stage' }
-        $parts=@(foreach ($field in $fields) {
-            $value=if ($numeric -contains $field) { Get-ProbeMetric $row $field } else { Get-ProbeField $row $field }
+        if ($stage -notin @('comparison','comparison-warmup','comparison-resource')) { throw 'invalid-evidence-stage' }
+        # V1 probe canonicalization must stay byte-identical. Only resource rows add fields.
+        $rowFields=$fields;$rowNumeric=$numeric
+        if ($stage -eq 'comparison-resource') {
+            $rowFields+=@('ResourceSchema','ResourcePhase','ResourceStatus','ResourceReason','ProcessId','ProcessStartKey','ReadDurationMs','CpuTotalMs','PrivateBytes','WorkingSetBytes','OsPeakWorkingSetBytes')
+            $rowNumeric+=@('ResourceSchema','ProcessId','ReadDurationMs','CpuTotalMs','PrivateBytes','WorkingSetBytes','OsPeakWorkingSetBytes')
+        }
+        $parts=@(foreach ($field in $rowFields) {
+            $value=if ($rowNumeric -contains $field) { Get-ProbeMetric $row $field } else { Get-ProbeField $row $field }
             if ($null -eq $value) { '-' } else {
-                $s=if ($numeric -contains $field) { $value.ToString('R',[Globalization.CultureInfo]::InvariantCulture) } else { [string]$value }
+                $s=if ($rowNumeric -contains $field) { $value.ToString('R',[Globalization.CultureInfo]::InvariantCulture) } else { [string]$value }
                 [string]([Text.Encoding]::UTF8.GetByteCount($s))+':'+$s
             }
         })
@@ -63,12 +71,87 @@ function Get-FinalistEvidenceHash($Rows) {
     try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($lines -join "`n")))).Replace('-','') } finally { $sha.Dispose() }
 }
 function New-FinalistCompletion($Plan,$Rows) {
-    return [pscustomobject]@{Schema=1;Stage='comparison-complete';RunId=$Plan.RunId;Seed=$Plan.Seed;CapturedNetworkKey=$Plan.CapturedNetworkKey;CapturedInputsHash=$Plan.CapturedInputsHash
+    $completion=[pscustomobject]@{Schema=1;Stage='comparison-complete';RunId=$Plan.RunId;Seed=$Plan.Seed;CapturedNetworkKey=$Plan.CapturedNetworkKey;CapturedInputsHash=$Plan.CapturedInputsHash
         ValidatedSlots=@($Plan.Slots).Count;FirstAttempts=@($Rows | Where-Object { $_.Stage -eq 'comparison' -and $_.Attempt -eq 1 }).Count;RetryAttempts=@($Rows | Where-Object { $_.Stage -eq 'comparison' -and $_.Attempt -eq 2 }).Count;EvidenceHash=(Get-FinalistEvidenceHash $Rows)}
+    if ($Plan.Protocol -eq 'finalists-v2') { $completion | Add-Member NoteProperty ResourceSamples @($Rows | Where-Object { $_.Stage -eq 'comparison-resource' }).Count }
+    return $completion
+}
+function Get-FinalistResourceAssessment($Plan,$Rows) {
+    $frames=@($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -eq 'comparison-resource' })
+    if ($frames.Count -ne 3*@($Plan.Slots).Count) { throw 'incomplete-resource-matrix' }
+    $index=@{}
+    foreach ($frame in $frames) {
+        $number=Get-ProbeMetric $frame 'ComparisonSlot'
+        if ($null -eq $number -or $number -lt 1 -or $number -gt @($Plan.Slots).Count -or $number -ne [int]$number) { throw 'invalid-resource-slot' }
+        $slot=$Plan.Slots[[int]$number-1]
+        if ($frame.Schema -ne 1 -or $frame.ResourceSchema -ne 1 -or $frame.RunId -cne $Plan.RunId -or $frame.Seed -ne $Plan.Seed -or $frame.CapturedNetworkKey -cne $Plan.CapturedNetworkKey -or $frame.CapturedInputsHash -cne $Plan.CapturedInputsHash) { throw 'mixed-resource-context' }
+        foreach ($pair in @(@('ComparisonBlock','Block'),@('ComparisonKind','Kind'),@('ComparisonArm','Arm'),@('StrategyId','StrategyId'),@('StrategyHash','StrategyHash'))) {
+            if ([string](Get-ProbeField $frame $pair[0]) -cne [string](Get-ProbeField $slot $pair[1])) { throw 'mixed-resource-identity' }
+        }
+        if ($frame.ResourcePhase -cnotin @('Ready','Warm','End') -or $frame.ResourceStatus -cnotin @('Ready','Unavailable')) { throw 'invalid-resource-state' }
+        foreach ($field in @('ObservedMs','ReadDurationMs')) { $n=Get-ProbeMetric $frame $field;if ($null -eq $n -or $n -lt 0) { throw 'invalid-resource-clock' } }
+        $id=Get-ProbeMetric $frame 'ProcessId';$start=Get-ProbeField $frame 'ProcessStartKey'
+        if ($null -ne $id -and ($id -lt 1 -or $id -gt [int]::MaxValue -or $id -ne [int]$id)) { throw 'invalid-resource-process' }
+        if ($null -ne $start -and [string]$start -notmatch '^\d{18}$') { throw 'invalid-resource-process' }
+        if ($frame.ResourceStatus -eq 'Ready') {
+            if ($null -eq $id -or $null -eq $start) { throw 'missing-resource-process' }
+            foreach ($field in @('CpuTotalMs','PrivateBytes','WorkingSetBytes','OsPeakWorkingSetBytes')) { $n=Get-ProbeMetric $frame $field;if ($null -eq $n -or $n -lt 0) { throw 'invalid-resource-counter' } }
+        }
+        $key=[string]$number+'|'+$frame.ResourcePhase
+        if ($index.ContainsKey($key)) { throw 'duplicate-resource-phase' }
+        $index[$key]=$frame
+    }
+    $windows=@();$previousSlotEnd=$null
+    foreach ($slot in $Plan.Slots) {
+        $samples=@(foreach ($phase in @('Ready','Warm','End')) { $key=[string]$slot.Index+'|'+$phase;if (-not $index.ContainsKey($key)) { throw 'missing-resource-phase' };$index[$key] })
+        $times=@($samples | ForEach-Object { Get-ProbeMetric $_ 'ObservedMs' })
+        if ($times[0] -ge $times[1] -or $times[1] -ge $times[2]) { throw 'reversed-resource-clock' }
+        if ($null -ne $previousSlotEnd -and $times[0] -le $previousSlotEnd) { throw 'overlapping-resource-launches' }
+        $previousSlotEnd=$times[2]
+        $ids=@($samples | ForEach-Object { Get-ProbeField $_ 'ProcessId' } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        $starts=@($samples | ForEach-Object { Get-ProbeField $_ 'ProcessStartKey' } | Where-Object { $null -ne $_ } | Sort-Object -Unique)
+        if ($ids.Count -gt 1 -or $starts.Count -gt 1) { throw 'resource-process-reused' }
+        foreach ($probe in @($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -in @('comparison','comparison-warmup') -and $_.ComparisonSlot -eq $slot.Index })) {
+            $lo=if ($probe.Stage -eq 'comparison') { $times[1] } else { $times[0] }
+            $hi=if ($probe.Stage -eq 'comparison') { $times[2] } else { $times[1] }
+            $begin=Get-ProbeMetric $probe 'StartedMs';$end=Get-ProbeMetric $probe 'ObservedMs'
+            if ($null -eq $begin -or $null -eq $end -or $begin -lt $lo -or $end -gt $hi) { throw 'probe-outside-resource-window' }
+        }
+        $warm=Get-ProcessResourceWindow @($samples[0],$samples[1]);$measured=Get-ProcessResourceWindow @($samples[1],$samples[2])
+        if ($warm.Status -eq 'Invalid' -or $measured.Status -eq 'Invalid') { throw 'invalid-resource-window' }
+        $windows+=[pscustomobject]@{Slot=$slot.Index;Kind=$slot.Kind;Arm=$slot.Arm;StrategyId=$slot.StrategyId;Warmup=$warm;Measured=$measured}
+    }
+    $result=[pscustomobject]@{Schema=1;Status='Unavailable';Scope='CompareMeasured';A=$null;B=$null;Windows=$windows}
+    $known=0
+    foreach ($arm in @('A','B')) {
+        $matches=@($windows | Where-Object { $_.Kind -eq 'Compare' -and $_.Arm -eq $arm -and $_.Measured.Status -eq 'Ready' })
+        $summary=[pscustomobject]@{WindowsKnown=$matches.Count;WindowsExpected=(2*$Plan.Blocks);CpuTimeMsSum=$null;ElapsedMsSum=$null;CpuPercentOneCoreWeighted=$null;PrivateBytesEndMedian=$null;ObservedMaxPrivateBytes=$null;FirstAttempts=@($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -eq 'comparison' -and $_.ComparisonKind -eq 'Compare' -and $_.ComparisonArm -eq $arm -and $_.Attempt -eq 1 }).Count;RetryAttempts=@($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -eq 'comparison' -and $_.ComparisonKind -eq 'Compare' -and $_.ComparisonArm -eq $arm -and $_.Attempt -eq 2 }).Count}
+        if ($matches.Count) {
+            $measured=@($matches.Measured);$summary.CpuTimeMsSum=($measured.CpuTimeMs | Measure-Object -Sum).Sum;$summary.ElapsedMsSum=($measured.ElapsedMs | Measure-Object -Sum).Sum
+            $summary.CpuPercentOneCoreWeighted=100*($summary.CpuTimeMsSum/$summary.ElapsedMsSum)
+            foreach ($derived in @($summary.CpuTimeMsSum,$summary.ElapsedMsSum,$summary.CpuPercentOneCoreWeighted)) { if ([double]::IsNaN($derived) -or [double]::IsInfinity($derived)) { throw 'resource-aggregate-overflow' } }
+            $private=@($measured.PrivateBytesEnd | Sort-Object);$middle=[int][math]::Floor($private.Count/2)
+            $summary.PrivateBytesEndMedian=if ($private.Count%2) { $private[$middle] } else { $private[$middle-1]+($private[$middle]-$private[$middle-1])/2 }
+            $summary.ObservedMaxPrivateBytes=($measured.ObservedMaxPrivateBytes | Measure-Object -Maximum).Maximum
+        }
+        $result.$arm=$summary;$known+=$matches.Count
+    }
+    if ($known -eq 4*$Plan.Blocks) { $result.Status='Ready' } elseif ($known -gt 0) { $result.Status='Partial' }
+    return $result
+}
+function Format-FinalistResourceSummary($Resources) {
+    if ($Resources.Status -eq 'NotRequested') { return @() }
+    if ($Resources.Status -notin @('Ready','Partial')) { return 'Затраты движка: нет завершённых сопоставимых окон измерений.' }
+    foreach ($arm in @('A','B')) {
+        $cost=$Resources.$arm
+        if (-not $cost.WindowsKnown) { 'Движок '+$arm+': счётчики недоступны (окон0/'+$cost.WindowsExpected+').';continue }
+        'Движок '+$arm+': CPU '+$cost.CpuTimeMsSum.ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)+' мс суммарно; private bytes, медиана конца '+($cost.PrivateBytesEndMedian/1MB).ToString('0.##',[Globalization.CultureInfo]::InvariantCulture)+' МиБ; измерено окон '+$cost.WindowsKnown+'/'+$cost.WindowsExpected+'.'
+    }
 }
 function Get-FinalistAssessment($Plan,$Rows) {
     try {
-        if ($Plan.Schema -ne 1 -or $Plan.Protocol -cne 'finalists-v1' -or $Plan.AId -notmatch '^\d+$' -or $Plan.BId -notmatch '^\d+$' -or $Plan.AId -eq $Plan.BId -or $Plan.RunId -notmatch '^[A-Fa-f0-9]{32}$') { throw 'invalid-plan' }
+        if ($Plan.Schema -ne 1 -or $Plan.Protocol -cnotin @('finalists-v1','finalists-v2') -or $Plan.AId -notmatch '^\d+$' -or $Plan.BId -notmatch '^\d+$' -or $Plan.AId -eq $Plan.BId -or $Plan.RunId -notmatch '^[A-Fa-f0-9]{32}$') { throw 'invalid-plan' }
+        if ($Plan.Protocol -eq 'finalists-v2' -and $Plan.ResourcePolicy -cne 'process-v1') { throw 'invalid-resource-policy' }
         foreach ($hash in @($Plan.AHash,$Plan.BHash,$Plan.CapturedNetworkKey,$Plan.CapturedInputsHash)) { if ($hash -notmatch '^[A-Fa-f0-9]{64}$') { throw 'invalid-plan' } }
         $slots=@(New-FinalistSlots $Plan.AId $Plan.BId $Plan.AHash $Plan.BHash $Plan.Seed $Plan.Blocks)
         if ($slots.Count -ne @($Plan.Slots).Count) { throw 'invalid-plan' }
@@ -89,6 +172,15 @@ function Get-FinalistAssessment($Plan,$Rows) {
         if ($completions.Count -eq 1) {
             $completion=$completions[0]
             if ($completion.Schema -ne 1 -or $completion.RunId -cne $Plan.RunId -or $completion.Seed -ne $Plan.Seed -or $completion.CapturedNetworkKey -cne $Plan.CapturedNetworkKey -or $completion.CapturedInputsHash -cne $Plan.CapturedInputsHash -or $completion.ValidatedSlots -ne $slots.Count -or $completion.EvidenceHash -cne (Get-FinalistEvidenceHash $Rows)) { throw 'invalid-completion' }
+        }
+        $resourceRows=@($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -eq 'comparison-resource' })
+        if ($Plan.Protocol -eq 'finalists-v1' -and $resourceRows.Count) { throw 'unexpected-resource-records' }
+        $resources=[pscustomobject]@{Schema=1;Status='NotRequested';Scope='CompareMeasured';A=$null;B=$null;Windows=@()}
+        if ($Plan.Protocol -eq 'finalists-v2') {
+            if ($completions.Count) {
+                if ($completion.ResourceSamples -ne $resourceRows.Count) { throw 'invalid-resource-count' }
+                $resources=Get-FinalistResourceAssessment $Plan $Rows
+            } else { $resources.Status='NotFinalized' }
         }
         $index=@{};$firstCount=0;$retryCount=0
         foreach ($row in @($Rows | Where-Object { (Get-ProbeField $_ 'Stage') -eq 'comparison' })) {
@@ -157,8 +249,8 @@ function Get-FinalistAssessment($Plan,$Rows) {
         $groups=@(foreach ($group in $required) { [pscustomobject]@{Group=$group;Comparable=(@($details | Where-Object { $_.Group -eq $group -and $_.Comparable }).Count -gt 0)} })
         if (@($groups | Where-Object { -not $_.Comparable }).Count) { $reasons+='required-group-not-comparable' }
         $status=if ($reasons.Count) { 'Inconclusive' } elseif (@($details | Where-Object { $_.Conclusion -eq 'Improved' }).Count) { 'ConsistentImprovement' } else { 'NoClearDifference' }
-        return [pscustomobject]@{Schema=1;RunId=$Plan.RunId;Status=$status;CanRecommend=($status -eq 'ConsistentImprovement');ShadowOnly=$true;Reasons=@($reasons | Sort-Object -Unique);FirstAttempts=$firstCount;RetryAttempts=$retryCount;Groups=$groups;Targets=$details}
+        return [pscustomobject]@{Schema=1;RunId=$Plan.RunId;Status=$status;CanRecommend=($status -eq 'ConsistentImprovement');ShadowOnly=$true;Reasons=@($reasons | Sort-Object -Unique);FirstAttempts=$firstCount;RetryAttempts=$retryCount;Groups=$groups;Targets=$details;Resources=$resources}
     } catch {
-        return [pscustomobject]@{Schema=1;Status='Invalid';CanRecommend=$false;ShadowOnly=$true;Reasons=@('invalid-plan-or-evidence');FirstAttempts=$null;RetryAttempts=$null;Groups=@();Targets=@()}
+        return [pscustomobject]@{Schema=1;Status='Invalid';CanRecommend=$false;ShadowOnly=$true;Reasons=@('invalid-plan-or-evidence');FirstAttempts=$null;RetryAttempts=$null;Groups=@();Targets=@();Resources=[pscustomobject]@{Schema=1;Status='Invalid';Scope='CompareMeasured';A=$null;B=$null;Windows=@()}}
     }
 }
