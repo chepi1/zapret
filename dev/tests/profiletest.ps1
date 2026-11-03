@@ -39,11 +39,11 @@ try{
     foreach($config in @($args0,$mixed)){
         $r=Invoke-Native $Script:Exe ('--dry-run '+(ConvertTo-WinCmdLine $config)) $Script:Bin 15
         Check 'engine accepts L3-separated profile configuration' ($r.ExitCode -eq 0 -and -not $r.TimedOut)
-        if($r.ExitCode -ne 0){Write-Host $r.Output}
+        if($r.ExitCode -ne 0 -or $r.TimedOut){Write-Host ('native exit='+[string]$r.ExitCode+' timeout='+$r.TimedOut+' output='+$r.Output)}
     }
     $r=Invoke-Native $Script:Exe ('--dry-run '+(ConvertTo-WinCmdLine $compact)) (Join-Path $env:SystemRoot 'System32') 15
     Check 'compact command resolves files even from service working directory' ($r.ExitCode -eq 0 -and -not $r.TimedOut)
-    if($r.ExitCode -ne 0){Write-Host $r.Output}
+    if($r.ExitCode -ne 0 -or $r.TimedOut){Write-Host ('native exit='+[string]$r.ExitCode+' timeout='+$r.TimedOut+' output='+$r.Output)}
 }finally{$env:__COMPAT_LAYER=$compat}
 $path=Join-Path $Script:StratDir 'alt5.txt';$original=[IO.File]::ReadAllBytes($path)
 try{

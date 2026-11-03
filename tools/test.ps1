@@ -10,7 +10,7 @@
 # -ReportOnly: только отчёт (для проверки провайдера), настройки и круги не меняем.
 # -KeepPrimary: обновить проверенный рейтинг и круги, сохранив выбранную основную (для автонастройки).
 # -Full: все стратегии, иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
-param([int]$TimeoutSec = 5, [int]$Parallel = 16, [int]$Rounds = 1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full)
+param([int]$TimeoutSec = 5, [int]$Parallel = 16, [ValidateRange(1,10)][int]$Rounds = 1, [ValidateRange(-1,2147483647)][int]$Seed = -1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
@@ -117,6 +117,14 @@ function Convert-CurlResult($Item) {
         } catch { }
     }
     $exit = $Item.P.ExitCode
+    $extra=@{DnsMs=$null;FirstByteMs=$null;TotalMs=$null}
+    $indices=@{DnsMs=5;FirstByteMs=6;TotalMs=7}
+    foreach ($key in $indices.Keys) {
+        $value=0.0;$index=$indices[$key]
+        if ($parts.Count -gt $index -and [double]::TryParse($parts[$index],[Globalization.NumberStyles]::Float,[Globalization.CultureInfo]::InvariantCulture,[ref]$value) -and -not [double]::IsNaN($value) -and -not [double]::IsInfinity($value) -and $value -ge 0) { $extra[$key]=[math]::Round($value*1000) }
+    }
+    $startedUtc=$null
+    if ($Item.PSObject.Properties['Started']) { try { $startedUtc=([datetime]$Item.Started).ToUniversalTime().ToString('o') } catch { } }
     $state = 'FAIL'
     if ($exit -eq 6) { $state = 'NA' }                                   # домен не резолвится: адрес не учитываем
     elseif ($code -ne '000') { $state = 'OK' }
@@ -125,12 +133,13 @@ function Convert-CurlResult($Item) {
     return New-Object PSObject -Property @{
         Group = $Item.T.Group; Name = $Item.T.Name; Url = $Item.T.Url; State = $state; Code = $code; Exit = $exit
         Up = $up; Down = $down; ConnMs = [math]::Round($conn * 1000); TlsMs = [math]::Round($tls * 1000)
+        DnsMs=$extra.DnsMs;FirstByteMs=$extra.FirstByteMs;TotalMs=$extra.TotalMs;StartedUtc=$startedUtc;ObservedUtc=[datetime]::UtcNow.ToString('o')
         Tries = 1; Flaky = $false
     }
 }
 
 # Запускает curl.exe параллельно (не больше $Width, по умолчанию $Parallel, одновременно) и собирает результаты.
-function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0) {
+function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]$Control) {
     if ($Width -le 0) { $Width = $Parallel }
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
@@ -141,9 +150,10 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0) {
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
         while ($queue.Count -gt 0 -and $running.Count -lt $Width) {
             $t = $queue.Dequeue()
-            $a = '-s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4 -r 0-65535' +
-                 ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect}"'
-            if ($t.Post) { $a += ' -X POST --data-binary "@' + $PostFile + '"' }
+            $a = '-s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4' +
+                 ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect} %{time_namelookup} %{time_starttransfer} %{time_total}"'
+            if ($Control) { $a += ' --head' } else { $a += ' -r 0-65535' }
+            if (-not $Control -and $t.Post) { $a += ' -X POST --data-binary "@' + $PostFile + '"' }
             $a += ' "' + $t.Url + '"'
             $psi = New-Object System.Diagnostics.ProcessStartInfo
             $psi.FileName = $curl
@@ -166,6 +176,30 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0) {
         }
     }
     return $results
+}
+
+function Invoke-ControlWindow($Targets,[string]$PostFile,[string]$JournalFile,[hashtable]$Metadata,[switch]$Warmup) {
+    if (-not @($Targets).Count) { return @() }
+    $stage=$Metadata.Stage
+    $measured=New-Object 'System.Collections.Generic.List[object]'
+    try {
+        $first=if ($Warmup) { 0 } else { 1 }
+        for ($sample=$first; $sample -le 2; $sample++) {
+            if (@(Get-OurProcesses).Count) { throw 'Контроль без обхода невозможен: тестовый процесс ещё работает.' }
+            $Metadata.Stage=if ($sample -eq 0) { 'control-warmup' } else { $stage }
+            $rows=@(Invoke-CurlBatch $Targets $PostFile ([math]::Min(4,$Parallel)) -Control)
+            $Metadata.ControlUncontaminated=(@(Get-OurProcesses).Count -eq 0)
+            Write-ProbeJournal $JournalFile $Metadata $rows ([math]::Max(1,$sample))
+            if (-not $Metadata.ControlUncontaminated) { throw 'Во время контрольных запросов запустился обход; сравнение отменено.' }
+            if ($sample -eq 0) { continue }
+            foreach ($row in $rows) {
+                $copy=$row.PSObject.Copy()
+                $copy | Add-Member NoteProperty Attempt $sample -Force
+                $measured.Add($copy)
+            }
+        }
+    } finally { $Metadata.Stage=$stage;$Metadata.Remove('ControlUncontaminated') }
+    return $measured.ToArray()
 }
 
 function Get-RowKey($R) { return ($R.Group + '|' + $R.Name + '|' + $R.Url) }
@@ -388,17 +422,35 @@ try {
     $dry = Test-ConfigDry $settings $strategies[0].Id -NoAuto -IpsetMode 'any'
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; exit 1 }
 
+    if ($Seed -lt 0) { $Seed=Get-Random -Minimum 0 -Maximum ([int]::MaxValue) }
+    $measurementOrder=New-TestMeasurementOrder $strategies $Rounds $Seed
+    $measurementId=[guid]::NewGuid().ToString('N')
+    $journalFile=Join-Path $Script:Runtime ('test-attempts-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+$measurementId.Substring(0,8)+'.jsonl')
+    $metadata=@{RunId=$measurementId;Seed=$Seed;Sequence=0;Round=0;Stage='control-before';StrategyId='0';StrategyHash='';NetworkKey=$networkBefore.Key;InputsHash=$scoreInputs}
+    $orderRecord=[ordered]@{Schema=1;RunId=$measurementId;Seed=$Seed;CapturedNetworkKey=$networkBefore.Key;CapturedInputsHash=$scoreInputs;Rounds=@($measurementOrder.Rounds | ForEach-Object { [pscustomobject]@{Number=$_.Number;StrategyIds=@($_.Strategies | ForEach-Object { $_.Id })} })}
+    Write-TextNoBom (Join-Path $Script:Runtime ('test-order-'+$measurementId+'.json')) ($orderRecord | ConvertTo-Json -Depth 6)
+    $report.Add('Порядок измерений: seed='+$Seed+'; соседние раунды в обратном порядке.')
+    $report.Add('Журнал исходных попыток: '+[IO.Path]::GetFileName($journalFile))
+    $controlTargets=@(Get-ControlTargets $targets)
+    Write-Color 'Проверяю контрольные HTTPS-запросы без обхода...' Gray
+    $controlBefore=@(Invoke-ControlWindow $controlTargets $postFile $journalFile $metadata -Warmup)
+
     $table = @{}
     $ipSkip = @{}   # группа|имя -> строка прогона без обхода: адреса, заблокированные по IP
     $failRuns = @{}; $everOk = @{}   # адрес -> сколько стратегий подряд он не открылся / открылся ли хоть раз
     $mode = if ($Full) { 'полный автоподбор' } else { 'быстрый автоподбор' }
     $report.Add(('{0}: {1} стратегий' -f $mode, $strategies.Count))
     Write-Color ("{0}: проверяю {1} адресов без обхода и с {2} стратегиями, раундов: {3}. Около {4} мин." -f $mode, $targets.Count, $strategies.Count, $Rounds, [math]::Ceiling(($strategies.Count + 1) * 15 * $Rounds / 60)) Cyan
-    for ($round = 1; $round -le $Rounds; $round++) {
+    foreach ($roundPlan in $measurementOrder.Rounds) {
+        $round=$roundPlan.Number
+        $failRuns=@{};$everOk=@{}
         if ($Rounds -gt 1) { Write-Color ("--- раунд {0} ---" -f $round) DarkCyan }
-        $runs = @(New-Object PSObject -Property @{ Id = '0'; Name = 'без обхода' }) + @($strategies | ForEach-Object { New-Object PSObject -Property @{ Id = $_.Id; Name = $_.Name } })
+        $runs = @(New-Object PSObject -Property @{ Id = '0'; Name = 'без обхода' }) + @($roundPlan.Strategies | ForEach-Object { New-Object PSObject -Property @{ Id = $_.Id; Name = $_.Name } })
         $i = 0
         foreach ($run in $runs) {
+            $metadata.Round=$round;$metadata.StrategyId=$run.Id
+            $metadata.Stage=if ($run.Id -eq '0') { 'baseline' } else { 'strategy' }
+            $metadata.StrategyHash=if ($run.Id -eq '0') { '' } else { $scoreFingerprints[$run.Id] }
             # у каждой стратегии свой заголовок: видно, что проверяется сейчас и сколько осталось
             $i++
             Write-Host ''
@@ -414,6 +466,7 @@ try {
             # в каждом прогоне, а сразу записываем им тот же провал, что без обхода: баллы от этого не меняются
             $runTargets = if ($run.Id -ne '0' -and $ipSkip.Count) { @($targets | Where-Object { -not $ipSkip.ContainsKey($_.Group + '|' + $_.Name) }) } else { $targets }
             $res = @(Invoke-CurlBatch $runTargets $postFile)
+            Write-ProbeJournal $journalFile $metadata $res 1
             # вторая попытка той же стратегией, пока winws2 ещё работает; почти все повторы помещаются в одну волну.
             # Безнадёжные (не открылись ни разу за $HopelessRuns стратегий подряд) второй раз не проверяем
             $hopeless = @{}
@@ -421,7 +474,9 @@ try {
             $again = @(Get-RetryTargets $runTargets $res $(if ($run.Id -ne '0') { $cleanBase }) $hopeless)
             if ($again.Count) {
                 Write-Host -NoNewline (' повтор {0}...' -f $again.Count)
-                $res = @(Merge-Retry $res @(Invoke-CurlBatch $again $postFile ($Parallel * 2)))
+                $retried=@(Invoke-CurlBatch $again $postFile ($Parallel * 2))
+                Write-ProbeJournal $journalFile $metadata $retried 2
+                $res = @(Merge-Retry $res $retried)
             }
             if ($run.Id -ne '0') {
                 foreach ($r in $res) {
@@ -437,7 +492,12 @@ try {
                 }
                 if ($ipSkip.Count) { Write-Host -NoNewline (' заблокированы по IP: {0} - стратегиям их не проверяю...' -f (@($ipSkip.Values | ForEach-Object { $_.Name }) -join ', ')) }
             }
-            if ($p) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } ; Start-Sleep -Milliseconds 700 }
+            if ($p) {
+                try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { }
+                if (-not $p.WaitForExit(5000)) { throw 'Тестовый процесс не остановился; контрольные измерения отменены.' }
+                $p=$null
+                Start-Sleep -Milliseconds 700
+            }
             if (-not $table.ContainsKey($run.Id)) { $table[$run.Id] = @() }
             $table[$run.Id] += $res
             if ($run.Id -eq '0') { $cleanBase = Get-CleanBaseline $table['0'] }
@@ -446,6 +506,14 @@ try {
             Write-Color (Format-Summary $sum -NoName) $(if ($run.Id -eq '0') { 'Gray' } elseif ($sum.Harm) { 'Yellow' } else { 'Green' })
         }
     }
+
+    $metadata.Stage='control-after';$metadata.Round=0;$metadata.StrategyId='0';$metadata.StrategyHash=''
+    Write-Color 'Повторяю контрольные HTTPS-запросы после измерений...' Gray
+    $controlAfter=@(Invoke-ControlWindow $controlTargets $postFile $journalFile $metadata)
+    $controlAssessment=Get-ControlAssessment $controlTargets $controlBefore $controlAfter
+    $controlAssessment | Add-Member NoteProperty RunId $measurementId
+    Write-TextNoBom (Join-Path $Script:Runtime ('test-control-'+$measurementId+'.json')) ($controlAssessment | ConvertTo-Json -Depth 4)
+    $report.Add(('Контроль измерений: {0}; сопоставимых адресов: {1}; причины: {2}' -f $controlAssessment.Status,$controlAssessment.MatchedTargets,($controlAssessment.Reasons -join ',')))
 
     # ---------- итог ----------
     if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) {
@@ -537,6 +605,14 @@ try {
         Write-Color $ipLine Gray
     }
     # Баллы плавают от прогона к прогону: основную выбираем по среднему за последние прогоны, а не по этому одному
+    if (-not $controlAssessment.CanApply) {
+        $qualityLine=if ($controlAssessment.Status -eq 'Changed') { 'Контрольные HTTPS-запросы изменились во время автоподбора. Новый рейтинг не применён; сравнение нужно повторить.' } else { 'Недостаточно повторяемых контрольных запросов. Новый рейтинг не применён; это не доказывает отсутствие интернета.' }
+        Write-Color $qualityLine Yellow
+        $report.Add($qualityLine)
+        Write-TextNoBom $repFile (($report -join "`r`n")+"`r`n")
+        Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
+        exit $(if ($ReportOnly) { 0 } else { 1 })
+    }
     $historySaved = Add-ScoreHistory $alts $scoreContext $scoreFingerprints
     if (-not $historySaved) {
         if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Стратегии или код изменились перед сохранением. Результаты не применены; повторите автоподбор после завершения правок.' }
@@ -603,6 +679,8 @@ try {
             $p = Start-TestInstance $candidate $candidate.alt -Final -LifetimeMs $testLifetimeMs
             if (-not $p) { throw 'Итоговая конфигурация не запустилась; прежние настройки сохраняются.' }
             $finalRows = @(Invoke-CurlBatch $targets $postFile)
+            $metadata.Stage='final';$metadata.Round=0;$metadata.StrategyId=$candidate.alt;$metadata.StrategyHash=$scoreFingerprints[$candidate.alt]
+            Write-ProbeJournal $journalFile $metadata $finalRows 1
             $expected = @($table[$candidate.alt]) + @($table['0'] | Where-Object { $_.Group -eq 'Clean' })
             $check = Test-FinalCandidateRows $expected $finalRows
             if ($p.HasExited) { throw 'Процесс завершился во время итоговой проверки.' }

@@ -34,7 +34,7 @@ Check 'oversized stage is rejected instead of silently cutting test short' $inva
 # Execute the actual publish/check/rollback block with all process and network effects replaced.
 $block=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if (-not $ReportOnly)')},$true)
 $script:finalBlock=[scriptblock]::Create($block.Extent.Text)
-$selection=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($ReportOnly)')},$true)
+$selection=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($ReportOnly)') -and $n.Extent.Text.Contains('$apply = $false')},$true)
 $script:selectionBlock=[scriptblock]::Create($selection.Extent.Text)
 function Save-TestRank { Write-TextNoBom (Get-PkgPath $Script:RankFile) 'new rank' }
 function Save-TestCover { Write-TextNoBom (Get-PkgPath $Script:CoverFile) 'new cover' }
@@ -52,6 +52,7 @@ function Run-FinalBlock($Rows, [switch]$KeepPrimary, [switch]$OnlyReport) {
     . $script:selectionBlock
     $base=@{}; $alts=@(); $table=@{'12'=$before;'11'=$before;'0'=@((Row Clean normal OK))}
     $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}; $testLifetimeMs=120000; $resultContext='fixture context'
+    $metadata=@{RunId='fixture';Sequence=0};$journalFile=Join-Path $Script:Runtime 'final-raw-fixture.jsonl'
     $report=New-Object 'System.Collections.Generic.List[string]'
     $repFile=Join-Path $Script:Runtime 'final-fixture.txt'
     Write-TextNoBom (Get-PkgPath $Script:RankFile) 'old rank'
