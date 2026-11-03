@@ -13,6 +13,7 @@ $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'netstate.ps1')
+. (Join-Path $PSScriptRoot 'recovery.ps1')
 $Script:RingNetworkKey = 'unknown-' + [guid]::NewGuid().ToString('N')
 $Script:RingPersistAllowed = $true
 $Script:RingCompositionKey = ''
@@ -258,15 +259,87 @@ function Read-RankGroups([string]$Text) {
     return $g
 }
 
-function Get-TestRank {
+# Рейтинг относится к сети и входным файлам. alt/auto — результат выбора, notify — только интерфейс.
+# RunId связывает два файла одного измерения: незавершённая публикация не смешивает покрытие разных прогонов.
+function Get-TestResultContext($Settings = $null, $NetworkObservation = $null) {
+    try {
+        if ($null -eq $Settings) { $Settings = Get-Settings }
+        if ($null -eq $NetworkObservation) { $NetworkObservation = Get-NetworkObservation }
+        if (-not $NetworkObservation.Known -or $NetworkObservation.Key -notmatch '^[A-Fa-f0-9]{64}$') { return $null }
+        $settingsKey = @($Settings.Keys | Where-Object { $_ -notin @('alt','auto','notify') } | Sort-Object | ForEach-Object { $_+'='+[string]$Settings[$_] }) -join '|'
+        $inputs = Get-ScoreInputsHash @([pscustomobject]@{Group='rank';Name='configuration';Url='local'}) @{Settings=$settingsKey}
+        if (-not $inputs) { return $null }
+        $parts = @('rank-context-v2', $inputs)
+        foreach ($dir in @('strategies','bin','windivert')) {
+            foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Sort-Object Name)) {
+                $parts += $dir+'/'+$file.Name+'='+(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+            }
+        }
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try { $hash = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($parts -join "`n")))).Replace('-','') } finally { $sha.Dispose() }
+        return [pscustomobject]@{Schema=2;NetworkKey=$NetworkObservation.Key;InputsHash=$hash;RunId=[guid]::NewGuid().ToString('N')}
+    } catch { return $null }
+}
+function Test-TestResultContext($Before, $After) {
+    if ($null -eq $Before -or $null -eq $After) { return $false }
+    foreach ($c in @($Before,$After)) {
+        foreach ($key in @('Schema','NetworkKey','InputsHash','RunId')) { if (-not $c.PSObject.Properties[$key]) { return $false } }
+        if ($c.Schema -ne 2 -or $c.NetworkKey -notmatch '^[A-Fa-f0-9]{64}$' -or $c.InputsHash -notmatch '^[A-Fa-f0-9]{64}$' -or $c.RunId -notmatch '^[a-f0-9]{32}$') { return $false }
+    }
+    return $Before.NetworkKey -ceq $After.NetworkKey -and $Before.InputsHash -ceq $After.InputsHash
+}
+function Get-TestResultHeader($Lines) {
+    try {
+        $headers = @($Lines | Where-Object { $_.StartsWith('# context: ') })
+        if ($headers.Count -ne 1) { return $null }
+        $c = $headers[0].Substring(11) | ConvertFrom-Json -ErrorAction Stop
+        if (Test-TestResultContext $c $c) { return $c }
+    } catch { }
+    return $null
+}
+function Write-TestResultFile([string]$Path, $Lines, $Context) {
+    if (-not (Test-TestResultContext $Context $Context)) { throw 'Неизвестный контекст сети: рейтинг не сохранён.' }
+    if ((Test-Path -LiteralPath $Path) -and -not (Get-TestResultHeader ([IO.File]::ReadAllLines($Path)))) {
+        $backup = $Path+'.v1.bak'
+        if (-not (Test-Path -LiteralPath $backup)) { Copy-Item -LiteralPath $Path -Destination $backup -ErrorAction Stop }
+    }
+    $temp = $Path+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+    try {
+        Write-TextNoBom $temp ((@('# context: '+($Context | ConvertTo-Json -Compress)) + @($Lines) -join "`r`n") + "`r`n")
+        if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($temp,$Path,[NullString]::Value) } else { [IO.File]::Move($temp,$Path) }
+    } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
+}
+$Script:TestResultPreview = $null
+function New-TestResultPreview($Base, $Alts, $Table, $Context) {
+    if (-not (Test-TestResultContext $Context $Context)) { throw 'Контекст итоговой проверки не подтверждён.' }
+    $baseGroups = @{}; foreach ($key in $Base.Groups.Keys) { $baseGroups[$key] = [double]$Base.Groups[$key].Ok }
+    $rows = @($Alts | ForEach-Object {
+        $groups = @{}; foreach ($key in $_.Groups.Keys) { $groups[$key] = [double]$_.Groups[$key].Ok }
+        [pscustomobject]@{Id=$_.Id;Score=$_.Score;Ok=$_.Ok;Total=$_.Total;Harm=$_.Harm;Freeze=$_.Freeze;Groups=$groups}
+    })
+    $cover = @{}; foreach ($id in $Table.Keys) { $cover[$id] = @($Table[$id] | Where-Object { $_.State -eq 'OK' } | ForEach-Object { $_.Group+'|'+$_.Name } | Sort-Object -Unique) }
+    $rank = [pscustomobject]@{Date=(Get-Date -Format 'yyyy-MM-dd HH:mm');Version=$Script:Version;BaseOk=$Base.Ok;BaseGroups=$baseGroups;Rows=$rows;Context=$Context}
+    return [pscustomobject]@{Rank=$rank;Cover=$cover;Context=$Context}
+}
+function Get-TestRank($Context = $null) {
+    if ($null -ne $Script:TestResultPreview) {
+        if ($null -eq $Context) { $Context = Get-TestResultContext }
+        if (Test-TestResultContext $Script:TestResultPreview.Context $Context) { return $Script:TestResultPreview.Rank }
+        return $null
+    }
     $f = Get-PkgPath $Script:RankFile
     if (-not (Test-Path $f)) { return $null }
+    $lines = [System.IO.File]::ReadAllLines($f)
+    $savedContext = Get-TestResultHeader $lines
+    if (-not $savedContext) { return $null }
+    if ($null -eq $Context) { $Context = Get-TestResultContext }
+    if (-not (Test-TestResultContext $savedContext $Context)) { return $null }
     # рейтинг без строки version сделан версией до 1.6, где её ещё не писали
     $rows = @(); $baseOk = $null; $baseGroups = @{}; $date = $null; $ver = '1.5'
     $n = '(-?\d+(?:\.\d+)?)'
     # стратегии, убранной обновлением сборки, в файле ещё числится балл: иначе она занимала бы место в круге, а в работе её нет
     $exists = @(Get-Strategies | ForEach-Object { $_.Id })
-    foreach ($line in [System.IO.File]::ReadAllLines($f)) {
+    foreach ($line in $lines) {
         if ($line -match '^#\s*date:\s*(.+)$') { $date = $matches[1].Trim(); continue }
         if ($line -match '^#\s*version:\s*(.+)$') { $ver = $matches[1].Trim(); continue }
         if ($line -match ('^base\s+' + $n + '\s+(\d+)(.*)$')) { $baseOk = ConvertFrom-Points $matches[1]; $baseGroups = Read-RankGroups $matches[3]; continue }
@@ -277,25 +350,36 @@ function Get-TestRank {
         }
     }
     if ($null -eq $baseOk -or $rows.Count -eq 0) { return $null }
-    return New-Object PSObject -Property @{ Date = $date; Version = $ver; BaseOk = $baseOk; BaseGroups = $baseGroups; Rows = $rows }
+    return New-Object PSObject -Property @{ Date = $date; Version = $ver; BaseOk = $baseOk; BaseGroups = $baseGroups; Rows = $rows; Context = $savedContext }
 }
 
 # Какие адреса открыла каждая стратегия в последнем автоподборе (runtime\test-cover.txt, рядом с рейтингом).
 # Строка: номер<таб>группа|адрес<таб>группа|адрес... Номер 0 - без обхода. $Table: номер -> строки результата
 $Script:CoverFile = 'runtime/test-cover.txt'
 $Script:RingCache = @{}
-function Save-TestCover($Table) {
+function Save-TestCover($Table, $Context = $null) {
+    if ($null -eq $Context) { $Context = Get-TestResultContext }
     $lines = @('# Какие адреса открыла каждая стратегия в последнем автоподборе. Удалите файл - круги соберутся только по баллам')
     foreach ($id in $Table.Keys) {
         $lines += (@($id) + @($Table[$id] | Where-Object { $_.State -eq 'OK' } | ForEach-Object { $_.Group + '|' + $_.Name } | Sort-Object -Unique)) -join "`t"
     }
-    Write-TextNoBom (Get-PkgPath $Script:CoverFile) (($lines -join "`r`n") + "`r`n")
+    Write-TestResultFile (Get-PkgPath $Script:CoverFile) $lines $Context
 }
-function Get-TestCover {
+function Get-TestCover($Rank = $null, $Context = $null) {
+    if ($null -eq $Context) { $Context = Get-TestResultContext }
+    if ($null -eq $Rank) { $Rank = Get-TestRank $Context }
+    if (-not $Rank -or -not $Rank.PSObject.Properties['Context'] -or -not (Test-TestResultContext $Rank.Context $Context)) { return $null }
+    if ($null -ne $Script:TestResultPreview) {
+        if ((Test-TestResultContext $Script:TestResultPreview.Context $Context) -and $Rank.Context.RunId -ceq $Script:TestResultPreview.Context.RunId) { return $Script:TestResultPreview.Cover }
+        return $null
+    }
     $f = Get-PkgPath $Script:CoverFile
     if (-not (Test-Path $f)) { return $null }
+    $lines = [System.IO.File]::ReadAllLines($f)
+    $savedContext = Get-TestResultHeader $lines
+    if (-not (Test-TestResultContext $savedContext $Context) -or $savedContext.RunId -cne $Rank.Context.RunId) { return $null }
     $c = @{}
-    foreach ($line in [System.IO.File]::ReadAllLines($f)) {
+    foreach ($line in $lines) {
         if (-not $line -or $line.StartsWith('#')) { continue }
         $p = @($line -split "`t")
         # ? - метка версии 1.7: "стратегия тут ни при чём". Это была ошибка, такие адреса просто не открылись (см. Convert-CurlResult)
@@ -308,14 +392,15 @@ function Get-TestCover {
 # идут те, что открывают заблокированные адреса, которых не открыла ни одна стратегия выше; вред тут не помеха: на такую
 # стратегию переходит только сервер, на котором первая не сработала. Дальше - сильные по баллу ($Ids), всего до $RingMax.
 # Адреса YouTube и Discord считаются только для их кругов: у них свои стратегии
-function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank) {
+function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank, $Context = $null) {
+    # Проверяем контекст до кэша: сам файл не меняется при переключении Wi-Fi.
+    $cover = Get-TestCover -Rank $Rank -Context $Context
+    if (-not $cover -or -not $cover.ContainsKey('0')) { return @($Ids) }
     # шапка меню строит круги при каждой перерисовке: тот же ответ, пока файл не поменялся
     $f = Get-Item -LiteralPath (Get-PkgPath $Script:CoverFile) -ErrorAction SilentlyContinue
-    if (-not $f) { return @($Ids) }
-    $cacheKey = ($Section, $PrimaryId, $f.LastWriteTimeUtc.Ticks, (@($Ids) -join ',')) -join '|'
+    $fileHash = if ($null -ne $Script:TestResultPreview) { 'preview' } elseif ($f) { (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash } else { return @($Ids) }
+    $cacheKey = ($Section, $PrimaryId, $Rank.Context.RunId, $fileHash, (@($Ids) -join ',')) -join '|'
     if ($Script:RingCache.ContainsKey($cacheKey)) { return $Script:RingCache[$cacheKey] }
-    $cover = Get-TestCover
-    if (-not $cover -or -not $cover.ContainsKey('0')) { return @($Ids) }
     $groups = $Script:SectionGroups[$Section]
     $others = @($Script:SectionGroups.Values | ForEach-Object { $_ })
     $mine = @{}
@@ -356,7 +441,7 @@ function Get-RingByCover($Ids, [string]$Section, [string]$PrimaryId, $Rank) {
 
 # Стратегии, достаточно сильные для профиля, от лучшей к худшей (Id). $null - по этому профилю различать нечего
 # (группа у провайдера не блокируется или рейтинг старого формата): тогда берётся круг сайтов.
-function Get-SectionRank($Rank, [string]$Section, [string]$PrimaryId) {
+function Get-SectionRank($Rank, [string]$Section, [string]$PrimaryId, $Context = $null) {
     $groups = $Script:SectionGroups[$Section]
     $score = @{}
     if ($groups) {
@@ -371,11 +456,12 @@ function Get-SectionRank($Rank, [string]$Section, [string]$PrimaryId) {
     $q = @($Rank.Rows | Where-Object { $score[$_.Id] -ge $Script:RankMinShare * $bestGain } |
         Sort-Object @{ Expression = { $score[$_.Id] }; Descending = $true }, @{ Expression = { $_.Score }; Descending = $true }, @{ Expression = { $_.Freeze } } |
         Select-Object -First $Script:RingMax)
-    return @(Get-RingByCover @($q | ForEach-Object { $_.Id }) $Section $PrimaryId $Rank)
+    return @(Get-RingByCover @($q | ForEach-Object { $_.Id }) $Section $PrimaryId $Rank $Context)
 }
 
 # $Base и $Alts - итоги автоподбора (Get-RunSummary): Ok, Total, Score, Harm, Freeze и Groups (группа -> Ok/Total)
-function Save-TestRank($Base, $Alts) {
+function Save-TestRank($Base, $Alts, $Context = $null) {
+    if ($null -eq $Context) { $Context = Get-TestResultContext }
     function Format-Groups($S) { return (@($S.Groups.Keys | ForEach-Object { '{0}={1}/{2}' -f $_, (Format-Points $S.Groups[$_].Ok), $S.Groups[$_].Total }) -join ' ') }
     $lines = @('# Рейтинг стратегий по автоподбору: порядок и состав кругов автосмены. Удалите файл - вернётся стандартный порядок.',
         ('# date: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm')),
@@ -385,7 +471,7 @@ function Save-TestRank($Base, $Alts) {
     foreach ($r in $Alts) {
         $lines += ('{0} {1} {2} {3} {4} {5} {6}' -f $r.Id, (Format-Points $r.Score), (Format-Points $r.Ok), $r.Total, $r.Harm, $r.Freeze, (Format-Groups $r))
     }
-    Write-TextNoBom (Get-PkgPath $Script:RankFile) (($lines -join "`r`n") + "`r`n")
+    Write-TestResultFile (Get-PkgPath $Script:RankFile) $lines $Context
     # какие стратегии на этом ПК уже проверялись хоть раз (номер и имя: номер могли отдать другой стратегии)
     $tested = @(@(Get-ListLines (Get-PkgPath $Script:TestedFile)) + @($Alts | ForEach-Object { $_.Id + '|' + $_.Name }) | Select-Object -Unique)
     Write-TextNoBom (Get-PkgPath $Script:TestedFile) (($tested -join "`r`n") + "`r`n")
@@ -417,7 +503,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/recovery.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
@@ -555,13 +641,14 @@ function Remove-OldRingMemory {
 # Круг автосмены профиля $Section (general - сайты, ipset_tcp, google - YouTube, discord_media, game_tcp).
 # С рейтингом: основная первой, если она достаточно сильная для этого профиля, дальше остальные сильные.
 # Без рейтинга (автоподбор ещё не запускали) и у игры (FixedRings) - основная и основные стратегии в порядке RotationPref.
-function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general') {
+function Get-RotationOrder([string]$PrimaryId, [string]$Section = 'general', $Context = $null) {
     $all = @(Get-Strategies | Where-Object { $_.Missing.Count -eq 0 })
     $primary = @($all | Where-Object { $_.Id -eq $PrimaryId })
-    $rank = if ($Script:FixedRings -contains $Section) { $null } else { Get-TestRank }
+    $rank = if ($Script:FixedRings -contains $Section) { $null } else { Get-TestRank $Context }
     if ($rank) {
-        $ids = Get-SectionRank $rank $Section $PrimaryId
-        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' $PrimaryId }
+        if ($null -eq $Context) { $Context = $rank.Context }
+        $ids = Get-SectionRank $rank $Section $PrimaryId $Context
+        if ($null -eq $ids) { $ids = Get-SectionRank $rank 'general' $PrimaryId $Context }
         if ($null -ne $ids) {
             $order = @()
             if ($ids -contains $PrimaryId) { $order += $primary }
@@ -585,20 +672,23 @@ function Get-TestStrategies([switch]$Full) {
     $all = @(Get-AllStrategiesOrdered)
     if ($Full) { return $all }
     $s = Get-Settings
-    $keep = @($Script:RotationPref) + $Script:QuickExtra + @($s.alt)
-    foreach ($sec in $Script:SectionTitles.Keys) { $keep += @(Get-RotationOrder $s.alt $sec | ForEach-Object { $_.Id }) }
     $rank = Get-TestRank
+    $resultContext = if ($rank) { $rank.Context } else { $null }
+    $keep = @($Script:RotationPref) + $Script:QuickExtra + @($s.alt)
+    foreach ($sec in $Script:SectionTitles.Keys) { $keep += @(Get-RotationOrder $s.alt $sec $resultContext | ForEach-Object { $_.Id }) }
     $keep += @($all | Where-Object { $_.Since -and (-not $rank -or -not (Test-StrategyTested $_ $rank)) } | ForEach-Object { $_.Id })
     return @($all | Where-Object { $keep -contains $_.Id })
 }
 
 # Круги профилей, которые отличаются от круга сайтов: "YouTube: A > B" и т.д.
 function Get-RingsText([hashtable]$Settings) {
-    if ($Settings.auto -ne 'on' -or -not (Get-TestRank)) { return @() }
-    $general = (@(Get-RotationOrder $Settings.alt 'general' | ForEach-Object { $_.Id })) -join ','
+    if ($Settings.auto -ne 'on') { return @() }
+    $rank = Get-TestRank (Get-TestResultContext $Settings)
+    if (-not $rank) { return @() }
+    $general = (@(Get-RotationOrder $Settings.alt 'general' $rank.Context | ForEach-Object { $_.Id })) -join ','
     $out = @()
     foreach ($sec in @('google', 'discord_media', 'game_tcp')) {
-        $ring = @(Get-RotationOrder $Settings.alt $sec)
+        $ring = @(Get-RotationOrder $Settings.alt $sec $rank.Context)
         if ((@($ring | ForEach-Object { $_.Id }) -join ',') -ne $general) {
             $out += ('{0}: {1}' -f $Script:SectionTitles[$sec], (($ring | ForEach-Object { $_.Name }) -join ' > '))
         }
@@ -712,6 +802,7 @@ function New-BypassArgList {
     if ($primary.Missing.Count -gt 0) { throw ("В {0} нет секций: {1}" -f $primary.File, ($primary.Missing -join ', ')) }
     # с автосменой у каждого профиля свой круг (Get-RotationOrder по секции), без неё - ровно основная, как у Flowseal
     $auto = ($Settings.auto -eq 'on') -and -not $NoAuto
+    $resultContext = if ($auto -and (Test-Path -LiteralPath (Get-PkgPath $Script:RankFile))) { Get-TestResultContext $Settings } else { $null }
     if ($auto) {
         $compositionSettings=$Settings.Clone()
         $compositionSettings.alt=$altId
@@ -800,7 +891,7 @@ function New-BypassArgList {
         return $St.Sections[$Fallback]
     }
     function Add-Section([string]$Name, [switch]$Circular, [string]$CircularArgs = '', [string]$Fallback = '', [switch]$Learn,[string]$Family='') {
-        $ring = @(if ($Circular -and $auto) { Get-RotationOrder $altId $Name } else { $primary })
+        $ring = @(if ($Circular -and $auto) { Get-RotationOrder $altId $Name $resultContext } else { $primary })
         if($Family){$ring=@($ring|Where-Object{(Get-SectionMatchL3 $_ $Name $Fallback) -in @('any',$Family)})}
         elseif(@($ring|Where-Object{(Get-SectionMatchL3 $_ $Name $Fallback) -ne 'any'}).Count -and $null -ne $profileInfo.Current){
             $profile=$profileInfo.Current
@@ -844,7 +935,7 @@ function New-BypassArgList {
 
     # Стратегия "общего списка" нужна в трёх профилях (general, tcp_ipset, autolist). С автосменой это все стратегии
     # круга, и три копии раздували командную строку к пределу Windows (32767). Поэтому - шаблон zapret2 и --import.
-    $generalRing=@(if($auto){Get-RotationOrder $altId 'general'}else{$primary})
+    $generalRing=@(if($auto){Get-RotationOrder $altId 'general' $resultContext}else{$primary})
     if(@($generalRing|Where-Object{(Get-SectionMatchL3 $_ 'general') -ne 'any'}).Count){
         foreach($family in @('ipv4','ipv6')){
             if(-not @($generalRing|Where-Object{(Get-SectionMatchL3 $_ 'general') -in @('any',$family)}).Count){continue}
@@ -871,7 +962,7 @@ function New-BypassArgList {
     Add-Profile 'quic_ipset' (@('--filter-udp=443', '--filter-l7=quic') + $ips + $hostEx + $ipEx)
     Add-Section 'quic'
     # У кого-то в круге своя стратегия для сетей ipset-all - тогда профиль собирается отдельно, иначе берёт шаблон
-    $ipsetRing = @(if ($auto) { Get-RotationOrder $altId 'ipset_tcp' } else { $primary })
+    $ipsetRing = @(if ($auto) { Get-RotationOrder $altId 'ipset_tcp' $resultContext } else { $primary })
     if (@($ipsetRing | Where-Object { $_.Sections.ContainsKey('ipset_tcp') }).Count) {
         Add-Profile 'tcp_ipset' (@('--filter-tcp=80,443,8443') + $ips + $hostEx + $ipEx)
         Add-Section 'ipset_tcp' -Circular -CircularArgs ':reset' -Fallback 'general' -Learn
@@ -1030,14 +1121,7 @@ function Enter-BypassControl([string]$Action) {
     $handle = $null
     $mutex = $null; $ownsMutex = $false
     try {
-        $security = New-Object Security.AccessControl.MutexSecurity
-        foreach ($sid in @('S-1-5-18','S-1-5-32-544',[Security.Principal.WindowsIdentity]::GetCurrent().User.Value) | Select-Object -Unique) {
-            $identity = New-Object Security.Principal.SecurityIdentifier($sid)
-            $rule = New-Object Security.AccessControl.MutexAccessRule($identity, [Security.AccessControl.MutexRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)
-            $security.AddAccessRule($rule)
-        }
-        $created = $false
-        $mutex = New-Object Threading.Mutex($false, $Script:ControlMutexName, [ref]$created, $security)
+        $mutex = New-ControlMutex $Script:ControlMutexName
         try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
         if (-not $ownsMutex) { $mutex.Dispose(); return $false }
         $handle = [IO.File]::Open((Join-Path $Script:Runtime 'control.lock'), 'OpenOrCreate', 'ReadWrite', 'Read')
@@ -1060,7 +1144,8 @@ function Exit-BypassControl {
         finally { $Script:ControlMutex.ReleaseMutex(); $Script:ControlMutex.Dispose(); $Script:ControlMutex = $null }
     }
 }
-function Assert-BypassControlAllowed {
+function Assert-BypassControlAllowed([switch]$AllowPendingUpdate) {
+    if (-not $AllowPendingUpdate -and (Test-PendingUpdate $Script:Root)) { throw 'Обновление прервано. Запустите zapret.bat для восстановления файлов перед управлением обходом.' }
     $games = @(Get-RunningGames)
     if ($games.Count -and -not $Script:GameControlApproved) {
         throw ('Действие отложено: запущена игра (' + ($games -join ', ') + '). Закройте игру и повторите запуск.')
@@ -1455,8 +1540,9 @@ function Get-AltText([hashtable]$Settings) {
     $st = Get-Strategy $Settings.alt
     $name = if ($st) { $st.Name } else { 'ALT' + $Settings.alt + ' (нет файла!)' }
     if ($Settings.auto -eq 'on') {
-        $ring = @(Get-RotationOrder $Settings.alt 'general' | ForEach-Object { $_.Name })
-        $rank = Get-TestRank
+        $resultContext = Get-TestResultContext $Settings
+        $ring = @(Get-RotationOrder $Settings.alt 'general' $resultContext | ForEach-Object { $_.Name })
+        $rank = Get-TestRank $resultContext
         $how = if ($rank) { ' (по автоподбору от ' + $rank.Date + ')' } else { '' }
         if ($ring.Count -ge 2) { return ($name + ', круг для сайтов: ' + ($ring -join ' > ') + $how) }
         if ($rank) { return ($name + ', для сайтов других сильных стратегий нет' + $how) }
@@ -3345,42 +3431,61 @@ function Prepare-UpdateSettings([string]$Src, [string]$Dst, $Remove) {
 }
 
 # Сначала резервные копии всех исходных файлов, затем замена/удаление. Даже частично записанный файл включён в откат.
-function Install-UpdateFiles([string]$Src, [string]$Dst, [string]$Backup, $Plan, $Remove) {
-    $root = [IO.Path]::GetFullPath($Dst).TrimEnd('\') + '\'
-    $items = @(@($Plan) + @($Remove) | Select-Object -Unique)
-    $originals = @{}
-    $done = New-Object System.Collections.Generic.List[string]
+function Install-UpdateFiles([string]$Src, [string]$Dst, [string]$Backup, $Plan, $Remove, [bool]$WasRunning = $false, [scriptblock]$BeforeApply = $null) {
+    $root = [IO.Path]::GetFullPath($Dst).TrimEnd('\')
+    $journalPath = $null
     try {
-        foreach ($item in $items) {
-            $target = [IO.Path]::GetFullPath((Join-Path $root $item))
-            if ([IO.Path]::IsPathRooted($item) -or -not $target.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { throw ('Недопустимый путь: ' + $item) }
-            $originals[$item] = Test-Path -LiteralPath $target
-            if ($originals[$item]) {
+        if (Test-PendingUpdate $root) { throw 'Сначала восстановите незавершённое обновление.' }
+        $dir = [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($Backup))
+        $id = [IO.Path]::GetFileName($dir)
+        $expected = Resolve-UpdateFilePath $root ('runtime/update/'+$id+'/backup')
+        if ($id -notmatch '^[a-f0-9]{32}$' -or $Backup -ine $expected -or (Test-Path -LiteralPath $Backup) -or (Test-Path -LiteralPath (Join-Path $dir 'journal.json'))) { throw 'Недопустимый или уже использованный каталог транзакции.' }
+        Initialize-UpdateStore $root | Out-Null
+        if (Test-Path -LiteralPath $dir) { if (-not (Test-UpdateTrustedPath $dir)) { throw 'Недоверенный каталог транзакции.' } }
+        else { New-Item -ItemType Directory -Path $dir -ErrorAction Stop | Out-Null; Protect-UpdatePath $dir }
+        New-Item -ItemType Directory -Path $Backup -ErrorAction Stop | Out-Null; Protect-UpdatePath $Backup
+        $entries = @(); $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+        foreach ($item in @(@($Plan) + @($Remove))) {
+            $relative = ([string]$item).Replace('/','\')
+            if (-not $seen.Add($relative)) { throw 'Повторный путь в обновлении.' }
+            $target = Resolve-UpdateFilePath $root $relative
+            if ($relative -match '^(?i:runtime)\\' -and $relative -ine 'runtime\settings.ini') { throw 'Недопустимый файл runtime в обновлении.' }
+            $existed = Test-Path -LiteralPath $target
+            if ($existed -and -not (Test-Path -LiteralPath $target -PathType Leaf)) { throw 'Обновление не заменяет каталоги.' }
+            $oldHash = ''; $newHash = ''; $isRemove = @($Remove) -contains $item
+            if (-not $isRemove) { $newHash = (Get-FileHash -LiteralPath (Resolve-UpdateFilePath $Src $relative) -Algorithm SHA256 -ErrorAction Stop).Hash }
+            if ($existed) {
+                $oldHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256 -ErrorAction Stop).Hash
                 $b = Join-Path $Backup $item
                 New-Item -ItemType Directory (Split-Path -Parent $b) -Force -ErrorAction Stop | Out-Null
                 Copy-Item -LiteralPath $target -Destination $b -Force -ErrorAction Stop
+                $cursor = $b
+                while ($cursor.StartsWith($Backup,[StringComparison]::OrdinalIgnoreCase)) { Protect-UpdatePath $cursor; $cursor = [IO.Path]::GetDirectoryName($cursor) }
+                if ((Get-FileHash -LiteralPath $b -Algorithm SHA256 -ErrorAction Stop).Hash -cne $oldHash) { throw 'Исходный файл изменился при создании копии.' }
+                $file = [IO.File]::Open($b,'Open','ReadWrite','None'); try { $file.Flush($true) } finally { $file.Dispose() }
             }
+            $entries += [pscustomobject]@{Relative=$relative;Existed=$existed;OldHash=$oldHash;NewHash=$newHash;Remove=$isRemove}
         }
-        foreach ($item in @($Plan)) {
-            $target = Join-Path $root $item
-            $done.Add($item)
-            New-Item -ItemType Directory (Split-Path -Parent $target) -Force -ErrorAction Stop | Out-Null
-            Copy-Item -LiteralPath (Join-Path $Src $item) -Destination $target -Force -ErrorAction Stop
+        if ($entries.Count -gt 500) { throw 'Слишком много файлов в транзакции обновления.' }
+        $journal = [pscustomobject]@{Schema=1;Id=$id;Root=$root;State='Prepared';WasRunning=$WasRunning;Entries=$entries}
+        $journalPath = Join-Path $dir 'journal.json'
+        Write-UpdateJournal $journalPath $journal
+        if ($null -ne $BeforeApply) { & $BeforeApply | Out-Null }
+        $journal.State = 'Applying'; Write-UpdateJournal $journalPath $journal
+        foreach ($entry in $entries) {
+            $target = Resolve-UpdateFilePath $root $entry.Relative
+            if ($entry.Existed -and (Get-FileHash -LiteralPath $target -Algorithm SHA256 -ErrorAction Stop).Hash -cne $entry.OldHash) { throw 'Исходный файл изменён после создания копии.' }
+            if ($entry.Remove) { if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop } }
+            else { Copy-UpdateFile (Resolve-UpdateFilePath $Src $entry.Relative) $target $entry.NewHash }
         }
-        foreach ($item in @($Remove)) {
-            $done.Add($item)
-            Remove-Item -LiteralPath (Join-Path $root $item) -Force -ErrorAction Stop
-        }
+        Write-UpdateRestartIntent $root $WasRunning
+        $journal.State = 'Committed'; Write-UpdateJournal $journalPath $journal
         return $true
     } catch {
         Write-Color ('Обновление прервано: ' + $_.Exception.Message + '. Возвращаю прежние файлы.') Red
-        for ($i = $done.Count-1; $i -ge 0; $i--) {
-            $item = $done[$i]
-            $target = Join-Path $root $item
-            try {
-                if ($originals[$item]) { Copy-Item -LiteralPath (Join-Path $Backup $item) -Destination $target -Force -ErrorAction Stop }
-                elseif (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Force -ErrorAction Stop }
-            } catch { Write-Color ('Не удалось восстановить ' + $item + '. Резервная копия: ' + $Backup + '. ' + $_.Exception.Message) Red }
+        if ($journalPath -and (Test-Path -LiteralPath $journalPath)) {
+            try { Restore-UpdateJournalFiles $root $journalPath }
+            catch { Write-Color ('Автоматический откат остановлен. Копии: '+$Backup+'. '+$_.Exception.Message) Red }
         }
         return $false
     }
@@ -3395,8 +3500,7 @@ function Install-ZapretUpdate($Rel) {
 
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
-    $dir = Join-Path (Join-Path $Script:Runtime 'update') ([guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory $dir -Force -ErrorAction Stop | Out-Null
+    $dir = New-UpdateTransactionDirectory $Script:Root
     $zip = Join-Path $dir $Rel.Name
     Write-Color ('Скачиваю ' + $Rel.Name + '...') Cyan
     $r = Invoke-Native $curl ('-s -L -f --ssl-no-revoke --max-time 300 -o "' + $zip + '" "' + $Rel.Url + '"') $dir 320
@@ -3420,16 +3524,20 @@ function Install-ZapretUpdate($Rel) {
     $plan = @(Get-UpdatePlan $src $Script:Root)
     $remove = @(Get-RetiredStrategies $src $Script:Root)
     $plan += @(Prepare-UpdateSettings $src $Script:Root $remove)
-    # bin\WinDivert64.sys занят, пока драйвер загружен: останавливаем обход и выгружаем драйвер
+    # Сначала durable backup+intent, затем остановка: hard kill не должен забыть, что обход работал.
     $was = @(Get-OurProcesses).Count -gt 0
-    Stop-Bypass -Unload | Out-Null
     $backup = Join-Path $dir 'backup'
-    if (-not (Install-UpdateFiles $src $Script:Root $backup $plan $remove)) {
-        if ($was) { Start-Bypass -Quiet | Out-Null }
+    if (-not (Install-UpdateFiles $src $Script:Root $backup $plan $remove -WasRunning:$was -BeforeApply {
+        Assert-BypassControlAllowed -AllowPendingUpdate
+        Add-BypassAction 'update-stop' 'начало'
+        Stop-BypassCore -Unload | Out-Null
+        Add-BypassAction 'update-stop' 'завершено'
+    })) {
+        if ($was -and @(Get-OurProcesses).Count -eq 0) { Start-Bypass -Quiet | Out-Null }
         return $false
     }
     # новое меню само включит обход, если он работал (runtime\update-restart.txt)
-    Write-TextNoBom (Join-Path $Script:Runtime 'update-restart.txt') $(if ($was) { 'start' } else { '' })
+    # Намерение перезапуска уже сохранено журналом до commit.
     $cleanup = [IO.Path]::GetFullPath($x)
     if ([IO.Path]::GetDirectoryName($cleanup) -eq [IO.Path]::GetFullPath($dir)) { Remove-Item -LiteralPath $cleanup -Recurse -Force -ErrorAction SilentlyContinue }
     Write-Color ('Обновлено до zapret {0}: файлов заменено {1}, старых стратегий убрано {2}. Меню откроется заново.' -f $Rel.Tag, $plan.Count, $remove.Count) Green

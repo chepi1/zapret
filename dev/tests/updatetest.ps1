@@ -3,12 +3,15 @@ param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 if (Test-Path (Join-Path $Pkg '.git')) { throw 'Run on a package copy.' }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
+function Get-UpdateTrustSids { return @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value) }
 $Script:ControlMutexName='Local\zapret-updatetest-'+[guid]::NewGuid().ToString('N')
 $fails = 0
 function Check($Name, $Ok) { if ($Ok) { Write-Host ('ok   ' + $Name) } else { Write-Host ('FAIL ' + $Name); $script:fails++ } }
 $stage = [IO.Path]::GetFullPath((Join-Path $env:TEMP ('zapret-update-test-' + [guid]::NewGuid().ToString('N'))))
 if ([IO.Path]::GetDirectoryName($stage) -ne [IO.Path]::GetFullPath($env:TEMP).TrimEnd('\')) { throw 'Unsafe test directory' }
-$src = Join-Path $stage 'src'; $dst = Join-Path $stage 'dst'; $backup = Join-Path $stage 'backup'
+$src = Join-Path $stage 'src'; $dst = Join-Path $stage 'dst'
+function New-TestBackup { return (Join-Path $dst ('runtime/update/'+[guid]::NewGuid().ToString('N')+'/backup')) }
+$backup = New-TestBackup
 foreach ($base in @($src, $dst)) { New-Item -ItemType Directory (Join-Path $base 'strategies') -Force | Out-Null }
 try {
     if (-not (Get-Command Install-UpdateFiles -ErrorAction SilentlyContinue)) { Write-Host 'FAIL update has no fail-safe file transaction'; exit 1 }
@@ -29,6 +32,7 @@ try {
         Write-TextNoBom (Join-Path $dst 'runtime\settings.ini') "alt=54`r`nauto=off`r`n"
         Copy-Item -LiteralPath (Join-Path $Pkg 'strategies\alt12.txt') -Destination (Join-Path $src 'strategies\alt12.txt')
         $migration = @(Prepare-UpdateSettings $src $dst @('strategies\alt54.txt'))
+        $backup = New-TestBackup
         $ok = Install-UpdateFiles $src $dst $backup $migration @()
         $settings = [IO.File]::ReadAllText((Join-Path $dst 'runtime\settings.ini'))
         Check 'retired primary migrates without changing other settings' ($ok -and $settings -match '(?m)^alt=12\r?$' -and $settings -match '(?m)^auto=off\r?$' -and (Test-Path (Join-Path $src 'strategies\alt12.txt')))
@@ -45,9 +49,11 @@ try {
         }
         Microsoft.PowerShell.Management\Copy-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force
     }
+    $backup = New-TestBackup
     $ok = Install-UpdateFiles $src $dst $backup @('a.txt') @()
     Check 'backup error aborts before overwrite' (-not $ok -and [IO.File]::ReadAllText((Join-Path $dst 'a.txt')) -eq 'old a')
     $script:failMode = 'replace'
+    $backup = New-TestBackup
     $ok = Install-UpdateFiles $src $dst $backup @('a.txt','b.txt') @()
     Check 'partial overwrite restores current and previous files' (-not $ok -and [IO.File]::ReadAllText((Join-Path $dst 'a.txt')) -eq 'old a' -and [IO.File]::ReadAllText((Join-Path $dst 'b.txt')) -eq 'new b')
     Remove-Item Function:\Copy-Item

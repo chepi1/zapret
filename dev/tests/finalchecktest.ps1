@@ -34,18 +34,24 @@ Check 'oversized stage is rejected instead of silently cutting test short' $inva
 # Execute the actual publish/check/rollback block with all process and network effects replaced.
 $block=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if (-not $ReportOnly)')},$true)
 $script:finalBlock=[scriptblock]::Create($block.Extent.Text)
+$selection=$ast.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if ($ReportOnly)')},$true)
+$script:selectionBlock=[scriptblock]::Create($selection.Extent.Text)
 function Save-TestRank { Write-TextNoBom (Get-PkgPath $Script:RankFile) 'new rank' }
 function Save-TestCover { Write-TextNoBom (Get-PkgPath $Script:CoverFile) 'new cover' }
+function New-TestResultPreview { return 'fixture preview' }
+function Get-TestResultContext { return 'fixture context' }
+function Test-TestResultContext { return $true }
 function Save-Settings { $script:savedSettings++ }
 function Start-TestInstance { $obj=[pscustomobject]@{Id=1234;HasExited=$false}; $obj | Add-Member ScriptMethod WaitForExit { return $true }; return $obj }
 function Stop-Process { }
 function Test-ScoreInputs { return $true }
 function Invoke-CurlBatch { return $script:actual }
-function Run-FinalBlock($Rows) {
+function Run-FinalBlock($Rows, [switch]$KeepPrimary, [switch]$OnlyReport) {
     $script:actual=$Rows; $script:savedSettings=0
-    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11'}; $apply=$true; $ReportOnly=$false
-    $base=@{}; $alts=@(); $table=@{'11'=$before;'0'=@((Row Clean normal OK))}
-    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}; $testLifetimeMs=120000
+    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11'}; $choice=@{Noise=$false}; $apply=$true; $ReportOnly=[bool]$OnlyReport; $NoPrompt=$true
+    . $script:selectionBlock
+    $base=@{}; $alts=@(); $table=@{'12'=$before;'11'=$before;'0'=@((Row Clean normal OK))}
+    $targets=@(); $postFile=''; $p=$null; $scoreInputs='fixture'; $scoreParameters=@{}; $scoreFingerprints=@{}; $networkBefore=@{Known=$true;Key='fixture'}; $testLifetimeMs=120000; $resultContext='fixture context'
     $report=New-Object 'System.Collections.Generic.List[string]'
     $repFile=Join-Path $Script:Runtime 'final-fixture.txt'
     Write-TextNoBom (Get-PkgPath $Script:RankFile) 'old rank'
@@ -58,6 +64,10 @@ Check 'rejected replay restores exact previous rank and coverage' ($rejected.Ran
 Check 'rejected replay never saves settings' ($rejected.Saved -eq 0 -and -not $rejected.Applied)
 $passed=Run-FinalBlock $before
 Check 'confirmed replay publishes rank and chosen settings' ($passed.Rank -eq 'new rank' -and $passed.Cover -eq 'new cover' -and $passed.Saved -eq 1)
+$kept=Run-FinalBlock $before -KeepPrimary
+Check 'scheduled selection publishes confirmed circles while retaining primary' ($kept.Rank -eq 'new rank' -and $kept.Cover -eq 'new cover' -and $kept.Saved -eq 0 -and -not $kept.Applied)
+$reportOnlyResult=Run-FinalBlock $before -OnlyReport
+Check 'provider report publishes neither ranking nor settings' ($reportOnlyResult.Rank -eq 'old rank' -and $reportOnlyResult.Cover -eq 'old cover' -and $reportOnlyResult.Saved -eq 0)
 function Test-ScoreInputs { return $false }
 $changed=Run-FinalBlock $before
 Check 'changed source during replay prevents publication' ($changed.Rank -eq 'old rank' -and $changed.Saved -eq 0)

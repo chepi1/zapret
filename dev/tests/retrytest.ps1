@@ -3,6 +3,7 @@ param([string]$Pkg = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))
 if (Test-Path (Join-Path $Pkg '.git')) { Write-Host 'Тест пишет файлы в runtime: запускайте его через run-all.ps1, на копии папки.' -ForegroundColor Red; exit 1 }
 $ErrorActionPreference = 'Stop'
 . (Join-Path $Pkg 'tools\lib.ps1')
+function Get-NetworkObservation { [pscustomobject]@{Known=$true;Key=('A'*64);ObservedUtc=[datetime]::UtcNow} }
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools\test.ps1'), [ref]$null, [ref]$null)
 foreach ($f in $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $false)) {
     . ([scriptblock]::Create($f.Extent.Text))
@@ -67,8 +68,8 @@ Write-Host ([System.IO.File]::ReadAllText((Get-PkgPath $Script:RankFile)))
 Remove-Item (Get-PkgPath $Script:RankFile)
 $Script:RankFile = 'runtime/test-rank.txt'
 # рейтинг этого ПК (если автоподбор уже запускали) читается и даёт круги
-if (Test-Path (Get-PkgPath $Script:RankFile)) {
-    $real = Get-TestRank
+$real = Get-TestRank
+if ($real) {
     # стратегии, убранные обновлением, из рейтинга выпадают
     $lines = @([System.IO.File]::ReadAllLines((Get-PkgPath $Script:RankFile)) | Where-Object { $_ -match '^(\d+)\s' -and (Get-Strategy $matches[1]) })
     Check ('real rank parses (' + $lines.Count + ' rows)') ($real -and $real.Rows.Count -eq $lines.Count -and $real.BaseOk -gt 0)
@@ -116,7 +117,8 @@ $Script:ScoreHistoryFile = 'runtime/test-scores.txt'
 # круг по покрытию: за первой идёт та, что открывает другие адреса, даже со слабым баллом
 $Script:CoverFile = 'runtime/dev-cover-check.txt'
 function RankRow($Id, $Score) { New-Object PSObject -Property @{ Id = $Id; Score = [double]$Score; Freeze = 0 } }
-$rankC = New-Object PSObject -Property @{ Rows = @((RankRow '58' 47), (RankRow '52' 46), (RankRow '51' 45), (RankRow '13' 13), (RankRow '9' 10), (RankRow '7' 9)) }
+$coverContext = Get-TestResultContext
+$rankC = New-Object PSObject -Property @{ Context = $coverContext; Rows = @((RankRow '58' 47), (RankRow '52' 46), (RankRow '51' 45), (RankRow '13' 13), (RankRow '9' 10), (RankRow '7' 9)) }
 # tcp=0 tls=0: curl так пишет и зависание после ClientHello. Это неудача стратегии, другая стратегия этот адрес открывает
 $hung = Row DPI d FAIL; $hung.ConnMs = 0
 $tableC = [ordered]@{
@@ -128,17 +130,17 @@ $tableC = [ordered]@{
     '13' = @((Row DPI c OK))
     '9'  = @((Row YouTube yt OK))
 }
-Save-TestCover $tableC
-Check 'cover file roundtrip' ((Get-TestCover)['58'].Count -eq 3 -and (Get-TestCover)['58'] -notcontains 'DPI|d' -and (Get-TestCover)['0'][0] -eq 'Clean|bing')
+Save-TestCover $tableC $coverContext
+Check 'cover file roundtrip' ((Get-TestCover $rankC)['58'].Count -eq 3 -and (Get-TestCover $rankC)['58'] -notcontains 'DPI|d' -and (Get-TestCover $rankC)['0'][0] -eq 'Clean|bing')
 $ringC = @(Get-RingByCover @('58', '52', '51') 'general' '58' $rankC)
 Check ('ring: coverage goes second, hung target counts got ' + ($ringC -join ',')) (($ringC -join ',') -eq '58,13,7,52,51')
 # файл версии 1.7 с метками "?": такие адреса - обычные неудачи
 $Script:RingCache = @{}
-Write-TextNoBom (Get-PkgPath $Script:CoverFile) ("0`tClean|bing`r`n58`tDPI|a`t?DPI|d`r`n7`tDPI|d`r`n52`tDPI|a`r`n")
+Write-TestResultFile (Get-PkgPath $Script:CoverFile) @("0`tClean|bing", "58`tDPI|a`t?DPI|d", "7`tDPI|d", "52`tDPI|a") $coverContext
 $ringOld = @(Get-RingByCover @('58', '52') 'general' '58' $rankC)
 Check ('ring: old file with ? marks got ' + ($ringOld -join ',')) (($ringOld -join ',') -eq '58,7,52')
 $Script:RingCache = @{}
-Save-TestCover $tableC
+Save-TestCover $tableC $coverContext
 $ringY = @(Get-RingByCover @('52', '58') 'google' '58' $rankC)
 Check ('ring: youtube targets only in its ring got ' + ($ringY -join ',')) (($ringY -join ',') -eq '58,9,52')
 $ringP = @(Get-RingByCover @('52', '51') 'general' '58' $rankC)
@@ -150,7 +152,7 @@ $Script:CoverFile = 'runtime/test-cover.txt'
 
 # стратегия, убранная обновлением сборки, не занимает место в круге: балл у неё в файле есть, а работать ей нечем
 $Script:RankFile = 'runtime/dev-rank-check.txt'
-Write-TextNoBom (Get-PkgPath $Script:RankFile) ("base 20 54 DPI=10/36`r`n58 47 47 54 0 0 DPI=30/36`r`n999 46 46 54 0 0 DPI=30/36`r`n")
+Write-TestResultFile (Get-PkgPath $Script:RankFile) @('base 20 54 DPI=10/36', '58 47 47 54 0 0 DPI=30/36', '999 46 46 54 0 0 DPI=30/36') (Get-TestResultContext)
 $rkGone = Get-TestRank
 Check 'rank: removed strategy dropped' (@($rkGone.Rows).Count -eq 1 -and $rkGone.Rows[0].Id -eq '58')
 Remove-Item (Get-PkgPath $Script:RankFile)

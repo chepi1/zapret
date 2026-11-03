@@ -11,4 +11,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 
 exit /b
 
 :run
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\recovery.ps1" -Recover
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\menu.ps1"

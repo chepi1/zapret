@@ -7,9 +7,10 @@
 # Сеть шумит, поэтому адрес, который не открылся, сразу проверяется второй раз той же стратегией:
 # открылся со второй попытки - полбалла ("нестабильно"); вред - только если сбой или медленный TLS повторились.
 # Во время теста IPSet временно "any", чтобы проверочные сайты точно попали под обход (так же делает тест Flowseal).
-# -ReportOnly: только отчёт (для проверки провайдера) - основную стратегию не меняем и обход сами не включаем.
+# -ReportOnly: только отчёт (для проверки провайдера), настройки и круги не меняем.
+# -KeepPrimary: обновить проверенный рейтинг и круги, сохранив выбранную основную (для автонастройки).
 # -Full: все стратегии, иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
-param([int]$TimeoutSec = 5, [int]$Parallel = 16, [int]$Rounds = 1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$Full)
+param([int]$TimeoutSec = 5, [int]$Parallel = 16, [int]$Rounds = 1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
@@ -373,6 +374,7 @@ try {
     $strategies = @(Get-TestStrategies -Full:$Full)
     $testLifetimeMs = Get-TestInstanceLifetimeMs $targets.Count $Parallel $TimeoutSec
     $networkBefore = Get-NetworkObservation
+    $resultContext = Get-TestResultContext $settings $networkBefore
     Set-RingNetworkContext $networkBefore
     $settingsKey = @($settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$settings[$_] }) -join '|'
     $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; Rounds=$Rounds; Settings=$settingsKey; Network=$networkBefore.Key }
@@ -566,6 +568,9 @@ try {
     $pick = $choice.Top
     if ($ReportOnly) {
         $apply = $false
+    } elseif ($KeepPrimary) {
+        $apply = $false
+        Write-Color 'Основная стратегия сохранена; проверяю обновлённые круги.' Gray
     } elseif ($pick.Id -eq $settings.alt) {
         Write-Color ('{0} уже основная{1}.' -f $pick.Name, $(if ($best.Id -ne $pick.Id) { ': по среднему баллу она лучшая' })) Green
         $apply = $false
@@ -590,7 +595,7 @@ try {
         }
         $accepted = $false
         try {
-            if ($base) { Save-TestRank $base $alts; Save-TestCover $table }
+            if ($base) { $Script:TestResultPreview = New-TestResultPreview $base $alts $table $resultContext }
             $Script:RingCache = @{}
             Assert-BypassControlAllowed
             if (-not $table.ContainsKey($candidate.alt)) { throw 'Рабочая стратегия не была измерена в этом прогоне.' }
@@ -605,8 +610,10 @@ try {
             if (-not $p.WaitForExit(5000)) { throw 'Не удалось остановить итоговую проверку.' }
             $p = $null
             if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Входные файлы изменились во время итоговой проверки.' }
+            if (-not (Test-TestResultContext $resultContext (Get-TestResultContext $candidate))) { throw 'Сеть или конфигурация рейтинга изменились во время итоговой проверки.' }
             if (-not $check.Ok) { throw ('Итоговая комбинация не подтверждена: ' + ($check.Failed -join ', ')) }
             Assert-BypassControlAllowed
+            if ($base) { Save-TestRank $base $alts $resultContext; Save-TestCover $table $resultContext }
             if ($apply) { Save-Settings $candidate; $settings = $candidate }
             $accepted = $true
             $finalLine = 'Итоговая комбинация подтверждена в рабочем режиме.'
@@ -614,6 +621,8 @@ try {
             $apply = $false
             $finalLine = 'Итоговая проверка отклонена; прежний рейтинг сохранён. ' + $_.Exception.Message
         } finally {
+            $Script:TestResultPreview = $null
+            $Script:RingCache = @{}
             if (-not $accepted) {
                 foreach ($path in $previous.Keys) {
                     if ($null -eq $previous[$path]) { Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue }

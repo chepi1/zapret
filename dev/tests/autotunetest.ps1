@@ -38,5 +38,25 @@ Write-TextNoBom (Join-Path $Script:Runtime 'autotune.lock') ([string]$other.Id)
 Check 'other powershell -> running' (Test-AutotuneRunning)
 Stop-Process -Id $other.Id -Force; Start-Sleep -Milliseconds 300
 Check 'dead pid -> not running' (-not (Test-AutotuneRunning))
+$autotuneAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools/autotune.ps1'),[ref]$null,[ref]$null)
+$gate = $autotuneAst.Find({param($n) $n -is [Management.Automation.Language.IfStatementAst] -and $n.Extent.Text.StartsWith('if (-not $Force -and $before')},$true)
+if (-not $gate) { throw 'Scheduled selection interval gate missing' }
+$condition = [scriptblock]::Create($gate.Clauses[0].Item1.Extent.Text)
+$Force = $false; $before = Get-Date
+function Get-TestRank { return $null }
+Check 'old network ranking does not postpone selection for another week' (-not (& $condition))
+function Get-TestRank { return [pscustomobject]@{Date='fixture'} }
+Check 'compatible recent ranking retains weekly interval' (& $condition)
+$invocation = $autotuneAst.Find({param($n) $n -is [Management.Automation.Language.CommandAst] -and $n.Extent.Text.StartsWith('& (Join-Path $PSScriptRoot ''test.ps1'')')},$true)
+if (-not $invocation) { throw 'Scheduled strategy test invocation missing' }
+Write-TextNoBom (Join-Path $Script:Runtime 'scheduler-probe.ps1') $invocation.Extent.Text
+Write-TextNoBom (Join-Path $Script:Runtime 'test.ps1') @'
+param([switch]$NoPrompt,[switch]$ReportOnly,[switch]$KeepPrimary,[switch]$Full)
+[IO.File]::WriteAllText((Join-Path $PSScriptRoot 'flags.json'),(@{NoPrompt=[bool]$NoPrompt;ReportOnly=[bool]$ReportOnly;KeepPrimary=[bool]$KeepPrimary;Full=[bool]$Full} | ConvertTo-Json -Compress))
+'@
+$ps = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+$probe = Invoke-Native $ps ('-NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $Script:Runtime 'scheduler-probe.ps1')+'"') $Script:Runtime 15
+$flags = [IO.File]::ReadAllText((Join-Path $Script:Runtime 'flags.json')) | ConvertFrom-Json
+Check 'scheduler requests verified rank refresh while retaining primary' ($probe.ExitCode -eq 0 -and $flags.NoPrompt -and $flags.Full -and $flags.KeepPrimary -and -not $flags.ReportOnly)
 Remove-Item $Script:Runtime -Recurse -Force
 if ($fails) { Write-Host "$fails FAILED" -ForegroundColor Red; exit 1 } else { Write-Host 'all ok' -ForegroundColor Green }

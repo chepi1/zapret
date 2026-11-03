@@ -9,6 +9,7 @@ if ([IO.Path]::GetDirectoryName($stage) -ne [IO.Path]::GetFullPath($env:TEMP).Tr
 New-Item -ItemType Directory $stage | Out-Null
 Copy-Item $Pkg (Join-Path $stage 'pkg') -Recurse
 . (Join-Path $stage 'pkg\tools\lib.ps1')
+function Get-NetworkObservation { [pscustomobject]@{Known=$true;Key=('A'*64);ObservedUtc=[datetime]::UtcNow} }
 $fails = 0
 $all = @(Get-Strategies)
 Write-Host ('strategies: ' + $all.Count + ' -> ' + (($all | ForEach-Object { $_.Id }) -join ','))
@@ -31,7 +32,7 @@ try {
     $lines = @('# date: 2026-10-27 12:00', 'base 20 54 DPI=10/36 Discord=0/4 YouTube=0/3', '7 45 45 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3',
         '5 44 44 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3', '45 43 43 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3',
         '41 42 42 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3', '3 41 41 54 0 0 DPI=30/36 Discord=4/4 YouTube=3/3')
-    Write-TextNoBom $rankPath (($lines -join "`r`n") + "`r`n")
+    Write-TestResultFile $rankPath $lines (Get-TestResultContext)
     $s = Get-Settings; $s.alt = '7'; $s.auto = 'on'
     Write-Host ('ring general: ' + ((Get-RotationOrder '7' 'general' | ForEach-Object { $_.Name }) -join ' > '))
     # круг игры от рейтинга не зависит (основная и RotationPref), круги сайтов и YouTube - по рейтингу

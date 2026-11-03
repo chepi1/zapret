@@ -27,7 +27,7 @@ if (Update-UpstreamCheck -Force:$Force) {
 
 $rankFile = Get-PkgPath $Script:RankFile
 $before = if (Test-Path $rankFile) { (Get-Item $rankFile).LastWriteTime } else { $null }
-if (-not $Force -and $before -and ((Get-Date) - $before).TotalDays -lt $Script:AutotuneDays) { exit 0 }
+if (-not $Force -and $before -and (Get-TestRank) -and ((Get-Date) - $before).TotalDays -lt $Script:AutotuneDays) { exit 0 }
 
 $bad = @(Test-PackageIntegrity)
 if ($bad.Count) { Add-AutotuneLog ('автоподбор не запущен: файлы zapret2 изменены - ' + ($bad -join ', ')); exit 1 }
@@ -40,7 +40,7 @@ Write-TextNoBom $lock ([string]$PID)
 $wasRunning = (@(Get-OurProcesses).Count -gt 0) -or [bool](Get-OurService | Where-Object { $_.Status -eq 'Running' })
 try { Start-Transcript -Path (Join-Path $Script:Runtime 'autotune-last.txt') -Force | Out-Null } catch { }
 try {
-    & (Join-Path $PSScriptRoot 'test.ps1') -NoPrompt -ReportOnly -Full
+    & (Join-Path $PSScriptRoot 'test.ps1') -NoPrompt -KeepPrimary -Full
     $after = if (Test-Path $rankFile) { (Get-Item $rankFile).LastWriteTime } else { $null }
     if ($after -and $after -ne $before) {
         $best = @([System.IO.File]::ReadAllLines((Join-Path $Script:Runtime 'test-last.txt')) | Where-Object { $_ -like 'Лучший результат:*' }) | Select-Object -First 1
