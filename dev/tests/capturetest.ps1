@@ -36,9 +36,10 @@ try{
     Check 'source edits cannot change an already-built kernel/profile snapshot' ($snapshots[0] -match '104\.255\.104\.0/22' -and $next -contains '--ipset-exclude-ip=8.8.8.0/24')
     $maximum=@(100..131|ForEach-Object{'123.123.123.'+$_+'/32'})
     [IO.File]::WriteAllText($source,($maximum -join "`n")+"`n",$Script:Utf8NoBom)
-    $wide=$settings.Clone();$wide.auto='on'
+    $wide=$settings.Clone();$wide.auto='on';$wide.alt='60'
     $maxCmd=Get-BypassCmdLine -Settings $wide -Name 'capture-limit' -DryRun
-    Check '32 maximum-length CIDRs with auto rotation fit the native launch budget' ($maxCmd.Length -le 32000)
+    Check '32 longest single-host IPv4 CIDRs with auto rotation fit the native launch budget' ($maxCmd.Length -le 32000)
+    Write-Host ('maximum-host command length: '+$maxCmd.Length)
     [IO.File]::WriteAllText($source,"104.255.104.0/22`n2001:db8::/32`n",$Script:Utf8NoBom)
     $fallback=New-BypassArgList -Settings $settings
     Check 'mixed-family fallback preserves full file semantics without partial kernel exclusion' (-not @($fallback|Where-Object{$_ -like '--wf-raw-filter=*'}).Count -and @($fallback|Where-Object{$_ -match '^--ipset-exclude=.*taketwo'}).Count -ge 8)

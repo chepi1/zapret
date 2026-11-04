@@ -15,7 +15,7 @@ function Get-CaptureExclusion([string[]]$Lines){
         $number=[uint64]$bytes[0]*16777216L+[uint64]$bytes[1]*65536L+[uint64]$bytes[2]*256L+$bytes[3]
         $size=[uint64][math]::Pow(2,32-[int]$prefixText)
         if($number % $size -ne 0){return $null}
-        $nets[$line]='(ip.DstAddr<'+$hostText+' or ip.DstAddr>'+(ConvertTo-CaptureIp4 ($number+$size-1))+')'
+        $nets[$line]=if($size -eq 1){'ip.DstAddr!='+$hostText}else{'(ip.DstAddr<'+$hostText+' or ip.DstAddr>'+(ConvertTo-CaptureIp4 ($number+$size-1))+')'}
         if($nets.Count -gt 32){return $null}
     }
     if(-not $nets.Count){return $null}

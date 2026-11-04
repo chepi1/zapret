@@ -77,4 +77,14 @@ for dst in ('8.8.8.8', '1.1.1.1', '2001:4860:4860::8888', '2606:4700:4700::1111'
     for flags in (0x12, 0x11, 0x14):
         local = '10.0.0.2' if ipaddress.ip_address(dst).version == 4 else '2001:4860::1234'
         check(local, src=dst, proto='tcp', port=49152, sport=27123, flags=flags, outbound=False, expected_before=True)
+if len(exported_filters) > 2:
+    filters = [exported_filters[0], exported_filters[2]]
+    for last in range(99, 133):
+        remote = f'123.123.123.{last}'
+        excluded = 100 <= last <= 131
+        check(remote, port=27015, excluded=excluded, expected_before=True)
+        check(remote, proto='tcp', port=443, flags=0x10, excluded=excluded, expected_before=True)
+        for flags in (0x12, 0x11, 0x14):
+            check('10.0.0.2', src=remote, proto='tcp', port=49152, sport=27123,
+                  flags=flags, outbound=False, excluded=excluded, expected_before=True)
 print(f'ok {count} native packet cases: remote-address TCP exclusions in both directions, outbound UDP excluded, other paths retained; {len(exported_filters)} complete filters compiled')
