@@ -1,4 +1,21 @@
 ﻿# Small immutable launch exclusions. No processes, files or settings on import.
+function Test-CaptureFilter {
+    [CmdletBinding(DefaultParameterSetName='Text')]
+    param(
+        [Parameter(Position=0,ParameterSetName='Text')][AllowEmptyString()][string]$Filter,
+        [Parameter(Mandatory=$true,ParameterSetName='Bytes')][AllowNull()][AllowEmptyCollection()][byte[]]$FilterBytes
+    )
+    try{
+        if(-not ('ZapretFilter.Compiler' -as [type])){
+            Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'filtercheck.cs'))) -Language CSharp -ErrorAction Stop
+        }
+        $dll=Get-PkgPath 'bin/WinDivert.dll'
+        $checked=if($PSCmdlet.ParameterSetName -eq 'Bytes'){[ZapretFilter.Compiler]::CheckBytes($dll,$FilterBytes)}else{[ZapretFilter.Compiler]::Check($dll,$Filter)}
+        $text=if($checked.Ok){''}else{'Ошибка фильтра WinDivert, позиция '+$checked.Position+': '+$checked.Error}
+        return [pscustomobject]@{Ok=$checked.Ok;Output=$text;Position=$checked.Position}
+    }catch{return [pscustomobject]@{Ok=$false;Output=('Не удалось проверить фильтр WinDivert: '+$_.Exception.Message);Position=$null}}
+}
+
 function ConvertTo-CaptureIp4([uint64]$Value){
     return ('{0}.{1}.{2}.{3}' -f (($Value -shr 24) -band 255),(($Value -shr 16) -band 255),(($Value -shr 8) -band 255),($Value -band 255))
 }

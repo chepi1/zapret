@@ -510,7 +510,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}, [hashtable]
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
@@ -1360,19 +1360,28 @@ function Invoke-Native([string]$File, [string]$Arguments, [string]$WorkDir, [int
 # $CmdLine - уже собранная строка запуска: проверяется тот же фильтр. Только у dry-run отключаем mutex
 # дубликата: winws2 проверяет его до выхода по --dry-run, когда прежний обход ещё должен работать.
 function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [string]$CmdLine) {
-    if ($CmdLine) { $cmd = (ConvertTo-WinArg '--dry-run') + ' ' + $CmdLine + ' --wf-dup-check=0' }
-    else {
-        try { $cmd = Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun }
-        catch { return New-Object PSObject -Property @{ Ok = $false; Output = $_.Exception.Message } }
-    }
-    $r = Invoke-Native $Script:Exe $cmd $Script:Bin 60
-    # изредка процесс cygwin падает при старте без единого слова - это не ошибка параметров, пробуем ещё раз
-    if ($r.ExitCode -ne 0 -and -not $r.Output) {
-        Start-Sleep -Milliseconds 500
-        $r = Invoke-Native $Script:Exe $cmd $Script:Bin 60
-    }
-    $out = if ($r.Output) { $r.Output } else { 'winws2 завершился с кодом {0} без сообщений' -f $r.ExitCode }
-    return New-Object PSObject -Property @{ Ok = ($r.ExitCode -eq 0); Output = $out }
+    $filterFile=$null;$exportOwned=$false
+    try{
+        $filterFile=Join-Path ([IO.Path]::GetTempPath()) ('zapret-filter-'+[guid]::NewGuid().ToString('N')+'.txt')
+        if(-not $CmdLine){$CmdLine=Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode}
+        $reserved=[IO.File]::Open($filterFile,'CreateNew','Write','None')
+        try{$exportOwned=$true}finally{$reserved.Dispose()}
+        $cmd=(ConvertTo-WinArg '--dry-run')+' '+$CmdLine+' '+(ConvertTo-WinArg ('--wf-save='+$filterFile))+' --wf-dup-check=0'
+        $r=Invoke-Native $Script:Exe $cmd $Script:Bin 60
+        if($r.ExitCode -ne 0 -and -not $r.Output -and -not $r.TimedOut){
+            Start-Sleep -Milliseconds 500
+            [IO.File]::WriteAllText($filterFile,'',$Script:Utf8NoBom)
+            $r=Invoke-Native $Script:Exe $cmd $Script:Bin 60
+        }
+        if($r.TimedOut){return [pscustomobject]@{Ok=$false;Output='Проверка параметров winws2 превысила отведённое время.'}}
+        if($r.ExitCode -ne 0){return [pscustomobject]@{Ok=$false;Output=$(if($r.Output){$r.Output}else{'winws2 завершился с кодом '+$r.ExitCode+' без сообщений'})}}
+        $file=Get-Item -LiteralPath $filterFile -ErrorAction Stop
+        if($file.Length -lt 1 -or $file.Length -gt 1048576){return [pscustomobject]@{Ok=$false;Output='winws2 не сохранил допустимый сетевой фильтр для проверки.'}}
+        $checked=Test-CaptureFilter -FilterBytes ([IO.File]::ReadAllBytes($filterFile))
+        if(-not $checked.Ok){return [pscustomobject]@{Ok=$false;Output=$checked.Output}}
+        return [pscustomobject]@{Ok=$true;Output=$r.Output}
+    }catch{return [pscustomobject]@{Ok=$false;Output=$_.Exception.Message}}
+    finally{if($exportOwned){Remove-Item -LiteralPath $filterFile -Force -ErrorAction SilentlyContinue}}
 }
 
 function Get-ServiceBinPath([string]$CmdLine) {
@@ -1392,7 +1401,7 @@ function Start-BypassCore([switch]$Quiet) {
     catch { Write-Color $_.Exception.Message Red; return $false }
     $dry = Test-ConfigDry $settings -CmdLine $cmd
     if (-not $dry.Ok) {
-        Write-Color 'winws2 отклонил параметры:' Red
+        Write-Color 'Проверка конфигурации не пройдена:' Red
         Write-Host $dry.Output
         return $false
     }

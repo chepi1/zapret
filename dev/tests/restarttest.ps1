@@ -12,6 +12,7 @@ function Invoke-Native {
     if($Arguments -match '--bad-option=1'){return @{ExitCode=2;TimedOut=$false;Output='invalid candidate'}}
     $flags=[regex]::Matches($Arguments,'--wf-dup-check=([01])')
     $ok=$Arguments -match '--dry-run' -and $flags.Count -gt 0 -and $flags[$flags.Count-1].Groups[1].Value -eq '0'
+    if($ok -and $Arguments -match '"--wf-save=([^"]+)"'){[IO.File]::WriteAllText($Matches[1],'true')}
     return @{ExitCode=$(if($ok){0}else{1});TimedOut=$false;Output=$(if($ok){'command line parameters verified'}else{'A copy of winws2 is already running with the same filter'})}
 }
 function Start-Sleep {}
@@ -31,7 +32,7 @@ Check 'generated dry-run also skips only the duplicate-instance mutex' $result.O
 $dry=New-BypassArgList -Settings $settings -DryRun
 $live=New-BypassArgList -Settings $settings
 Check 'all explicit dry configurations carry the isolated mutex flag' ($dry -contains '--dry-run' -and $dry -contains '--wf-dup-check=0')
-Check 'actual launch retains default duplicate protection and interception' (-not ($live -contains '--wf-dup-check=0') -and -not ($live -contains '--dry-run') -and -not ($live -contains '--intercept=0'))
+Check 'actual launch retains default duplicate protection and interception' (-not ($live -contains '--wf-dup-check=0') -and -not ($live -contains '--dry-run') -and -not ($live -contains '--intercept=0') -and -not @($live|Where-Object{$_ -like '--wf-save=*'}).Count)
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools/menu.ps1'),[ref]$null,[ref]$null)
 foreach($fn in $ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Start-WithChecks','Confirm-GameRunning','Invoke-MenuAction')},$true)){Invoke-Expression $fn.Extent.Text}
 function Test-AutotuneRunning {return $false}

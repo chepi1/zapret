@@ -38,12 +38,14 @@ foreach ($k in $steps.Keys) {
 # сбой запуска: причина и подсказки по выводу winws2 - без настоящего winws2 и без настоящей службы
 $realService = $Script:ServiceName
 $origInvoke = ${function:Invoke-Native}; $origStop = ${function:Stop-Bypass}
+$origGames = ${function:Get-RunningGames}
 $Script:ServiceName = 'zapret-smoke-none'
 $errFile = Join-Path $Script:Runtime 'start-error.txt'
 function Invoke-Native { return New-Object PSObject -Property @{ ExitCode = 1; TimedOut = $false; Output = "github version v1.0.6`nwindivert: error opening filter: Access is denied." } }
 function Start-Process { $script:fallbackStarted = $true }
 # настоящий Stop-Bypass остановил бы обход этого ПК, если тест запущен не на копии
 function Stop-Bypass { }
+function Get-RunningGames { return @() }
 $script:fallbackStarted = $false
 $sf1 = Show-StartFailure 'Служба не ответила на запрос своевременно.' (Get-Date).AddMinutes(-1) 6>$null
 $t1 = [System.IO.File]::ReadAllText($errFile)
@@ -52,6 +54,7 @@ function Invoke-Native { return New-Object PSObject -Property @{ ExitCode = -1; 
 $sf2 = Show-StartFailure '' (Get-Date).AddMinutes(-1) 6>$null
 $t2 = [System.IO.File]::ReadAllText($errFile)
 ${function:Invoke-Native} = $origInvoke; ${function:Stop-Bypass} = $origStop; Remove-Item function:Start-Process
+${function:Get-RunningGames} = $origGames
 $Script:ServiceName = $realService
 $okFail = ($sf1 -eq $false) -and $t1.Contains('Access is denied') -and $t1.Contains('антивирус блокирует') -and $t1.Contains('не ответила Windows вовремя') -and -not $fb1
 # фильтры прошлого запуска (код службы 0x8032000A больше Int32 - меню на нём падало)
