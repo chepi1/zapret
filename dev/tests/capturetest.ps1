@@ -2,12 +2,12 @@
 if(Test-Path (Join-Path $Pkg '.git')){throw 'Run on a package copy.'}
 $ErrorActionPreference='Stop'
 . (Join-Path $Pkg 'tools/lib.ps1')
-if(-not(Get-Command Get-CaptureExclusion -ErrorAction SilentlyContinue)){throw 'FAIL bounded UDP capture compiler missing'}
+if(-not(Get-Command Get-CaptureExclusion -ErrorAction SilentlyContinue)){throw 'FAIL bounded transport capture compiler missing'}
 $fails=0
 function Check($Name,$Ok){if($Ok){Write-Host ('ok '+$Name)}else{Write-Host ('FAIL '+$Name);$script:fails++}}
 $sample=Get-CaptureExclusion @('# comment','104.255.104.0/22','198.133.210.0/24 # note','104.255.104.0/22')
 Check 'deduplicated canonical CIDRs share a single launch snapshot' ($sample.Count -eq 2 -and $sample.IpArgument -eq '--ipset-exclude-ip=104.255.104.0/22,198.133.210.0/24')
-Check 'IPv4 UDP-only exclusion retains other protocols and exact boundary neighbours' ($sample.Filter.StartsWith('not outbound or not udp or not ip or ') -and $sample.Filter.Contains('ip.DstAddr<104.255.104.0 or ip.DstAddr>104.255.107.255'))
+Check 'IPv4 transport exclusion retains exact boundary neighbours' ($sample.Filter.Contains('ip.DstAddr<104.255.104.0 or ip.DstAddr>104.255.107.255'))
 foreach($bad in @('2001:db8::/32','104.255.104.1/22','104.255.104/22','999.1.2.3/24','0.0.0.0/0','1.2.3.0/33','1.2.3.0/24 or true')){
     Check ('unsupported input retains file-based fallback: '+$bad) ($null -eq (Get-CaptureExclusion @('104.255.104.0/22',$bad)))
 }
@@ -19,6 +19,15 @@ $args0=New-BypassArgList -Settings $settings
 $filters=@($args0|Where-Object{$_ -like '--wf-raw-filter=*'})
 $snapshots=@($args0|Where-Object{$_ -like '--ipset-exclude-ip=*'})
 Check 'one kernel AND clause accompanies every Take-Two profile snapshot' ($filters.Count -eq 1 -and $snapshots.Count -ge 8 -and @($snapshots|Select-Object -Unique).Count -eq 1 -and -not @($args0|Where-Object{$_ -match '^--ipset-exclude=.*taketwo'}).Count)
+$profileName=$null;$hasSnapshot=$false;$missingSnapshots=@()
+foreach($arg in $args0){
+    if($arg -match '^--(?:name|new)=(.+)$'){
+        if($profileName -and -not $hasSnapshot){$missingSnapshots+=$profileName}
+        $profileName=$Matches[1];$hasSnapshot=$false
+    }elseif($profileName -and $arg -eq $snapshots[0]){$hasSnapshot=$true}
+}
+if($profileName -and -not $hasSnapshot){$missingSnapshots+=$profileName}
+Check 'every named profile already excludes the exact kernel snapshot for TCP and UDP' ($profileName -and $missingSnapshots.Count -eq 0)
 Check 'Valve and user ipsets keep their existing live profile handling' (@($args0|Where-Object{$_ -like '--ipset-exclude=*ipset-exclude-user.txt'}).Count -gt 0 -and $filters[0] -notmatch 'Valve|ipset-user')
 $source=Join-Path $Script:Lists 'ipset-taketwo.txt';$original=[IO.File]::ReadAllBytes($source)
 try{

@@ -23,7 +23,7 @@ for value in filters:
     error, position = c.c_char_p(), c.c_uint()
     assert compile_filter(value, 0, None, 0, c.byref(error), c.byref(position)), (error.value, position.value, value[max(0, position.value-80):position.value+120])
 
-def packet(dst, proto='udp', port=27015, payload=b'game', flags=0x02):
+def packet(dst, proto='udp', port=27015, payload=b'game', flags=0x02, src=None):
     ip = ipaddress.ip_address(dst)
     if proto == 'udp':
         body = struct.pack('!HHHH', 40000, port, 8 + len(payload), 0) + payload
@@ -32,9 +32,9 @@ def packet(dst, proto='udp', port=27015, payload=b'game', flags=0x02):
         body = struct.pack('!HHIIBBHHH', 40000, port, 1, 0, 0x50, flags, 65535, 0, 0) + payload
         protocol = 6
     if ip.version == 4:
-        head = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(body), 0, 0, 64, protocol, 0, ipaddress.ip_address('10.0.0.2').packed, ip.packed)
+        head = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(body), 0, 0, 64, protocol, 0, ipaddress.ip_address(src or '10.0.0.2').packed, ip.packed)
     else:
-        head = struct.pack('!IHBB16s16s', 6 << 28, len(body), protocol, 64, ipaddress.ip_address('2001:4860::1234').packed, ip.packed)
+        head = struct.pack('!IHBB16s16s', 6 << 28, len(body), protocol, 64, ipaddress.ip_address(src or '2001:4860::1234').packed, ip.packed)
     return head + body, ip.version
 
 count = 0
@@ -55,13 +55,18 @@ for cidr in ('104.255.104.0/22', '164.153.136.0/22', '192.81.240.0/21', '198.133
     for dst in (str(net.network_address), str(net.broadcast_address)):
         for port in (1024, 27015, 50050, 65535):
             check(dst, port=port, excluded=True, expected_before=True)
-        check(dst, proto='tcp', port=443, expected_before=True)
+        for port in (443, 1024, 27123, 65535):
+            for flags in (0x02, 0x10, 0x18, 0x11, 0x14):
+                check(dst, proto='tcp', port=port, flags=flags, excluded=True, expected_before=True)
         check(dst, proto='tcp', port=443, flags=0x12, outbound=False)
+        for flags in (0x12, 0x11, 0x14):
+            check('1.1.1.1', src=dst, proto='tcp', port=27123, flags=flags, outbound=False, expected_before=True)
         check(dst, outbound=False)
         check(dst, port=443, payload=b'\xc0\0\0\0\x01' + bytes(251), excluded=True, expected_before=True)
     for dst in (str(net.network_address - 1), str(net.broadcast_address + 1)):
         check(dst, expected_before=True)
+        check(dst, proto='tcp', port=27123, expected_before=True)
 for dst in ('8.8.8.8', '1.1.1.1', '2001:4860:4860::8888', '2606:4700:4700::1111'):
     check(dst, expected_before=True)
     check(dst, proto='tcp', port=443, expected_before=True)
-print(f'ok {count} native packet cases: exact UDP exclusions, TCP/IPv6/inbound/neighbours retained')
+print(f'ok {count} native packet cases: exact outbound TCP/UDP exclusions, IPv6/inbound/neighbours retained')

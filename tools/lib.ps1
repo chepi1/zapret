@@ -833,7 +833,8 @@ function New-BypassArgList {
     $a.Add("--wf-tcp-out=$tcpPorts")
     $a.Add("--wf-udp-out=$udpPorts")
     $a.Add('--wf-raw-part=@' + (Get-PkgPath 'windivert/quic_initial_ietf.txt'))
-    # Take-Two уже исключены во всех профилях. Небольшой IPv4 список фиксируется одинаково
+    # TCP и UDP к Take-Two уже исключены во всех профилях; не отправляем их в userspace.
+    # Небольшой IPv4 список фиксируется одинаково
     # в kernel filter и native профилях: редактирование файла не рассинхронизирует текущий запуск.
     $takeTwoFile=Get-PkgPath 'lists/ipset-taketwo.txt'
     $captureExclusion=$null
