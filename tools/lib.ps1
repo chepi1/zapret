@@ -13,6 +13,7 @@ $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'netstate.ps1')
+. (Join-Path $PSScriptRoot 'watchcode.ps1')
 . (Join-Path $PSScriptRoot 'capture.ps1')
 . (Join-Path $PSScriptRoot 'linkguard.ps1')
 . (Join-Path $PSScriptRoot 'recovery.ps1')
@@ -502,19 +503,27 @@ function Get-StrategyFingerprint([string]$Id) {
     if ($Id -notmatch '^\d+$') { return '' }
     try { return (Get-FileHash -LiteralPath (Join-Path $Script:StratDir ('alt' + $Id + '.txt')) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return '' }
 }
-function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}) {
+function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}, [hashtable]$ExpectedCode = $null) {
     try {
         if (-not @($Targets).Count) { return '' }
+        if ($null -ne $ExpectedCode -and -not $ExpectedCode.Count) { return '' }
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/capture.ps1','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
         foreach ($dir in @('lists','fake')) {
             $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
         }
+        $checkedCode=0
         foreach ($file in $files) {
-            $parts += (Get-FileHash -LiteralPath (Join-Path $Script:Root $file) -Algorithm SHA256 -ErrorAction Stop).Hash
+            $hash=(Get-FileHash -LiteralPath (Join-Path $Script:Root $file) -Algorithm SHA256 -ErrorAction Stop).Hash
+            if($null -ne $ExpectedCode -and $ExpectedCode.ContainsKey($file)){
+                if($hash -cne $ExpectedCode[$file]){return ''}
+                $checkedCode++
+            }
+            $parts += $hash
         }
+        if($null -ne $ExpectedCode -and $checkedCode -ne $ExpectedCode.Count){return ''}
         $sha = [Security.Cryptography.SHA256]::Create()
         try { return [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($parts -join "`n")))).Replace('-','') } finally { $sha.Dispose() }
     } catch { return '' }
@@ -630,10 +639,10 @@ function Get-RingStateName([string]$Section, $Ring) {
     finally { $sha.Dispose() }
     return ('ring-{0}-{1}-{2}.txt' -f $Section, $Script:RingCompositionKey.Substring(0,24).ToLowerInvariant(), $hex)
 }
-function Get-RingCompositionKey([hashtable]$Settings) {
+function Get-RingCompositionKey([hashtable]$Settings, [hashtable]$ExpectedCode = $null) {
     $settingsKey=@($Settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$Settings[$_] }) -join '|'
     $target=[pscustomobject]@{Group='ring';Name='composition';Url='local'}
-    return Get-ScoreInputsHash @($target) @{Settings=$settingsKey}
+    return Get-ScoreInputsHash @($target) @{Settings=$settingsKey} -ExpectedCode $ExpectedCode
 }
 # Круг поменялся (новый автоподбор) - появляется новый файл. Старые оставляем на случай возврата, но не больше 8
 function Remove-OldRingMemory {

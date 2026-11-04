@@ -1,10 +1,10 @@
 ﻿# Один наблюдатель папки. Не запускает/останавливает обход, не меняет сеть и не выполняет внешних запросов.
 param([ValidateRange(0,1000000)][int]$MaxSamples=0)
 . (Join-Path $PSScriptRoot 'lib.ps1')
-foreach($required in @('Get-NetworkObservation','Get-RingCompositionKey','Write-NetworkWatchRecord','Get-NetworkWatchRecord','Get-WifiInterruptionState','Write-LinkGuardRecord')){
+foreach($required in @('Get-NetworkObservation','Get-RingCompositionKey','Write-NetworkWatchRecord','Get-NetworkWatchRecord','Get-WifiInterruptionState','Write-LinkGuardRecord','Get-NetworkWatchCodeSnapshot','Get-NetworkWatchCodeState')){
     if(-not(Get-Command $required -ErrorAction SilentlyContinue)){exit 1}
 }
-$lease=$null
+$lease=$null;$reload=$false
 try{
     try{$lease=[IO.File]::Open((Join-Path $Script:Runtime 'network-watch.lock'),'OpenOrCreate','ReadWrite','Read')}catch{exit 0}
     Initialize-RingDir
@@ -12,6 +12,9 @@ try{
     $linkFile=Get-PkgPath ($Script:RingDir+'/link-guard.txt')
     Write-NetworkWatchRecord $file "3 0 - -`n" | Out-Null
     Write-LinkGuardRecord $linkFile "1 0 0 0`n" | Out-Null
+    $loadedCode=Get-NetworkWatchCodeSnapshot $MyInvocation.MyCommand.ScriptBlock.Ast
+    if($null -eq $loadedCode -or -not $loadedCode.Count){exit 1}
+    $codeValidated=((Get-NetworkWatchCodeState $loadedCode) -eq 'Current')
     $before=$null;$linkState=$null
     for($sample=0;$MaxSamples -eq 0 -or $sample -lt $MaxSamples;$sample++){
         if(-not @(Get-OurProcesses).Count){
@@ -28,9 +31,23 @@ try{
         $now=[datetime]::UtcNow
         $eventEpoch=Get-WifiDisconnectEpoch $scope $now
         $linkState=Get-WifiInterruptionState $linkState $wifi $eventEpoch $now
-        Write-LinkGuardRecord $linkFile (Get-LinkGuardRecord $linkState $now) | Out-Null
+        $linkRecord=Get-LinkGuardRecord $linkState $now
         $after=Get-NetworkObservation -Machine
-        $after | Add-Member NoteProperty CompositionKey (Get-RingCompositionKey (Get-Settings))
+        $composition=Get-RingCompositionKey (Get-Settings) -ExpectedCode $loadedCode
+        if($composition -notmatch '^[A-Fa-f0-9]{64}$'){
+            $codeState=Get-NetworkWatchCodeState $loadedCode
+            if($codeState -ne 'Current'){
+                Write-NetworkWatchRecord $file "3 0 - -`n" | Out-Null
+                Write-LinkGuardRecord $linkFile "1 0 0 0`n" | Out-Null
+                if($codeState -eq 'Changed'){$reload=$codeValidated;break}
+                $before=$null;$linkState=$null
+                Start-Sleep -Seconds 5
+                continue
+            }
+        }
+        $codeValidated=$true
+        $after | Add-Member NoteProperty CompositionKey $composition
+        Write-LinkGuardRecord $linkFile $linkRecord | Out-Null
         Write-NetworkWatchRecord $file (Get-NetworkWatchRecord $before $after) | Out-Null
         $before=$after
         Start-Sleep -Seconds 5
@@ -38,4 +55,9 @@ try{
 }finally{
     if($lease){$lease.Dispose()}
     # Старый heartbeat автоматически истекает; чужой экземпляр после освобождения lease не затираем.
+}
+if($reload){
+    # Lease уже освобождён; новый экземпляр снова требует два свежих наблюдения.
+    Start-Sleep -Seconds 2
+    if(-not(Start-NetworkWatcher)){exit 1}
 }
