@@ -20,5 +20,9 @@ function Get-CaptureExclusion([string[]]$Lines){
     }
     if(-not $nets.Count){return $null}
     # WinDivert negation accepts a field test, not an arbitrary parenthesized expression.
-    return [pscustomobject]@{Count=$nets.Count;Cidrs=[string[]]@($nets.Keys);IpArgument=('--ipset-exclude-ip='+(@($nets.Keys) -join ','));Filter=('not outbound or (not tcp and not udp) or not ip or ('+(@($nets.Values) -join ' and ')+')')}
+    $outsideDst=@($nets.Values) -join ' and '
+    $outsideSrc=$outsideDst.Replace('ip.DstAddr','ip.SrcAddr')
+    $outbound='not outbound or (not tcp and not udp) or not ip or ('+$outsideDst+')'
+    $inbound='not inbound or not tcp or not ip or ('+$outsideSrc+')'
+    return [pscustomobject]@{Count=$nets.Count;Cidrs=[string[]]@($nets.Keys);IpArgument=('--ipset-exclude-ip='+(@($nets.Keys) -join ','));Filter=('('+$outbound+') and ('+$inbound+')')}
 }
