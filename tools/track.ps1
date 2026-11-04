@@ -289,7 +289,7 @@ $matchStats = [ordered]@{}   # "ip|port" -> скорости по интерва
 
 # Итог: серверы матча с их статистикой и все адреса. $Final = $false - промежуточный (трекер ещё работает).
 # Паузы между пакетами (мс) по отметкам времени журнала сети: самая длинная и сколько было длиннее 100 мс.
-# У сервера матча 2K пакеты идут каждые ~50 мс, поэтому пауза больше 100 мс - это рывок.
+# Порог отмечает наблюдаемую паузу ETW, но сам по себе не объясняет её причину.
 function Get-Gaps($Recs) {
     $t = @($Recs | ForEach-Object { $_.Time } | Sort-Object)
     $max = 0.0; $n = 0
@@ -387,12 +387,11 @@ function Get-SummaryLines([bool]$Final) {
                 (Format-Endpoint $ms.Ip $ms.Port 46), (Get-GeoText $ms.Ip 50), $ms.First, $ms.Last, ($ms.Last - $ms.First),
                 ($ms.Out / [math]::Max($ms.Sec, 1)), ($ms.InTotal / [math]::Max($ms.Sec, 1)),
                 $(if ($sorted.Count) { $sorted[0] } else { 0 }), $med, $(if ($sorted.Count) { $sorted[-1] } else { 0 }), $dips, (Get-PingText $ms.Ip udp ([int]$ms.Port) -Details)))
-            $why = if ($ms.InGaps -gt 2 * [math]::Max($ms.OutGaps, 1)) { 'рывки только в приходящих: пакеты матча теряет или придерживает сеть' }
-                elseif ($ms.OutGaps -gt 0) { 'паузы и в исходящих: подвисает сама игра' } else { 'рывков нет' }
-            $s.Add(('  паузы между пакетами (больше 100 мс) вых/вх: {0}/{1}, самая длинная вых/вх: {2}/{3} мс - {4}' -f $ms.OutGaps, $ms.InGaps, $ms.OutGapMax, $ms.InGapMax, $why))
+            $s.Add(('  паузы между событиями ETW (больше 100 мс) вых/вх: {0}/{1}, самая длинная вых/вх: {2}/{3} мс' -f $ms.OutGaps, $ms.InGaps, $ms.OutGapMax, $ms.InGapMax))
         }
+        $s.Add('Паузы ETW сами по себе не определяют причину подвисания: игра, ожидание сервиса, сеть или задержка обработки событий. Совпадение с другим соединением не доказывает его влияние.')
         if ($gapStats.Total) {
-            $s.Add(('Рывки игры (не отправляла пакеты матча 250 мс и дольше): {0}, из них без сети игры рядом: {1}.' -f $gapStats.Total, $gapStats.Quiet))
+            $s.Add(('Паузы исходящих UDP-событий от 250 мс: {0}, из них без других сетевых событий игры рядом: {1}.' -f $gapStats.Total, $gapStats.Quiet))
             $top = @($gapStats.Flows.Values | Sort-Object @{ Expression = { $_.Waits }; Descending = $true }, @{ Expression = { $_.Count }; Descending = $true } | Select-Object -First 5)
             if ($top.Count) { $s.Add('  чаще всего рядом с рывками (за 1,5 с до рывка и во время него):') }
             foreach ($t in $top) {
@@ -558,8 +557,7 @@ try {
             $ms = $matchStats[$mk]
             $ms.Last = $now; $ms.Sec += $chunkSec; $ms.Out += $m.IOut; $ms.InTotal += $m.IIn
             $ms.In.Add([math]::Round($m.IIn / $chunkSec, 1))
-            # рывки: пауза только в приходящих (исходящие ровные) - пакеты теряет или придерживает сеть;
-            # пауза и в исходящих - подвисла сама игра (в это время она ничего не отправляла)
+            # Наблюдаем паузы ETW отдельно в каждом направлении; причину по ним не устанавливаем.
             $mRecs = @($recs | Where-Object { $_.Proto -eq 'udp' -and $_.Ip -eq $m.Ip -and $_.Port -eq $m.Port })
             $gIn = Get-Gaps @($mRecs | Where-Object { $_.Dir -eq 'in' })
             $gOut = Get-Gaps @($mRecs | Where-Object { $_.Dir -eq 'out' })
@@ -581,7 +579,7 @@ try {
                     if ($c.Wait -lt 0 -or $c.Wait -ge 200) { $gapStats.Flows[$c.Key].Waits++ }
                 }
                 if (++$nGap -gt 5) { continue }
-                $what = if (-not $ctx.Count) { 'сеть игры рядом молчала: подвисание не из-за ожидания сети' } else {
+                $what = if (-not $ctx.Count) { 'других сетевых событий игры в этом фрагменте нет; причина паузы не установлена' } else {
                     (@($ctx | Select-Object -First 4 | ForEach-Object {
                         $x = $ep[$_.Key]
                         '{0} {1}{8} {2} вых/вх {3}/{4}{5}{9}{6} (обход: {7})' -f $_.Proto.ToUpper(), (Format-Endpoint $_.Ip $_.Port 40), $_.Proc, $_.Out, $_.In,
@@ -590,7 +588,7 @@ try {
                             $(if ($x) { Get-BypassText $x.Owner $_.Proto ([int]$_.Port) } else { '?' }), (Get-NameText $_.Ip),
                             $(if ($_.Syn -and -not $_.In) { ', подключалась без ответа (SYN x' + $_.Syn + ')' } elseif ($_.Syn) { ', новое подключение' } else { '' })
                     })) -join '; ' }
-                Write-Log ('{0:HH:mm:ss.fff} рывок  игра не отправляла {1} мс | рядом: {2}' -f $gap.Start, $gap.Ms, $what)
+                Write-Log ('{0:HH:mm:ss.fff} пауза UDP  нет исходящих событий ETW {1} мс | рядом: {2}' -f $gap.Start, $gap.Ms, $what)
             }
         }
         # программа ходит через локальный прокси? (проверяем каждый круг, порты прокси - раз в минуту)
