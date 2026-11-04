@@ -214,8 +214,7 @@ function Start-WithChecks {
         Write-Color 'Обход не запущен: сначала остановите другой обход.' Red
         return
     }
-    Start-Bypass | Out-Null
-    Start-TelegramWithBypass
+    if (Start-Bypass) { Start-TelegramWithBypass }
 }
 
 # Telegram вместе с обходом: включён - запускаем tg-ws-proxy; ещё не выбирали, а Telegram Desktop есть - спрашиваем один раз

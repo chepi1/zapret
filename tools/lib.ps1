@@ -1010,6 +1010,7 @@ function New-BypassArgList {
         Add-Section 'game_udp'
     }
 
+    if ($DryRun) { $a.Add('--wf-dup-check=0') }
     return ,($a.ToArray())
 }
 
@@ -1356,10 +1357,10 @@ function Invoke-Native([string]$File, [string]$Arguments, [string]$WorkDir, [int
 }
 
 # Проверка параметров без перехвата трафика (--dry-run)
-# $CmdLine - уже собранная командная строка запуска (Start-Bypass): к ней только добавляется --dry-run,
-# а не собирается заново
+# $CmdLine - уже собранная строка запуска: проверяется тот же фильтр. Только у dry-run отключаем mutex
+# дубликата: winws2 проверяет его до выхода по --dry-run, когда прежний обход ещё должен работать.
 function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [string]$CmdLine) {
-    if ($CmdLine) { $cmd = (ConvertTo-WinArg '--dry-run') + ' ' + $CmdLine }
+    if ($CmdLine) { $cmd = (ConvertTo-WinArg '--dry-run') + ' ' + $CmdLine + ' --wf-dup-check=0' }
     else {
         try { $cmd = Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode -DryRun }
         catch { return New-Object PSObject -Property @{ Ok = $false; Output = $_.Exception.Message } }
