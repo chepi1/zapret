@@ -4,7 +4,7 @@
 
 DPI bypass for **NBA 2K27**, **Discord** and **YouTube** on Windows, for Russian ISPs. Built on bol-van's [zapret2](https://github.com/bol-van/zapret2) (winws2) with all strategies of [Flowseal zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) ported to zapret2. **The interface is in Russian.**
 
-It is not a VPN or a proxy: traffic goes directly from your IP, the bypass only injects a few fake packets at the start of connections, so in-game ping stays the same.
+Traffic goes directly from your IP over your ISP's route. The bypass injects fake packets at the start of connections; game latency still depends on the route, load and Wi-Fi, and the bypass's own effect requires measurement.
 
 ## Why
 
@@ -13,6 +13,7 @@ Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzne
 ## Features
 
 - 34 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites, 5 "white" variants of the soft ALT11 whose fake ClientHello carries the name of a site on ISP whitelists, 2 new STUN-order variants.
+- The22 source profiles are pinned and checked offline. EXP retains documented differences for QUIC ports, unknown voice UDP, an IPSet domain exclusion and the default unknown-TCP fake. The developer importer rejects unsupported changes; see [Russian developer notes](README.md) for details.
 - The fourth white variant now uses 6 fake repeats instead of 8 in the general TCP profile, retaining STUN. Its dedicated game, Discord and YouTube profiles are unchanged.
 - **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm. The primary strategy is compared by the average of the last 3 runs and only changes on a gap of at least 2 points.
 - Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring. Sites that need a non-first strategy are remembered across restarts, and the ring is built by coverage: right after the primary come strategies that open what it cannot.

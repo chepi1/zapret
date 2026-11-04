@@ -3557,7 +3557,12 @@ function Install-ZapretUpdate($Rel) {
     }
     $x = Join-Path $dir 'x'
     New-Item -ItemType Directory $x | Out-Null
-    & (Join-Path $env:SystemRoot 'System32\tar.exe') -x -f $zip -C $x 2>&1 | Out-Null
+    $extract = Invoke-Native (Join-Path $env:SystemRoot 'System32\tar.exe') (ConvertTo-WinCmdLine @('-x','-f',$zip,'-C',$x)) $dir 120
+    if ($extract.TimedOut -or $extract.ExitCode -ne 0) {
+        Write-Color 'Архив не распакован полностью. Обновление отменено до остановки обхода.' Red
+        if ($extract.Output) { Write-Host $extract.Output }
+        return $false
+    }
     $src = Join-Path $x 'zapret'
     $ver = ''
     if (Test-Path (Join-Path $src 'tools\lib.ps1')) { $ver = [regex]::Match([System.IO.File]::ReadAllText((Join-Path $src 'tools\lib.ps1')), "Script:Version\s*=\s*'([^']+)'").Groups[1].Value }

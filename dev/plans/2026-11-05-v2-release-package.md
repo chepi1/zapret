@@ -15,7 +15,7 @@
 - [x] RED: buildtest seeds private files/user-list markers; original builder leaks local files/user markers and accepts missing required input (dist/v2-package-red.log).
 - [x] GREEN:106-file allowlist/four clean templates, .NET ZIP builder, guarded cleanup and atomic publication; buildtest registered and developer documentation updated.
 - [x] Verify buildtest and complete offline suite with settings/migration:52 groups, exit0, dist/v2-package-settings-all.log. Native admin-only Lua/store/timer paths remain explicit skips. Final builder regression log dist/v2-package-digest-final-green.log.
-- [ ] Inspect final local preview archive entries/SHA256 after the following importer/docs phase, then record its identity. Local commit now; no publication.
+- [x] Final local preview: dist/v2-preview-20261105/zapret-v2.0.zip,107 entries, SHA256 fa31e2d2322084f1a8ce0debc0d17a0657f39b6ddad671b75c61db6418b4d3ca. Stable source Version remains1.9; candidate Version2.0/preview labels are applied only on a TEMP build copy. Actual tagv1.9 updater installs it on a TEMP fixture with personal-byte/restart-intent preservation, then installed native CLI/compiler preflight passes (dist/v2-legacy-upgrade.log). No publication or live controls.
 
 Review focus: Windows case-insensitive path collisions; directory reparse points; source/default file disappearance; output locked or replacement failing; cleanup ownership and archive inclusion of tools/filtercheck.cs. Tests must exercise failures without mutating the actual working package.
 

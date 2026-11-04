@@ -1,0 +1,160 @@
+{
+  "repository": "Flowseal/zapret-discord-youtube",
+  "ref": "1.10.4",
+  "profiles": [
+    {
+      "id": "1",
+      "source": "general (ALT).bat",
+      "fixture": "alt1.bat.txt",
+      "git_blob": "5aad9b669414d30ffc8275fb1bd9b58a6483ded0",
+      "sha256": "c06b793015ea041b4e030dca1217548c57fcddaaf883aef8f1de3aa0a642da6e"
+    },
+    {
+      "id": "10",
+      "source": "general (ALT10).bat",
+      "fixture": "alt10.bat.txt",
+      "git_blob": "8c3dad12039b500a8682e184b363211999451215",
+      "sha256": "b76bbfe83248bea834c534423652b47c822411741f9d804e3ee313628aa62dee"
+    },
+    {
+      "id": "11",
+      "source": "general (ALT11).bat",
+      "fixture": "alt11.bat.txt",
+      "git_blob": "505590e1b4a9d50eaba615c88a9f7da7b7486de9",
+      "sha256": "be0c7edb84246cb14a2ecb0d2c9375bdd651abccec4ae529a8eb098da98125f5"
+    },
+    {
+      "id": "12",
+      "source": "general (ALT12).bat",
+      "fixture": "alt12.bat.txt",
+      "git_blob": "c60458d547b480aa2d705d6b879f278dedd6aad7",
+      "sha256": "e9e6b3294f255d32b7763811555a1a57538bb6db11ba21c6ee5785ace2f16e9b"
+    },
+    {
+      "id": "13",
+      "source": "general (ALT13).bat",
+      "fixture": "alt13.bat.txt",
+      "git_blob": "449c8661f953ed1a2d560a7f1e1718fecd5ca135",
+      "sha256": "d3214862eda18923e18204078f5e7484d98e1c93d6b6ff6c95eb483be5975f17"
+    },
+    {
+      "id": "2",
+      "source": "general (ALT2).bat",
+      "fixture": "alt2.bat.txt",
+      "git_blob": "9735cd6d32bfebd0c7117deb8e63d2a49a8bc696",
+      "sha256": "8d1843b688638f927eaff9217723781a8dcc4e2180459e59d06308e2a8052ac1"
+    },
+    {
+      "id": "3",
+      "source": "general (ALT3).bat",
+      "fixture": "alt3.bat.txt",
+      "git_blob": "92ee86210d21b7d0d58868ed3177a37d86bf54f0",
+      "sha256": "05d2f4471572144be8fce8a0053761d52c277f9d71eb09f278cb4eaf9b067773"
+    },
+    {
+      "id": "4",
+      "source": "general (ALT4).bat",
+      "fixture": "alt4.bat.txt",
+      "git_blob": "b479b4590c2722d3ad1d95277b4c13ecd450ec31",
+      "sha256": "6331f8bc161d92f7f4b6bd5508b69a2b6d8a70774d491229598d6377102990c6"
+    },
+    {
+      "id": "5",
+      "source": "general (ALT5).bat",
+      "fixture": "alt5.bat.txt",
+      "git_blob": "ab096d79483892ce736a93d21db9571df2c5f940",
+      "sha256": "44a35092039e28238b2e4aa56f36dbda68001a4ddaaad7ea3bd46ca944169102"
+    },
+    {
+      "id": "6",
+      "source": "general (ALT6).bat",
+      "fixture": "alt6.bat.txt",
+      "git_blob": "bf9d64580b586e64ca81dd3269bff6dfe252145a",
+      "sha256": "cb2323d4d8b112f4ac0ab2dc4260193aceaa25e85820e78357134144c8a17b85"
+    },
+    {
+      "id": "7",
+      "source": "general (ALT7).bat",
+      "fixture": "alt7.bat.txt",
+      "git_blob": "c55fedec0054ce7c40994561e34ebf0b08a9f42d",
+      "sha256": "eba9682040666fea85ae6fad74557c664539f8e5658269bbf76ba337ebb39b66"
+    },
+    {
+      "id": "8",
+      "source": "general (ALT8).bat",
+      "fixture": "alt8.bat.txt",
+      "git_blob": "08273b43815d06a5416efba5006ff0a09de37ad0",
+      "sha256": "0236d5ad5bd07d22f44798dce6a7c0a0ea700857b303bcdaf34861bd64ff0c23"
+    },
+    {
+      "id": "9",
+      "source": "general (ALT9).bat",
+      "fixture": "alt9.bat.txt",
+      "git_blob": "f28fdc2eaa03643668123cf6f8a3ab64e11aed24",
+      "sha256": "55d9e9ad708e18a874166470dd94a1a83621e8cfd4f3fbb1f61d8227d9de4402"
+    },
+    {
+      "id": "41",
+      "source": "general (EXP).bat",
+      "fixture": "alt41.bat.txt",
+      "git_blob": "e9071d9dcf3c5d0d4fcc481797e90681bcd96da5",
+      "sha256": "f799a393c8d781f1856d45b4627bd5a39bde1e56a4753bf99bd2e432fc235da2"
+    },
+    {
+      "id": "46",
+      "source": "general (FAKE TLS AUTO ALT).bat",
+      "fixture": "alt46.bat.txt",
+      "git_blob": "66b8a60bcbdcd4f36a6b29f7a8099478236166b0",
+      "sha256": "3937fdd52eef1a83ad6557a464e59f0c320a9b7c9be0c16bfbe9afa6a35af12b"
+    },
+    {
+      "id": "47",
+      "source": "general (FAKE TLS AUTO ALT2).bat",
+      "fixture": "alt47.bat.txt",
+      "git_blob": "8764c7fe0e7c05d85b4aeb7ccb5310af08230016",
+      "sha256": "5f07c55cc333cbb05233340c2d72462219f7dffe1182926ae809c5e9d8ebdc6e"
+    },
+    {
+      "id": "48",
+      "source": "general (FAKE TLS AUTO ALT3).bat",
+      "fixture": "alt48.bat.txt",
+      "git_blob": "192c87334b28e25059767d58fd7875f18c44da4d",
+      "sha256": "eebb1667126a4448e9bb7e62c7fab133f59a62099fae43160de257fb04e73a8f"
+    },
+    {
+      "id": "45",
+      "source": "general (FAKE TLS AUTO).bat",
+      "fixture": "alt45.bat.txt",
+      "git_blob": "e6825a98a88076fb5eeec10cd413142a6f5f8b1d",
+      "sha256": "bcfdc17e84494169b75ebb906e91465e5d140153d6b924116b2f9fc6740e71a4"
+    },
+    {
+      "id": "43",
+      "source": "general (SIMPLE FAKE ALT).bat",
+      "fixture": "alt43.bat.txt",
+      "git_blob": "54678fb11701cc75349ca0ad7fb29a279423703d",
+      "sha256": "05aba7ec4107fdcbb088e84fca76df094e589172343976b8219e0b055869cd46"
+    },
+    {
+      "id": "44",
+      "source": "general (SIMPLE FAKE ALT2).bat",
+      "fixture": "alt44.bat.txt",
+      "git_blob": "2ac7977538d2d62ae817fd606a2a8a122be9e27c",
+      "sha256": "b7e5949cabc132c32a096f59ac541eadb157d3940b72e53227b357cd82a0b8ea"
+    },
+    {
+      "id": "42",
+      "source": "general (SIMPLE FAKE).bat",
+      "fixture": "alt42.bat.txt",
+      "git_blob": "ebeb065409dcfc5b10c927f230a8582d48ee3957",
+      "sha256": "14248a37dc47ae5a9df7c44fdba22c48e26c53ef69d8a231ee7b50aabd3fc784"
+    },
+    {
+      "id": "40",
+      "source": "general.bat",
+      "fixture": "alt40.bat.txt",
+      "git_blob": "9ad8e359a08d1175e98380e1142ea338f04e153c",
+      "sha256": "22dff943d6ab2493d6463f6e8d9390b8ccbeceb7e5e87742ecc97704bc2bc185"
+    }
+  ]
+}
