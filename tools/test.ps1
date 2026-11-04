@@ -10,7 +10,7 @@
 # -ReportOnly: только отчёт (для проверки провайдера), настройки и круги не меняем.
 # -KeepPrimary: обновить проверенный рейтинг и круги, сохранив выбранную основную (для автонастройки).
 # -Full: все стратегии, иначе быстрый - основные 9 и те, что сейчас в кругах автосмены (Get-TestStrategies).
-param([int]$TimeoutSec = 5, [int]$Parallel = 16, [ValidateRange(1,10)][int]$Rounds = 1, [ValidateRange(-1,2147483647)][int]$Seed = -1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full,
+param([ValidateRange(1,60)][int]$TimeoutSec = 5, [ValidateRange(1,64)][int]$Parallel = 16, [ValidateRange(1,10)][int]$Rounds = 1, [ValidateRange(-1,2147483647)][int]$Seed = -1, [switch]$NoPrompt, [switch]$ReportOnly, [switch]$KeepPrimary, [switch]$Full,
     [string]$CompareA='', [string]$CompareB='', [ValidateRange(4,12)][int]$CompareBlocks=4)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
@@ -146,8 +146,21 @@ function Assert-ProbeDeadline([long]$DeadlineTicks) {
         throw $deadlineError
     }
 }
-function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]$Control, [long]$DeadlineTicks = 0) {
+function Assert-ProbeContext([long]$DeadlineTicks,$RequiredProcess=$null) {
+    Assert-ProbeDeadline $DeadlineTicks
+    if($null -ne $RequiredProcess){
+        $alive=$false
+        try{$alive=-not $RequiredProcess.HasExited}catch{}
+        if(-not $alive){
+            $engineError=New-Object InvalidOperationException('Тестовый движок завершился или недоступен; прерванный прогон не оценивается.')
+            $engineError.Data['Kind']='EngineUnavailable'
+            throw $engineError
+        }
+    }
+}
+function Invoke-CurlBatch($Targets, [string]$PostFile, [ValidateRange(0,64)][int]$Width = 0, [switch]$Control, [long]$DeadlineTicks = 0,$RequiredProcess=$null) {
     if ($Width -le 0) { $Width = $Parallel }
+    if($Width -lt 1 -or $Width -gt 64 -or $TimeoutSec -lt 1 -or $TimeoutSec -gt 60){throw 'Некорректная ширина или тайм-аут запросов.'}
     $curl = Join-Path $env:SystemRoot 'System32\curl.exe'
     if (-not (Test-Path $curl)) { $curl = 'curl.exe' }
     $queue = New-Object System.Collections.Queue
@@ -156,9 +169,9 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
     $results = @()
     try {
     while ($queue.Count -gt 0 -or $running.Count -gt 0) {
-        Assert-ProbeDeadline $DeadlineTicks
+        Assert-ProbeContext $DeadlineTicks $RequiredProcess
         while ($queue.Count -gt 0 -and $running.Count -lt $Width) {
-            Assert-ProbeDeadline $DeadlineTicks
+            Assert-ProbeContext $DeadlineTicks $RequiredProcess
             $t = $queue.Dequeue()
             $a = '-q -s -o NUL --noproxy "*" --ssl-no-revoke --http1.1 --max-time ' + $TimeoutSec + ' --connect-timeout 4' +
                  ' -w "%{http_code} %{size_upload} %{size_download} %{time_connect} %{time_appconnect} %{time_namelookup} %{time_starttransfer} %{time_total}"'
@@ -176,7 +189,7 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
             [void]$running.Add((New-Object PSObject -Property @{ T = $t; P = $p; Out = $p.StandardOutput.ReadToEndAsync(); Started = (Get-Date);StartedTicks=$startedTicks }))
         }
         Start-Sleep -Milliseconds 100
-        Assert-ProbeDeadline $DeadlineTicks
+        Assert-ProbeContext $DeadlineTicks $RequiredProcess
         for ($i = $running.Count - 1; $i -ge 0; $i--) {
             $r = $running[$i]
             if ($r.P.HasExited -or ([Diagnostics.Stopwatch]::GetTimestamp()-$r.StartedTicks)/[double][Diagnostics.Stopwatch]::Frequency -gt ($TimeoutSec + 5)) {
@@ -201,6 +214,35 @@ function Invoke-CurlBatch($Targets, [string]$PostFile, [int]$Width = 0, [switch]
         throw
     } finally {
         foreach ($r in $running) { try { if (-not $r.P.HasExited) { $r.P.Kill() };[void]$r.P.WaitForExit(1000) } finally { $r.P.Dispose() } }
+    }
+}
+
+function Invoke-TestProbeBatch($Targets,[string]$PostFile,[int]$Width,[long]$DeadlineTicks,$RequiredProcess,[string]$JournalFile,[hashtable]$Metadata,[int]$Attempt,[int]$DelayMs=0){
+    $rows=@()
+    try{
+        Assert-ProbeContext $DeadlineTicks $RequiredProcess
+        if($DelayMs -gt 0){
+            $remaining=1000.0*($DeadlineTicks-[Diagnostics.Stopwatch]::GetTimestamp())/[Diagnostics.Stopwatch]::Frequency
+            if($DeadlineTicks -gt 0 -and $remaining -le $DelayMs){
+                $pauseError=New-Object TimeoutException('Недостаточно времени для паузы перед повтором.')
+                $pauseError.Data['Kind']='RunDeadline';throw $pauseError
+            }
+            Start-Sleep -Milliseconds $DelayMs
+            Assert-ProbeContext $DeadlineTicks $RequiredProcess
+        }
+        $rows=@(Invoke-CurlBatch $Targets $PostFile $Width -DeadlineTicks $DeadlineTicks -RequiredProcess $RequiredProcess)
+        Assert-ProbeContext $DeadlineTicks $RequiredProcess
+        Write-ProbeJournal $JournalFile $Metadata $rows $Attempt
+        Assert-ProbeContext $DeadlineTicks $RequiredProcess
+        return $rows
+    }catch{
+        $failure=$_
+        $partial=if($failure.Exception.Data.Contains('Rows')){@($failure.Exception.Data['Rows'])}else{@($rows)}
+        if(@($partial).Count){
+            $aborted=$Metadata.Clone();$aborted.Stage=$Metadata.Stage+'-aborted'
+            try{Write-ProbeJournal $JournalFile $aborted $partial $Attempt}finally{$Metadata.Sequence=$aborted.Sequence}
+        }
+        throw
     }
 }
 
@@ -279,12 +321,22 @@ function Test-FinalCandidateRows($Expected, $Actual) {
     return [pscustomobject]@{ Ok=($required.Count -gt 0 -and $failed.Count -eq 0); Failed=@($failed | Select-Object -Unique) }
 }
 
-function Get-TestInstanceLifetimeMs([int]$TargetCount, [int]$Parallelism, [int]$Timeout) {
-    if ($TargetCount -lt 1 -or $Parallelism -lt 1 -or $Timeout -lt 1) { throw 'Некорректный бюджет тестового запуска.' }
-    # Основные запросы и повторные попытки, запас на подготовку/завершение. Таймер не зависит от родителя.
-    $budget = [math]::Max(120000, (30 + 4 * [math]::Ceiling($TargetCount / [double]$Parallelism) * $Timeout) * 1000)
+function Get-RetryProbePolicy([ValidateRange(1,64)][int]$Parallelism){
+    return [pscustomobject]@{Width=[math]::Min(4,$Parallelism);DelayMs=250}
+}
+function Get-TestInstanceLifetimeMs([int]$TargetCount, [int]$Parallelism, [int]$Timeout,[int]$RetryParallelism=0,[int]$MainBatches=1) {
+    if ($TargetCount -lt 1 -or $Parallelism -lt 1 -or $Parallelism -gt 64 -or $Timeout -lt 1 -or $Timeout -gt 60 -or $MainBatches -lt 1 -or $MainBatches -gt 2) { throw 'Некорректный бюджет тестового запуска.' }
+    $policy=Get-RetryProbePolicy $Parallelism
+    if($RetryParallelism -eq 0){$RetryParallelism=$policy.Width}
+    if($RetryParallelism -lt 1 -or $RetryParallelism -gt 64){throw 'Некорректная ширина повторов.'}
+    # Реальное число волн; A/B дополнительно прогревает весь набор. Native timer не зависит от родителя.
+    $waves=$MainBatches*[math]::Ceiling($TargetCount/[double]$Parallelism)+[math]::Ceiling($TargetCount/[double]$RetryParallelism)
+    $budget = [math]::Max(120000, [math]::Ceiling((30+$waves*($Timeout+1))*1000+$policy.DelayMs))
     if ($budget -gt 1800000) { throw 'Один тестовый этап требует больше 30 минут; уменьшите тайм-аут или число адресов.' }
     return [int]$budget
+}
+function Get-TestProbeDeadline([ValidateRange(6000,1800000)][int]$LifetimeMs){
+    return [Diagnostics.Stopwatch]::GetTimestamp()+[long]([Diagnostics.Stopwatch]::Frequency*($LifetimeMs-5000)/1000.0)
 }
 
 function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final, [ValidateRange(1000,1800000)][int]$LifetimeMs = 120000) {
@@ -417,7 +469,7 @@ function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFi
     $fixed=$Settings.Clone();$fixed.auto='no'
     $measureResources=$Plan.Protocol -eq 'finalists-v2'
     $width=[math]::Min(4,$Parallel)
-    $lifetime=Get-TestInstanceLifetimeMs @($Targets).Count $width $TimeoutSec
+    $lifetime=Get-TestInstanceLifetimeMs @($Targets).Count $width $TimeoutSec $width 2
     $clock=[Diagnostics.Stopwatch]::StartNew()
     $deadlineTicks=[Diagnostics.Stopwatch]::GetTimestamp()+[long]([Diagnostics.Stopwatch]::Frequency*1800.0)
     $base=Join-Path $Script:Runtime ('comparison-'+$Plan.RunId)
@@ -564,7 +616,7 @@ try {
     $resultContext = Get-TestResultContext $settings $networkBefore
     Set-RingNetworkContext $networkBefore
     $settingsKey = @($settings.Keys | Sort-Object | ForEach-Object { $_+'='+[string]$settings[$_] }) -join '|'
-    $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; Rounds=$Rounds; Settings=$settingsKey; Network=$networkBefore.Key }
+    $scoreParameters = @{ TimeoutSec=$TimeoutSec; Parallel=$Parallel; RetryWidth=(Get-RetryProbePolicy $Parallel).Width;RetryDelayMs=(Get-RetryProbePolicy $Parallel).DelayMs;Rounds=$Rounds; Settings=$settingsKey; Network=$networkBefore.Key }
     $scoreInputs = Get-ScoreInputsHash $targets $scoreParameters
     $scoreContext = Get-ScoreContext $info $targets $scoreParameters
     $scoreFingerprints = @{}
@@ -610,6 +662,8 @@ try {
             Write-Color ('[{0,2}/{1}] {2}' -f $i, $runs.Count, $(if ($run.Id -eq '0') { 'без обхода (как режет провайдер)' } else { $run.Name })) Cyan
             Write-Host -NoNewline ('        проверяю {0} адресов...' -f $(if ($run.Id -ne '0') { $targets.Count - $ipSkip.Count } else { $targets.Count }))
             $p = $null
+            $probeDeadlineTicks=Get-TestProbeDeadline $testLifetimeMs
+            $retryPolicy=Get-RetryProbePolicy $Parallel
             if ($run.Id -ne '0') {
                 $p = Start-TestInstance $settings $run.Id -LifetimeMs $testLifetimeMs
                 if (-not $p) { Write-Color ' winws2 не запустился' Red; continue }
@@ -618,19 +672,18 @@ try {
             # заблокированные по IP (найдены в прогоне без обхода) стратегиям не открыть - их не ждём до тайм-аута
             # в каждом прогоне, а сразу записываем им тот же провал, что без обхода: баллы от этого не меняются
             $runTargets = if ($run.Id -ne '0' -and $ipSkip.Count) { @($targets | Where-Object { -not $ipSkip.ContainsKey($_.Group + '|' + $_.Name) }) } else { $targets }
-            $res = @(Invoke-CurlBatch $runTargets $postFile)
-            Write-ProbeJournal $journalFile $metadata $res 1
-            # вторая попытка той же стратегией, пока winws2 ещё работает; почти все повторы помещаются в одну волну.
+            $res = @(Invoke-TestProbeBatch $runTargets $postFile $Parallel $probeDeadlineTicks $p $journalFile $metadata 1)
+            # Повтор той же стратегией с меньшей нагрузкой; первая попытка остаётся в journal до merge.
             # Безнадёжные (не открылись ни разу за $HopelessRuns стратегий подряд) второй раз не проверяем
             $hopeless = @{}
             foreach ($k in @($failRuns.Keys)) { if ($failRuns[$k] -ge $HopelessRuns -and -not $everOk.ContainsKey($k)) { $hopeless[$k] = $true } }
             $again = @(Get-RetryTargets $runTargets $res $(if ($run.Id -ne '0') { $cleanBase }) $hopeless)
             if ($again.Count) {
                 Write-Host -NoNewline (' повтор {0}...' -f $again.Count)
-                $retried=@(Invoke-CurlBatch $again $postFile ($Parallel * 2))
-                Write-ProbeJournal $journalFile $metadata $retried 2
+                $retried=@(Invoke-TestProbeBatch $again $postFile $retryPolicy.Width $probeDeadlineTicks $p $journalFile $metadata 2 $retryPolicy.DelayMs)
                 $res = @(Merge-Retry $res $retried)
             }
+            Assert-ProbeContext $probeDeadlineTicks $p
             if ($run.Id -ne '0') {
                 foreach ($r in $res) {
                     $k = Get-RowKey $r
@@ -843,11 +896,11 @@ try {
             Assert-BypassControlAllowed
             if (-not $table.ContainsKey($candidate.alt)) { throw 'Рабочая стратегия не была измерена в этом прогоне.' }
             Write-Color 'Проверяю итоговую комбинацию с рабочими списками, IPSet и автосменой...' Cyan
+            $probeDeadlineTicks=Get-TestProbeDeadline $testLifetimeMs
+            $metadata.Stage='final';$metadata.Round=0;$metadata.StrategyId=$candidate.alt;$metadata.StrategyHash=$scoreFingerprints[$candidate.alt]
             $p = Start-TestInstance $candidate $candidate.alt -Final -LifetimeMs $testLifetimeMs
             if (-not $p) { throw 'Итоговая конфигурация не запустилась; прежние настройки сохраняются.' }
-            $finalRows = @(Invoke-CurlBatch $targets $postFile)
-            $metadata.Stage='final';$metadata.Round=0;$metadata.StrategyId=$candidate.alt;$metadata.StrategyHash=$scoreFingerprints[$candidate.alt]
-            Write-ProbeJournal $journalFile $metadata $finalRows 1
+            $finalRows = @(Invoke-TestProbeBatch $targets $postFile $Parallel $probeDeadlineTicks $p $journalFile $metadata 1)
             $expected = @($table[$candidate.alt]) + @($table['0'] | Where-Object { $_.Group -eq 'Clean' })
             $check = Test-FinalCandidateRows $expected $finalRows
             if ($p.HasExited) { throw 'Процесс завершился во время итоговой проверки.' }

@@ -6,6 +6,7 @@ $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools/t
 foreach($f in $ast.FindAll({$args[0] -is [Management.Automation.Language.FunctionDefinitionAst]},$false)){ . ([scriptblock]::Create($f.Extent.Text)) }
 if(-not (Get-Command Test-FinalCandidateRows -ErrorAction SilentlyContinue)){ throw 'Final candidate verification missing' }
 $fails=0
+$Parallel=16;$TimeoutSec=5
 function Check($Name,$Ok){if($Ok){Write-Host ('ok '+$Name)}else{$script:fails++;Write-Host ('FAIL '+$Name)}}
 function Row($Group,$Name,$State,$Ms=100){[pscustomobject]@{Group=$Group;Name=$Name;State=$State;TlsMs=$Ms}}
 $before=@((Row YouTube video OK),(Row Clean normal OK))
