@@ -119,7 +119,17 @@ function Get-Settings {
 
 function Save-Settings([hashtable]$Settings) {
     $lines = @($Settings.Keys | Sort-Object | ForEach-Object { '{0}={1}' -f $_, $Settings[$_] })
-    Write-TextNoBom (Join-Path $Script:Runtime 'settings.ini') (($lines -join "`r`n") + "`r`n")
+    $target=Join-Path $Script:Runtime 'settings.ini'
+    $temporary=$target+'.'+[guid]::NewGuid().ToString('N')+'.tmp';$owned=$false
+    try{
+        $stream=[IO.File]::Open($temporary,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$owned=$true}finally{$stream.Dispose()}
+        Write-TextNoBom $temporary (($lines -join "`r`n") + "`r`n")
+        $stream=[IO.File]::Open($temporary,[IO.FileMode]::Open,[IO.FileAccess]::Write,[IO.FileShare]::None)
+        try{$stream.Flush($true)}finally{$stream.Dispose()}
+        if([IO.File]::Exists($target)){[IO.File]::Replace($temporary,$target,[NullString]::Value)}else{[IO.File]::Move($temporary,$target)}
+        $owned=$false
+    }finally{if($owned -and [IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
 
 # '1024-65535' или '1024-2000,3000' и т.п.

@@ -1,0 +1,10 @@
+# Ваши домены, которые обход трогать не должен, по одному в строке.
+domain.example.abc
+# Valve: Dota 2 (сайт, статистика Dota Plus), CDN Steam, загрузки, серверы Steam. Они не заблокированы,
+# а фейки и разрезка ломают TLS к их серверам Akamai (рукопожатие 1,1 с вместо 0,1 с или обрыв).
+# steampowered.com, steamcommunity.com, steamusercontent.com Flowseal уже исключает в list-exclude.txt.
+dota2.com
+steamstatic.com
+steamcontent.com
+steamserver.net
+valvesoftware.com
