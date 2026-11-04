@@ -9,7 +9,7 @@ function Get-NetworkObservation {
     try {
         $profiles=@(Get-NetConnectionProfile -ErrorAction Stop)
         if(-not $profiles.Count){throw 'No network profile'}
-        $parts=@('network-v3',('machine='+[bool]$Machine))
+        $parts=@('network-v4',('machine='+[bool]$Machine))
         $parts+=@($profiles | ForEach-Object {
             $id=if($_.PSObject.Properties.Name -contains 'InstanceID'){[string]$_.InstanceID}else{''}
             'profile|'+$_.InterfaceIndex+'|'+$_.Name+'|'+$id
@@ -20,7 +20,12 @@ function Get-NetworkObservation {
             $prefix=$_.DestinationPrefix
             $hostAddress=($prefix -split '/')[0]
             $prefix -notmatch '^(127\.|169\.254\.|224\.|255\.|fe[89ab]|ff|::1/)' -and -not($prefix -match '/(32|128)$' -and $assigned -contains $hostAddress)
-        } | ForEach-Object { 'route|'+$_.InterfaceIndex+'|'+$_.DestinationPrefix+'|'+$_.NextHop+'|'+$_.RouteMetric } | Sort-Object)
+        } | ForEach-Object {
+            # Get-NetRoute возвращает обе метрики; смена приоритета интерфейса меняет путь и без новых маршрутов.
+            [uint32]$routeIfMetric=0
+            if(-not [uint32]::TryParse([string]$_.InterfaceMetric,[Globalization.NumberStyles]::None,[Globalization.CultureInfo]::InvariantCulture,[ref]$routeIfMetric)){throw 'Unknown route interface metric'}
+            'route|'+$_.InterfaceIndex+'|'+$_.DestinationPrefix+'|'+$_.NextHop+'|'+$_.RouteMetric+'|'+$routeIfMetric.ToString([Globalization.CultureInfo]::InvariantCulture)
+        } | Sort-Object)
         $parts+=@(Get-DnsClientServerAddress -ErrorAction Stop | Where-Object { @($_.ServerAddresses).Count -gt 0 } | ForEach-Object { 'dns|'+$_.InterfaceIndex+'|'+$_.AddressFamily+'|'+(@($_.ServerAddresses) -join ',') } | Sort-Object)
         if(-not $Machine){
             $proxy=Get-WindowsProxySettings
