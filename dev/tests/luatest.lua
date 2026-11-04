@@ -39,7 +39,7 @@ local function packet(track, o)
 	track.pos.direct.pcounter = track.pos.direct.pcounter+1
 	return {
 		func="circular", func_n=1, func_instance="circular_1", outgoing=true, track=track, l7payload="tls_client_hello",
-		arg={ fails="3", time="60", nld="2", key=o.key or "t", state=o.state or "ring-test.txt", success_detector="ring_success", failure_detector="ring_failure" },
+		arg={ fails="3", time="60", nld="2", key=o.key or "t", state=o.state or "ring-test.txt", hostcache=o.hostcache, success_detector="ring_success", failure_detector="ring_failure" },
 		dis={ tcp={ th_flags=o.flags or TH_ACK, th_ack=(SERVER_SEQ0+1+(o.got or 0))%4294967296, th_seq=1001, options={} }, payload=string.rep("x",len) },
 		target={ ip=pton(o.ip or "1.2.3.4") }, plan=plan(3),
 	}
@@ -279,6 +279,22 @@ local hb = hello_packet({ host="mail.ru", dir="out", payload="tls_client_hello" 
 hb.reasm_data = "not a client hello"; hb.dis.payload = hb.reasm_data
 check("no host in the data: nothing is sent", hostfakesplit_alt(nil, hb)==nil and #sent==0)
 rawsend_payload_segmented = real_send
+
+-- Настоящий circular продолжает выбранную стратегию после очистки индекса.
+do
+	local opts = {key="cache_fixture",state="ring-cache-test.txt",hostcache="bounded"}
+	local tr = new_track("pinned.example")
+	local first = packet(tr, opts)
+	local old = automate_host_record(first)
+	old.nstrategy = 3
+	ran = {};circular(nil, first)
+	check("bounded circular dispatches the chosen strategy", ran[1]==3)
+	for i=1,4096 do automate_host_record(packet(new_track("cache-"..i..".example"),opts)) end
+	check("bounded circular evicts idle index state", old.ring_cache_evicted and not hrec_of("cache_fixture","pinned.example"))
+	check("active circular keeps its strategy after eviction", send(tr,opts)==3)
+	check("new circular connection starts from current host state", send(new_track("pinned.example"),opts)==1)
+	check("old circular cannot overwrite replacement state", send(tr,opts)==3 and hrec_of("cache_fixture","pinned.example").nstrategy==1)
+end
 
 print(fails>0 and (fails.." FAILED") or "all ok")
 io.stdout:flush()

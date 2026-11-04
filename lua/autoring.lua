@@ -260,6 +260,7 @@ end
 local function ring_skip(desync, crec)
 	if crec.nocheck then return true end
 	local w = ring_conn(desync, crec)
+	if w.hrec and w.hrec.ring_cache_evicted then crec.nocheck=true;return true end
 	local link_revision, paused=ring_link_context(desync)
 	if w.link_revision==nil then w.link_revision=link_revision;w.link_tainted=paused end
 	if paused or w.link_tainted or w.link_revision~=link_revision then crec.nocheck=true;return true end

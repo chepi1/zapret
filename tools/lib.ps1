@@ -845,6 +845,7 @@ function New-BypassArgList {
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-lib.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-antidpi.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/zapret-auto.lua'))
+    $a.Add('--lua-init=@' + (Get-PkgPath 'lua/host-cache.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/fooling.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/ring-store.lua'))
     $a.Add('--lua-init=@' + (Get-PkgPath 'lua/autoring.lua'))
@@ -930,7 +931,7 @@ function New-BypassArgList {
             # и с обычными детекторами: сервер матча не должен застрять на стратегии, случайно выбранной раньше
             $memoryName=if($Family){$Name+'_'+$Family}else{$Name}
             $stateArg = if ($Learn -and $Script:RingPersistAllowed) { ':context=network-context.txt:state=' + (Get-RingStateName $memoryName $ring) } else { '' }
-            $memArgs = if ($Learn) { ':key=' + $memoryName + $stateArg + ':link_guard=link-guard.txt:success_detector=ring_success:failure_detector=ring_failure' } else { '' }
+            $memArgs = if ($Learn) { ':key=' + $memoryName + $stateArg + ':hostcache=bounded:link_guard=link-guard.txt:success_detector=ring_success:failure_detector=ring_failure' } else { '' }
             $a.Add('--lua-desync=circular:fails=3:time=60:nld=2' + $CircularArgs + $memArgs)
             $a.Add('--in-range=x')
             $n = 0

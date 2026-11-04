@@ -14,6 +14,8 @@
 
 `lua\autoring.lua` написан для этой сборки по идеям [Zapret GUI](https://github.com/zapret-discordyoutube/zapretgui) © censorliber: память автосмены по сайту и подсети, быстрая смена непроверенной стратегии. Лицензия MIT — [LICENSE-zapretgui.txt](LICENSE-zapretgui.txt).
 
+`lua\host-cache.lua` добавляет ограниченный индекс поверх `automate_host_record` из zapret2 (© bol-van, MIT): правила выбора ключа и аварийное создание записи повторяют upstream; после сбоя последующие запросы вызывают неизменённую штатную функцию. MIT — [LICENSE-zapret2.txt](LICENSE-zapret2.txt).
+
 `hostfakesplit_alt` в `lua\fooling.lua` — это `hostfakesplit` из zapret2 (© bol-van, MIT) с порядком частей `altorder=1` из zapret1; так же поступили [z2k](https://github.com/necronicle/z2k) © necronicle (MIT) и [zapret2-next](https://github.com/Dunterbabochka/zapret2-next) © Dunterbabochka (MIT). Из z2k взяты идеи для `lua\autoring.lua` (два повтора для непроверенной стратегии, неудача при закрытии TLS-соединения без ответа) и стратегия 72. Проверка `dev\tests\lintstrat.ps1` написана по идее [zapret-gui](https://github.com/avatarDD/zapret-gui) © avatarDD (MIT). Код этих проектов не копировался.
 
 `tools\tgbridge.cs` — мост Telegram: перенос на C# основной логики [tg-ws-proxy](https://github.com/Flowseal/tg-ws-proxy) © Flowseal (обфускация MTProto, WebSocket к веб-версии Telegram, пул соединений). MIT — [LICENSE-tg-ws-proxy.txt](LICENSE-tg-ws-proxy.txt).
