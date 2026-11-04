@@ -2727,15 +2727,15 @@ function Test-HostsPins([int]$TimeoutSec = 6, $Pending = $null) {
     return $rows
 }
 
-# ---------- пинг до игровых серверов ----------
-# Серверы матчей отвечают только игре, поэтому пинг - временем TCP-подключения к адресу в том же дата-центре
-# (по минимуму из нескольких попыток: это и есть сетевая задержка без очередей). Все цели параллельно.
+# ---------- TCP-подключение к справочным сервисам ----------
+# Публичные API и сайты не являются текущим сервером матча. Минимум нескольких подключений
+# показывает лучший результат этих TCP-проб, включая работу локального ПК. Все цели параллельно.
 $Script:GamePingTargets = [ordered]@{
-    'NBA 2K27: серверы матча (Amazon, Франкфурт)'  = 'ec2.eu-central-1.amazonaws.com'
-    'NBA 2K27: запись матча (Amazon, Вирджиния)'  = 'api.quago.io'
-    'NBA 2K27: вход и сервисы 2K (Cloudflare)'     = 'api.epicgames.dev'
-    'Amazon, Стокгольм'                             = 'ec2.eu-north-1.amazonaws.com'
-    'Amazon, Лондон'                                = 'ec2.eu-west-2.amazonaws.com'
+    'Amazon API: eu-central-1'                    = 'ec2.eu-central-1.amazonaws.com'
+    'Quago: сервис api.quago.io'                  = 'api.quago.io'
+    'Epic: вход и сервисы'                       = 'api.epicgames.dev'
+    'Amazon API: eu-north-1'                      = 'ec2.eu-north-1.amazonaws.com'
+    'Amazon API: eu-west-2'                       = 'ec2.eu-west-2.amazonaws.com'
     'Steam (магазин и загрузки)'                    = 'store.steampowered.com'
     'Discord'                                       = 'discord.com'
 }

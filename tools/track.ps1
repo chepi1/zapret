@@ -4,9 +4,11 @@
 # Источник - журнал сети Windows (ETW Kernel-Network), который пишется кусками по $Interval секунд.
 # Совместимо с Windows PowerShell 5.1.
 # -Replay <файл.etl> -ReplayPid <PID>: один проход по уже записанному журналу (например, runtime\scan.etl) без игры и logman.
-param([int]$Interval = 5, [string]$ProcessName = 'NBA2K*', [string]$Replay, [int]$ReplayPid = 0)
+param([ValidateRange(1,60)][int]$Interval = 5, [string]$ProcessName = 'NBA2K*', [string]$Replay, [int]$ReplayPid = 0)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
+. (Join-Path $PSScriptRoot 'latency.ps1')
+. (Join-Path $PSScriptRoot 'latencyprobe.ps1')
 
 if (-not $Replay -and -not (Test-Admin)) { Write-Color 'Нужны права администратора. Запускайте через zapret.bat.' Red; exit 1 }
 
@@ -64,6 +66,7 @@ $self = $null
 
 # где сервер - по HTTPS (Get-IpInfo), не больше 16 новых адресов за круг: остальные узнаются в следующих
 function Update-Geo([string[]]$Ips) {
+    if($Replay){return}
     $need = @($Ips | Where-Object { -not $geo.ContainsKey($_) } | Select-Object -Unique -First 16)
     if ($need.Count -eq 0) { return }
     $info = Get-IpInfo $need 6
@@ -95,55 +98,86 @@ function Get-GeoText([string]$Ip, [int]$Width) {
 # ---------- пинг ----------
 # ICMP ко всем активным адресам (асинхронно), а к TCP-серверам, которые не отвечают на ICMP, - время TCP-подключения.
 
-$pingTask = @{}    # ip -> Task<PingReply>
-$ping = @{}        # ip -> @{ Min; Last; Ok; Fail; Kind }
-$tcpProbeAt = @{}  # "ip|port" -> время последней пробы
+$latencyStore=New-LatencyStore
+$probePending=@{}  # protocol/address/port -> owned async operation
 
-function Add-PingSample([string]$Ip, [double]$Ms, [string]$Kind) {
-    if (-not $ping.ContainsKey($Ip)) { $ping[$Ip] = @{ Min = $null; Last = $null; Ok = 0; Fail = 0; Kind = $Kind } }
-    $p = $ping[$Ip]
-    $p.Last = $Ms; $p.Ok++; $p.Kind = $Kind
-    if ($null -eq $p.Min -or $Ms -lt $p.Min) { $p.Min = $Ms }
+function Close-TrackProbe($Item){
+    if($Item.Kind -eq 'icmp'){
+        if(-not $Item.Task.IsCompleted){try{$Item.Owner.SendAsyncCancel()}catch{}}
+        if($Item.Task.IsFaulted){$observed=$Item.Task.Exception}
+        try{$Item.Owner.Dispose()}catch{}
+    }else{try{$Item.Operation.Dispose()}catch{}}
+}
+function Close-TrackProbes {
+    foreach($item in @($probePending.Values)){Close-TrackProbe $item}
+    $probePending.Clear()
+}
+function Update-LatencyTasks {
+    $now=Get-LatencyTime
+    foreach($key in @($probePending.Keys)){
+        $item=$probePending[$key];$outcome=$null;$ms=$null;$at=$null
+        if($item.Kind -eq 'tcp'){
+            if(-not $item.Operation.IsCompleted){continue}
+            $outcome=$item.Operation.Outcome;$ms=$item.Operation.Milliseconds;$at=$item.Operation.CompletedSeconds
+        }else{
+            if(-not $item.Task.IsCompleted -or -not $item.Completion.IsCompleted){if($now-$item.Started -lt 1){continue};$outcome='Timeout';$at=$item.Started+1}
+            else{
+                $at=$item.Completion.CompletedSeconds
+                try{
+                    if($item.Task.IsCanceled){$outcome='Cancelled'}
+                    elseif($item.Task.IsFaulted){$observed=$item.Task.Exception;$outcome='Error'}
+                    elseif($item.Task.Result.Status -eq 'Success'){$outcome='Success';$ms=[double]$item.Task.Result.RoundtripTime}
+                    elseif($item.Task.Result.Status -eq 'TimedOut'){$outcome='Timeout'}
+                    else{$outcome='Error'}
+                }catch{$outcome='Error'}
+            }
+        }
+        try{if($outcome -ne 'Cancelled'){Add-LatencyResult $latencyStore $item.Ip $item.Kind $item.Port $outcome $ms (Get-LatencyTime) $at | Out-Null}}
+        finally{Close-TrackProbe $item;$probePending.Remove($key)}
+    }
 }
 
 function Update-Ping([string[]]$Ips) {
-    foreach ($ip in @($pingTask.Keys)) {
-        $t = $pingTask[$ip]
-        if (-not $t.IsCompleted) { continue }
-        $pingTask.Remove($ip)
-        $ok = $false
-        try { if ($t.Result.Status -eq 'Success') { Add-PingSample $ip ([double]$t.Result.RoundtripTime) 'icmp'; $ok = $true } } catch { }
-        if (-not $ok) {
-            if (-not $ping.ContainsKey($ip)) { $ping[$ip] = @{ Min = $null; Last = $null; Ok = 0; Fail = 0; Kind = 'icmp' } }
-            $ping[$ip].Fail++
-        }
-    }
-    foreach ($ip in ($Ips | Select-Object -First 12)) {
-        if ($pingTask.ContainsKey($ip)) { continue }
-        # кто трижды не ответил на ICMP и ни разу не ответил - больше не мучаем
-        if ($ping.ContainsKey($ip) -and $ping[$ip].Kind -eq 'icmp' -and $ping[$ip].Ok -eq 0 -and $ping[$ip].Fail -ge 3) { continue }
-        try { $pingTask[$ip] = (New-Object System.Net.NetworkInformation.Ping).SendPingAsync($ip, 1000) } catch { }
+    if($Replay){return}
+    Update-LatencyTasks
+    $now=Get-LatencyTime
+    $candidates=@(foreach($ip in ($Ips | Select-Object -Unique)){
+        $key=Get-LatencyKey $ip icmp 0
+        if(-not $key -or $probePending.ContainsKey($key)){continue}
+        $schedule=Get-LatencyProbeSchedule $latencyStore $ip icmp 0 $now
+        if($schedule.Due){[pscustomobject]@{Ip=$ip;Key=$key;Priority=$(if($null -eq $schedule.LastScheduled){-1}else{$schedule.LastScheduled})}}
+    })
+    $starts=0
+    foreach($candidate in ($candidates | Sort-Object Priority)){
+        if($starts -ge 12 -or @($probePending.Values|Where-Object{$_.Kind -eq 'icmp'}).Count -ge 12){break}
+        $ip=$candidate.Ip;$key=$candidate.Key;$now=Get-LatencyTime;$starts++
+        Set-LatencyProbeScheduled $latencyStore $ip icmp 0 $now | Out-Null
+        try{
+            $probePending[$key]=Start-LatencyIcmpOperation $ip 1000
+        }catch{Add-LatencyResult $latencyStore $ip icmp 0 Error $null (Get-LatencyTime) | Out-Null}
     }
 }
 
 function Invoke-TcpProbe([string]$Ip, [int]$Port) {
-    $key = "$Ip|$Port"
-    if ($tcpProbeAt.ContainsKey($key) -and ((Get-Date) - $tcpProbeAt[$key]).TotalSeconds -lt 20) { return }
-    $tcpProbeAt[$key] = Get-Date
-    $c = New-Object System.Net.Sockets.TcpClient
-    try {
-        $sw = [System.Diagnostics.Stopwatch]::StartNew()
-        $t = $c.ConnectAsync($Ip, $Port)
-        if ($t.Wait(1000) -and $c.Connected) { $sw.Stop(); Add-PingSample $Ip $sw.Elapsed.TotalMilliseconds 'tcp' }
-    } catch { } finally { $c.Close() }
+    if($Replay -or @($probePending.Values|Where-Object{$_.Kind -eq 'tcp'}).Count -ge 3){return $false}
+    $key=Get-LatencyKey $Ip tcp $Port;$now=Get-LatencyTime
+    if(-not $key -or $probePending.ContainsKey($key) -or -not(Test-LatencyProbeDue $latencyStore $Ip tcp $Port $now)){return $false}
+    try{
+        $operation=Start-LatencyTcpOperation $Ip $Port 1000
+        $probePending[$key]=[pscustomobject]@{Kind='tcp';Ip=$Ip;Port=$Port;Operation=$operation}
+        Set-LatencyProbeScheduled $latencyStore $Ip tcp $Port (Get-LatencyTime) | Out-Null
+    }catch{
+        $now=Get-LatencyTime
+        Set-LatencyProbeScheduled $latencyStore $Ip tcp $Port $now | Out-Null
+        Add-LatencyResult $latencyStore $Ip tcp $Port Error $null $now | Out-Null
+    }
+    return $true
 }
 
-function Get-PingText([string]$Ip) {
-    if (-not $ping.ContainsKey($Ip)) { return '...' }
-    $p = $ping[$Ip]
-    if ($p.Ok -eq 0) { return $(if ($p.Fail -ge 3) { 'молчит' } else { '...' }) }
-    $suffix = if ($p.Kind -eq 'tcp') { 't' } else { '' }
-    return ('{0:N0}{1}' -f $p.Min, $suffix)
+function Get-PingText([string]$Ip,[string]$Proto='udp',[int]$Port=0,[switch]$Details) {
+    $display=Get-LatencyDisplay $latencyStore $Ip $Proto $Port
+    if($Details){return $display.Detail}
+    return $display.Text
 }
 
 # ---------- кто обрабатывается обходом ----------
@@ -177,7 +211,7 @@ try { $Host.UI.RawUI.WindowTitle = $AppName + ' - трекер подключе�
 Write-Color ('Трекер подключений: ' + $AppName) Cyan
 Write-Color 'Готовлю списки и определяю ваше местоположение...' Gray
 $sets = Get-OwnerSets
-$self = Get-DirectConnectionInfo
+$self = if(-not $Replay){Get-DirectConnectionInfo}else{$null}
 $warn = @(Get-ProxyWarnings)
 $tun = @(Get-TunAdapters)
 # ExitLag и т.п.: перехватывают трафик игры и Discord вместе с обходом (с ExitLag голос Discord уходит без ответа)
@@ -215,7 +249,8 @@ foreach ($w in $warn) { Write-Log ('Прокси/VPN: ' + $w) }
 foreach ($a in $tun) { Write-Log ('VPN/TUN-адаптер: ' + $a.Name) }
 foreach ($b in $boosters) { Write-Log ('Игровой ускоритель: ' + $b + ' - ' + $Script:BoosterHint) }
 Write-Log ('Процессы: ' + (($procName.Keys | ForEach-Object { $procName[$_] + ' (PID ' + $_ + ')' }) -join ', '))
-Write-Log 'Пинг: мс по ICMP; "t" - время TCP-подключения (сервер не отвечает на ICMP); "молчит" - не отвечает совсем.'
+Write-Log 'Пробы задержки: медиана/P95 в мс, i=ICMP, t=TCP к указанному порту. Это диагностические пробы, не пинг игры. Ответы/попытки — не процент потерь UDP.'
+Write-Log 'Окно до10мин/120 завершённых попыток; P95 после20 ответов, скачок >= медиана+50мс. Значение без ответа последние60с считается устаревшим. Неответ ICMP не доказывает недоступность сервера.'
 Write-Log ''
 
 # Ходит ли программа через локальный прокси (Happ, v2rayN и т.п. в режиме системного прокси).
@@ -351,7 +386,7 @@ function Get-SummaryLines([bool]$Final) {
             $s.Add(('  {0} | {1} | {2:HH:mm:ss}-{3:HH:mm:ss} ({4:hh\:mm\:ss}) | вых/вх в среднем {5:N1}/{6:N1}, вх: мин {7:N1} медиана {8:N1} макс {9:N1}, провалов ниже половины медианы: {10} | пинг {11}' -f
                 (Format-Endpoint $ms.Ip $ms.Port 46), (Get-GeoText $ms.Ip 50), $ms.First, $ms.Last, ($ms.Last - $ms.First),
                 ($ms.Out / [math]::Max($ms.Sec, 1)), ($ms.InTotal / [math]::Max($ms.Sec, 1)),
-                $(if ($sorted.Count) { $sorted[0] } else { 0 }), $med, $(if ($sorted.Count) { $sorted[-1] } else { 0 }), $dips, (Get-PingText $ms.Ip)))
+                $(if ($sorted.Count) { $sorted[0] } else { 0 }), $med, $(if ($sorted.Count) { $sorted[-1] } else { 0 }), $dips, (Get-PingText $ms.Ip udp ([int]$ms.Port) -Details)))
             $why = if ($ms.InGaps -gt 2 * [math]::Max($ms.OutGaps, 1)) { 'рывки только в приходящих: пакеты матча теряет или придерживает сеть' }
                 elseif ($ms.OutGaps -gt 0) { 'паузы и в исходящих: подвисает сама игра' } else { 'рывков нет' }
             $s.Add(('  паузы между пакетами (больше 100 мс) вых/вх: {0}/{1}, самая длинная вых/вх: {2}/{3} мс - {4}' -f $ms.OutGaps, $ms.InGaps, $ms.OutGapMax, $ms.InGapMax, $why))
@@ -377,11 +412,11 @@ function Get-SummaryLines([bool]$Final) {
                 (Get-GeoText $x.Ip 50), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))))
         }
     }
-    $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, мин. пинг, где, обход, имя):')
+    $s.Add('Все адреса (пакетов всего вых/вх, повторных отправок TCP, диагностические пробы задержки, где, обход, имя):')
     foreach ($x in ($ep.Values | Sort-Object @{ Expression = { $_.Out + $_.In }; Descending = $true })) {
         $dist = Get-DistanceKm $geo[$x.Ip]
         $s.Add(('  {0} {1,-46} {2,-10} {3,6}/{4,-6} retx {5,-3} пинг {6,-7} {7}{8} | обход: {9}{10}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 46), $x.Proc,
-            $x.Out, $x.In, $x.Retx, (Get-PingText $x.Ip), (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port)),
+            $x.Out, $x.In, $x.Retx, (Get-PingText $x.Ip $x.Proto ([int]$x.Port) -Details), (Get-GeoText $x.Ip 60), $(if ($dist) { " | ~$dist км" } else { '' }), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port)),
             $(if ($hostOf.ContainsKey($x.Ip)) { ' | ' + $hostOf[$x.Ip] } else { '' })))
     }
     $touched = @($ep.Values | Where-Object { (Get-BypassText $_.Owner $_.Proto ([int]$_.Port)) -match '^да($| \((any|user)\))' })
@@ -431,6 +466,7 @@ try {
             # ждём интервал, слушая клавиши
             $until = (Get-Date).AddSeconds($Interval)
             while ((Get-Date) -lt $until) {
+                Update-LatencyTasks
                 if ([Console]::KeyAvailable) {
                     $k = [Console]::ReadKey($true)
                     if (@('Q', 'Enter', 'Escape') -contains [string]$k.Key -or $k.KeyChar -eq 'й' -or $k.KeyChar -eq 'Й') { $quit = $true; break }
@@ -479,12 +515,12 @@ try {
             Sort-Object @{ Expression = { $_.IOut + $_.IIn }; Descending = $true }, @{ Expression = { $_.Out + $_.In }; Descending = $true })
         Update-Geo @($active | ForEach-Object { $_.Ip })
         Update-Ping @($active | ForEach-Object { $_.Ip } | Select-Object -Unique)
-        # TCP-серверы, молчащие на ICMP: пробуем подключением (не больше трёх за круг)
+        # TCP fallback только для TCP endpoint без свежего ICMP, не больше трёх стартов/одновременных операций.
         $probes = 0
         foreach ($x in ($active | Where-Object { $_.Proto -eq 'tcp' })) {
             if ($probes -ge 3) { break }
-            $p = $ping[$x.Ip]
-            if ($p -and $p.Kind -eq 'icmp' -and $p.Ok -eq 0 -and $p.Fail -ge 1) { Invoke-TcpProbe $x.Ip ([int]$x.Port); $probes++ }
+            $icmp=Get-LatencySummary $latencyStore $x.Ip icmp 0
+            if($icmp.Count -gt 0 -and -not $icmp.Fresh){if(Invoke-TcpProbe $x.Ip ([int]$x.Port)){$probes++}}
         }
 
         # новые адреса - в лог
@@ -531,7 +567,7 @@ try {
             if ($gOut.Max -gt $ms.OutGapMax) { $ms.OutGapMax = $gOut.Max }
             $ms.InGaps += $gIn.Over100; $ms.OutGaps += $gOut.Over100
             Write-Log ('{0:HH:mm:ss} матч   {1} пак/с {2:N1}/{3:N1} (вых/вх), {4:N0} кбит/с, интервал {5:N1} с, пинг {6} | паузы вых/вх: макс {7}/{8} мс, больше 100 мс: {9}/{10}' -f $now, (Format-Endpoint $m.Ip $m.Port 44),
-                ($m.IOut / $chunkSec), ($m.IIn / $chunkSec), ($m.IBytes * 8 / 1000 / $chunkSec), $chunkSec, (Get-PingText $m.Ip), $gOut.Max, $gIn.Max, $gOut.Over100, $gIn.Over100)
+                ($m.IOut / $chunkSec), ($m.IIn / $chunkSec), ($m.IBytes * 8 / 1000 / $chunkSec), $chunkSec, (Get-PingText $m.Ip udp ([int]$m.Port) -Details), $gOut.Max, $gIn.Max, $gOut.Over100, $gIn.Over100)
             # каждый рывок от 250 мс (пакеты матча идут каждые ~50 мс) - и что в это время было в сети у игры и EAC
             $sorted = @($recs | Sort-Object Time)
             $nGap = 0
@@ -592,21 +628,23 @@ try {
             $g = $geo[$m.Ip]
             $dist = Get-DistanceKm $g
             Write-Color ('ГЛАВНЫЙ UDP - МАТЧ / ГОЛОС: {0}  {1}' -f (Format-Endpoint $m.Ip $m.Port 45), (Get-GeoText $m.Ip 60)) Green
-            $pt = Get-PingText $m.Ip
+            $pt = Get-PingText $m.Ip udp ([int]$m.Port) -Details
             $min = if ($dist) { ' | по прямой ~{0} км, физический минимум пинга ~{1} мс' -f $dist, [math]::Round($dist / 100) } else { '' }
-            Write-Color ('  пинг {0} мс{1} | обход: {2}' -f $pt, $min, (Get-BypassText $m.Owner 'udp' ([int]$m.Port))) Green
+            Write-Color ('  пробы: {0}{1} | обход: {2}' -f $pt, $min, (Get-BypassText $m.Owner 'udp' ([int]$m.Port))) Green
         } else {
             Write-Color 'Активного UDP пока нет: зайдите в матч / голосовой канал.' Yellow
         }
         $nr = @(Get-UdpNoReply)
         if ($nr.Count) { Write-Color ('UDP без ответа (' + $(if ($boosters.Count) { 'скорее всего из-за ' + ($boosters -join ', ') } else { 'провайдер режет или сервер молчит' }) + '): ' + (($nr | Select-Object -First 4 | ForEach-Object { (Format-Endpoint $_.Ip $_.Port 40) + ' вых ' + $_.Out }) -join ', ')) Red }
         Write-Host ''
-        Write-Color ('{0,-4} {1,-32} {2,-9} {3,9} {4,6} {5,7} {6,-34} {7}' -f 'Прот', 'Адрес:порт', 'Процесс', 'вых/вх/с', 'кбит/с', 'пинг', 'Где, сеть', 'Обход') DarkCyan
+        Write-Color 'Задержка: мед/P95 мс (i=ICMP, t=TCP); ответы/попытки. P95 требует20 ответов; — нет свежих данных.' DarkGray
+        Write-Color ('{0,-4} {1,-32} {2,-9} {3,9} {4,6} {5,13} {6,7} {7,-30} {8}' -f 'Прот', 'Адрес:порт', 'Процесс', 'вых/вх/с', 'кбит/с', 'мед/P95', 'ответы', 'Где, сеть', 'Обход') DarkCyan
         foreach ($x in ($active | Select-Object -First 16)) {
-            $line = '{0,-4} {1,-32} {2,-9} {3,9} {4,6:N0} {5,7} {6,-34} {7}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 32),
+            $display=Get-LatencyDisplay $latencyStore $x.Ip $x.Proto ([int]$x.Port)
+            $line = '{0,-4} {1,-32} {2,-9} {3,9} {4,6:N0} {5,13} {6,7} {7,-30} {8}' -f $x.Proto.ToUpper(), (Format-Endpoint $x.Ip $x.Port 32),
                 $(if ($x.Proc.Length -gt 9) { $x.Proc.Substring(0, 9) } else { $x.Proc }),
                 ('{0:N0}/{1:N0}' -f ($x.IOut / $chunkSec), ($x.IIn / $chunkSec)), ($x.IBytes * 8 / 1000 / $chunkSec),
-                (Get-PingText $x.Ip), (Get-GeoText $x.Ip 34), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))
+                $display.Text, $display.Replies, (Get-GeoText $x.Ip 30), (Get-BypassText $x.Owner $x.Proto ([int]$x.Port))
             $col = if ($m -and $x.Ip -eq $m.Ip -and $x.Port -eq $m.Port) { 'Green' } elseif ($x.Retx) { 'Yellow' } else { 'Gray' }
             Write-Color $line $col
         }
@@ -617,8 +655,11 @@ try {
         if (-not $gameAlive) { Write-Color ('{0} закрылся.' -f $AppName) Yellow }
     }
 } finally {
-    Stop-NetTrace $session
-    foreach ($f in $etlFiles) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    Close-TrackProbes
+    if(-not $Replay){
+        Stop-NetTrace $session
+        foreach ($f in $etlFiles) { Remove-Item $f -Force -ErrorAction SilentlyContinue }
+    }
 }
 
 # ---------- итог ----------

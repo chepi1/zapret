@@ -886,30 +886,30 @@ function Invoke-MenuAction([string]$Name) {
     } finally { $Script:GameControlApproved = $false }
 }
 
-# Пинг до игровых серверов: время TCP-подключения, по минимуму из четырёх попыток
+# Справочные TCP-пробы, минимум из четырёх попыток. Это не текущий сервер матча.
 function Show-GamePing {
     Write-Host ''
-    Write-Color 'Пинг до игровых серверов (время подключения, лучшее из 4 попыток)' White
+    Write-Color 'TCP-подключение к справочным сервисам (лучшее из 4 попыток)' White
     $r = Measure-TcpRtt @($Script:GamePingTargets.Values)
     foreach ($k in $Script:GamePingTargets.Keys) {
         $ms = $r[$Script:GamePingTargets[$k]]
         $color = if ($ms -lt 0) { 'Red' } elseif ($ms -le 80) { 'Green' } elseif ($ms -le 150) { 'Gray' } else { 'Yellow' }
         Write-Color ('  {0,-46} {1}' -f $k, $(if ($ms -lt 0) { 'не отвечает' } else { [string]$ms + ' мс' })) $color
     }
-    Write-Color '  Пинг в самой игре выше на время обработки сервером. Франкфурт до 60 мс из Москвы - хорошо.' Gray
-    # участок до роутера - единственный, на который можно повлиять с ПК
+    Write-Color '  Эти TCP-пробы не измеряют задержку матча. Активные адреса и ICMP-пробы к ним показывает трекер; игровой пинг смотрите в самой игре.' Gray
+    # Отдельная проба до шлюза помогает проверить локальный участок соединения.
     $w = Get-WifiInfo
     if ($w -and $w.Gateway) {
         Write-Host ''
-        Write-Color ('До роутера ({0}, {1}), 15 секунд:' -f $(if ($w.Wifi) { 'Wi-Fi' } else { 'кабель' }), $w.Speed) White
+        Write-Color ('До шлюза ({0}, {1}), 15 секунд:' -f $(if ($w.Wifi) { 'Wi-Fi' } else { $w.Name }), $w.Speed) White
         $j = Measure-GatewayJitter $w.Gateway 15
         if (-not $j.Count) { Write-Color '  роутер не отвечает на ping (так настроен) - замерить не получится' Gray; return }
         $bad = $j.Spikes -gt 0 -or $j.Lost -gt 0 -or $j.P99 -ge 20
-        Write-Color ('  обычно {0} мс, 99% пакетов быстрее {1} мс, максимум {2} мс, всплесков от 30 мс: {3}, потерь: {4}' -f $j.Median, $j.P99, $j.Max, $j.Spikes, $j.Lost) $(if ($bad) { 'Yellow' } else { 'Green' })
+        Write-Color ('  по ответившим пробам: медиана {0} мс, выборочный P99 {1} мс, максимум {2} мс; от30мс: {3}, неответов ICMP: {4}, ответов: {5}' -f $j.Median, $j.P99, $j.Max, $j.Spikes, $j.Lost, $j.Count) $(if ($bad) { 'Yellow' } else { 'Green' })
         if ($w.Wifi) {
-            if ($bad) { Write-Color '  Всплески до роутера игра чувствует как лаги. Лучше всего - кабель; если только Wi-Fi - диапазон 5 или 6 ГГц и роутер поближе.' Yellow }
+            if ($bad) { Write-Color '  Замечены задержки или неответы на локальном участке. Для Wi-Fi проверьте устойчивость сигнала и загруженность канала; неответ ICMP сам по себе не доказывает потери пакетов игры.' Yellow }
             if ($w.Roam -and $w.RoamLowest -and $w.Roam -ne $w.RoamLowest) {
-                Write-Color ('  {0}: {1}. Пока она не минимальная, адаптер время от времени ищет другие сети, и пинг прыгает - исправление в пункте 5.' -f $w.RoamName, $w.Roam) Gray
+                Write-Color ('  {0}: {1}. Агрессивный роуминг может влиять на устойчивость; изменение доступно в пункте 5 и требует отдельной проверки.' -f $w.RoamName, $w.Roam) Gray
             }
         }
     }
