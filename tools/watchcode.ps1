@@ -26,6 +26,7 @@ function Get-LoadedPackageCodeSnapshot([Management.Automation.Language.Ast]$Entr
             $seenRoots[$name]=$ast
         }
         if(-not $RequiredEntry -or -not $snapshot.ContainsKey($RequiredEntry)){return $null}
+        $snapshot['tools/upstream.txt']=$Script:CoreManifest.ContentHash
         return $snapshot
     }catch{return $null}finally{if($null -ne $sha){$sha.Dispose()}}
 }

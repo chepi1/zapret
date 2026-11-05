@@ -136,6 +136,10 @@ function Get-RunSnapshot {
             }
         }
         foreach($name in $ExpectedCode.Keys){if(-not $hashes.ContainsKey($name) -or $hashes[$name] -cne $ExpectedCode[$name]){throw ('Loaded code differs from snapshot input: '+$name)}}
+        foreach($name in $Script:UpstreamHashes.Keys){
+            $relative=$name.Replace('\','/')
+            if(-not $hashes.ContainsKey($relative) -or $hashes[$relative] -ine $Script:UpstreamHashes[$name]){throw ('Captured core input differs from its pinned release: '+$relative)}
+        }
         if($RequireSavedSettings){
             $runtimeSaved=$Script:Runtime
             try{

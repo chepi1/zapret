@@ -86,6 +86,12 @@ try{
         try{$unexpected=Get-RunSnapshot $settings $targets $network;Close-RunSnapshot $unexpected}catch{$rejected=$true}
     }finally{[IO.File]::WriteAllBytes($codePath,$codeBytes)}
     Check 'snapshot rejects disk code different from the loaded PowerShell AST' $rejected
+    $luaPath=Join-Path $Pkg 'lua/zapret-lib.lua';$luaBytes=[IO.File]::ReadAllBytes($luaPath);$rejected=$false
+    try{
+        [IO.File]::WriteAllBytes($luaPath,($luaBytes+[byte[]]@(10)))
+        try{$unexpected=Get-RunSnapshot $settings $targets $network;Close-RunSnapshot $unexpected}catch{$rejected=$true}
+    }finally{[IO.File]::WriteAllBytes($luaPath,$luaBytes)}
+    Check 'official Lua changed after initial integrity cannot enter a captured run' $rejected
     $script:originalInputOpen=${function:Open-RunSnapshotInputFile};$script:catalogInjected=$false
     $script:extraInput=Join-Path $Pkg 'lists/snapshot-catalog-fixture.txt';$rejected=$false
     function Open-RunSnapshotInputFile($Path){

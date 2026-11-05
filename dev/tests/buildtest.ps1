@@ -98,6 +98,16 @@ try{
             try{Check 'missing clean template rejects the build' ((Build) -ne 0)}finally{Move-Item -LiteralPath ($template+'.fixture') -Destination $template}
             Check 'missing template preserves previous archive' ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ceq $digest)
         }
+        foreach($relative in @('CHECKSUMS.txt','lua/zapret-lib.lua')){
+            $inputPath=Join-Path $Pkg $relative;$inputBytes=[IO.File]::ReadAllBytes($inputPath)
+            try{
+                if($relative -eq 'CHECKSUMS.txt'){[IO.File]::WriteAllText($inputPath,"# inconsistent header`r`n"+[IO.File]::ReadAllText($inputPath),$utf8)}
+                else{[IO.File]::AppendAllText($inputPath,"`n-- injected official-source drift`n",$utf8)}
+                Check ('inconsistent pinned core input is rejected: '+$relative) ((Build) -ne 0)
+                Check 'core input failure preserves the previous archive' ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ceq $digest)
+            }finally{[IO.File]::WriteAllBytes($inputPath,$inputBytes)}
+            Check 'restored core inputs reproduce the previous archive' ((Build) -eq 0 -and (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ceq $digest)
+        }
         $sourceLock=[IO.File]::Open($required,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::None)
         try{Check 'unreadable source reports a failed build' ((Build) -ne 0)}finally{$sourceLock.Dispose()}
         Check 'partial ZIP failure preserves previous archive' ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ceq $digest)

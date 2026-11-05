@@ -10,6 +10,7 @@ $prefix=@'
 param($Pkg,$Case,$Result)
 $ErrorActionPreference='Stop'
 . (Join-Path $Pkg 'tools/lib.ps1')
+$Script:ControlMutexName='Local\zapret-recipe-workflow-'+[guid]::NewGuid().ToString('N')
 $Script:Runtime=Join-Path $Script:Runtime ('recipe-'+$Case)
 [void][IO.Directory]::CreateDirectory($Script:Runtime)
 $Script:TestEntryAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools/test.ps1'),[ref]$null,[ref]$null)

@@ -12,6 +12,7 @@ if ($LASTEXITCODE -ge 8) { throw ('robocopy: ошибка ' + $LASTEXITCODE) }
 $tests = @('astlint', 'check', 'lintstrat', 'profiletest', 'capturetest', 'drystrat', 'retrytest', 'retrybudgettest', 'primarydecisiontest', 'selectiontest', 'measurementtest', 'curlcontroltest', 'curlresulttest', 'curlfailuretest', 'curldeadlinetest', 'curlenginetest', 'comparisontest', 'comparisonruntest', 'resourcetest', 'resourceprocesstest', 'latencytest', 'latencyprobetest', 'rankcontexttest', 'starttest', 'coordinatortest', 'healthtest', 'historytest', 'proxytest', 'netstatetest', 'contexttest', 'watchtest', 'watchluatest', 'linkguardtest', 'storeluatest', 'finalchecktest', 'guardtest', 'dnstest', 'updatetest', 'recoverytest', 'labtest', 'luatest', 'autotunetest', 'boostertest', 'securitytest', 'smoke')
 $tests += @('hostcachetest','watchcodetest','restarttest','filtertest','buildtest','settingstest','migrationtest','convertertest','updatearchivetest','tgproxytest')
 $tests += @('recipetest','reciperuntest')
+$tests += @('integritytest')
 if (-not $Offline) { $tests += @('liststest', 'hoststest', 'tgtest') }
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $failed = @()

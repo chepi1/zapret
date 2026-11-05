@@ -22,7 +22,7 @@ try{
         if(-not $names.Add($line)){throw ('Duplicate package path: '+$line)}
     }
     $defaults=@('list-general-user.txt','list-exclude-user.txt','ipset-user.txt','ipset-exclude-user.txt')
-    foreach($required in @('zapret.bat','tools/lib.ps1','tools/filtercheck.cs','bin/winws2.exe')+@($defaults|ForEach-Object{'lists/'+$_})){
+    foreach($required in @('zapret.bat','tools/lib.ps1','tools/filtercheck.cs','tools/integrity.ps1','tools/upstream.txt','CHECKSUMS.txt','bin/winws2.exe')+@($defaults|ForEach-Object{'lists/'+$_})){
         if(-not $names.Contains($required)){throw ('Missing required manifest entry: '+$required)}
     }
     $paths=[string[]]@($names);[Array]::Sort($paths,[StringComparer]::Ordinal)
@@ -40,6 +40,19 @@ try{
         if($item.PSIsContainer){throw ('Package input is a directory: '+$relative)}
         $inputs+=@{Name=('zapret/'+$path);Source=$source}
     }
+    # All module/data paths were checked above before loading this pure parser.
+    . (Join-Path $root 'tools/integrity.ps1')
+    $core=Read-CoreManifest (Join-Path $root 'tools/upstream.txt')
+    $sumBytes=Read-CoreManifestBytes (Join-Path $root 'CHECKSUMS.txt')
+    $encoding=New-Object Text.UTF8Encoding($false,$true)
+    $sumText=$encoding.GetString($sumBytes).TrimStart([char]0xFEFF).Replace("`r`n","`n")
+    if(-not $sumText.StartsWith($core.ChecksumsBlock.Replace("`r`n","`n"),[StringComparison]::Ordinal)){throw 'CHECKSUMS.txt differs from tools/upstream.txt'}
+    $expectedHashes=@{'tools/upstream.txt'=$core.ContentHash;'CHECKSUMS.txt'=(Get-CoreManifestHash $sumBytes)}
+    foreach($name in $core.Hashes.Keys){
+        $relative=$name.Replace('\','/')
+        if(-not $names.Contains($relative)){throw ('Missing pinned core package entry: '+$relative)}
+        $expectedHashes[$relative]=$core.Hashes[$name]
+    }
     $output=[IO.Path]::GetFullPath($OutDir)
     [IO.Directory]::CreateDirectory($output)|Out-Null
     $destination=Join-Path $output ('zapret-v'+$version+'.zip')
@@ -52,6 +65,13 @@ try{
         $sourceStream=$null;$entryStream=$null
         try{
             $sourceStream=[IO.File]::Open($inputFile.Source,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
+            $relative=$inputFile.Name.Substring('zapret/'.Length)
+            if($expectedHashes.ContainsKey($relative)){
+                $sha=[Security.Cryptography.SHA256]::Create()
+                try{$hash=[BitConverter]::ToString($sha.ComputeHash($sourceStream)).Replace('-','')}finally{$sha.Dispose()}
+                if($hash -ine $expectedHashes[$relative]){throw ('Pinned core input changed: '+$relative)}
+                $sourceStream.Position=0
+            }
             $entryStream=$entry.Open();$sourceStream.CopyTo($entryStream)
         }finally{if($entryStream){$entryStream.Dispose()};if($sourceStream){$sourceStream.Dispose()}}
     }

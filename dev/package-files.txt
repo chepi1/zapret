@@ -82,6 +82,7 @@ tools/comparison.ps1
 tools/diag.ps1
 tools/dpi-suite.json
 tools/filtercheck.cs
+tools/integrity.ps1
 tools/latency.ps1
 tools/latencyprobe.ps1
 tools/lib.ps1
@@ -102,6 +103,7 @@ tools/test.ps1
 tools/tgbridge.cs
 tools/tgbridge.ps1
 tools/track.ps1
+tools/upstream.txt
 tools/watchcode.ps1
 windivert/quic_initial_ietf.txt
 zapret.bat

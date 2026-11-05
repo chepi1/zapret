@@ -4,9 +4,9 @@
 
 ## Проверенный срез
 
-- Полный `dev/tests/run-all.ps1 -Offline` после исправлений ревью:57 групп прошли, `dist/v2-snapshot-final-all.log`. Три native admin-only проверки явно пропущены; developer Lua fixtures и native dry/filter compiler исполнены. Предыдущий baseline54 — `dist/v2-final54-all.log`.
+- Полный `dev/tests/run-all.ps1 -Offline` после исправлений ревью:58 групп прошли, `dist/v2-core-final-all.log`. Три native admin-only проверки явно пропущены; developer Lua fixtures и native dry/filter compiler исполнены. Предыдущие baseline57/54 — `dist/v2-snapshot-final-all.log` и `dist/v2-final54-all.log`.
 - Native WinDivert compiler действительно проверяет исходные байты экспортированного фильтра без открытия драйвера. Проверены BOM/NUL, неверные поля, недоступный DLL, тайм-аут, cleanup и отсутствие остановки старого обхода при отказе.
-- Упаковка:107 объявленных runtime-файлов и пустой runtime/.keep; чистые четыре пользовательских списка, Valve/Steam сохранены. Детерминированный ZIP на одном .NET; ошибки входов/записи/хеша сохраняют прежний архив. Отдельные Windows case/dotted aliases и junction-тесты.
+- Упаковка:109 объявленных runtime-файлов и пустой runtime/.keep; чистые четыре пользовательских списка, Valve/Steam сохранены. Детерминированный ZIP на одном .NET; ошибки входов/записи/хеша сохраняют прежний архив. Отдельные Windows case/dotted aliases и junction-тесты.
 - Настройки: атомарная замена с Flush(true); частичная низкоуровневая запись не портит старый файл, параллельный reader видит целые старые/новые данные. Независимое PS5.1 ревью подтвердило сохранение SDDL и share-delete поведение.
 - Миграция current planner/journal на representative1.9 state: SHA256 каждого личного файла сохранён после неуспешной и успешной установки, включая UTF8 BOM настроек и UTF16 отчёта. Rollback действительно отменяет уже применённую замену кода и новую зависимость.
 - Все22 исходника Flowseal1.10.4 закреплены точными байтами и Git blob/SHA256.15 converter-тестов с мутациями, CLI и corpus-subtests проходят; ALT3/ALT13 используют существующий hostfakesplit_alt. Четыре ограничения EXP требуют явного opt-in. Новые стратегии в живой сети не испытывались.
@@ -14,12 +14,14 @@
 - Telegram: мост учитывает явный локальный HTTPS-прокси Windows (Happ10808), заново читает его при новых соединениях.20 transport/crypto проверок; живые DC2/DC4 ответили ok и пользователь подтвердил работу чатов. Перезапущен только мост, winws2 PID42768 не менялся. Коммит6ef606c; notice теперь отличает upstream-компоненты от версии кода папки.
 - Тесты стратегий: связный снимок PS/Lua/профилей/списков/бинарных входов, значений targets/settings и POST. Исходный native exe/bin закреплён и остаётся путём запуска; каждый normal/final/A/B engine получает собственную автолисту/runtime. Сохранение истории/рейтинга/настроек/завершённого A/B требует неизменных исходников, настроек и сети. Процессы регистрируются сразу после OS launch; прерывание очищает их, отказ остановки сохраняет входы.
 - Единственное review снимков: C0/I3/M0, все три воспроизведены RED и исправлены одним проходом. Инвентарь содержит наследуемый menu AST и tested-strategies; неудачный cleanup сохраняет pin, закрывающийся снимок не допускает новых запусков. FILE_LIST_DIRECTORY действительно блокирует rename после освобождения файловых pins.29 core проверок GREEN;7 сценариев реального main с fake OS/probe boundary, включая полный24-slot A/B, наследуют menu AST и проверяют frozen POST.
+- Единый состав ядра: защищаемый tools/upstream.txt задаёт tag/commit/archive digest и8 официальных файлов; runtime-проверка и notice используют его же. Source/preview остаются на v1.0.6. Loader ограничен8KiB, строгими ASCII/ordinal записями; устаревшие загруженные пины закрывают integrity и persistence. Снимок проверяет реальные captured binary/Lua/filter bytes; builder сверяет CHECKSUMS и удерживаемые pinned streams.27 loader проверок; review C0/I1/M0, четыре PS5 NUL/U+00AD регрессии исправлены одним проходом.
+- Официальный v1.0.7 (5 ноября) проверен отдельно: ZIP35e14e4e…2967, source038c97e…7379b; из8 входов меняется только winws2.exe. Native34 стратегии/смешанные круги, priority parsing, duplicate-list rejection и весь набор58 прошли на TEMP-копии. Лог dist/upstream/zapret2-v1.0.7/offline-all.log, детали dev/research/2026-11-05-zapret2-1.0.7.md. Новое ядро в рабочую папку не устанавливалось.
 
 ## Локальный кандидат и совместимость
 
-Кандидат: `dist/v2-preview-20261105/zapret-v2.0.zip`. Для него Version2.0 меняется только в копии; README явно помечает предварительный статус. Его точный SHA256 и результат — в `dist/v2-snapshot-preview-upgrade.log`.
+Кандидат: `dist/v2-preview-20261105/zapret-v2.0.zip`. Для него Version2.0 меняется только в копии; README явно помечает предварительный статус. Его точный SHA256 и результат — в `dist/v2-core-preview-upgrade.log`.
 
-SHA256: `a7210d816d69a08c2a8a6798e8df13b92e675623d9ae3587d78307a5963f6b1c` (108 записей, 2029823 байт). Модуль recipe включён; runtime-состояния, рабочей автолисты, dev/dist/.git в архиве нет. Новый лог: `dist/v2-snapshot-preview-upgrade.log`.
+SHA256: `66e383b8fcdbf014542751ee847763f413077db73d11bae7e5214b3ad61a6882` (110 записей, 2032534 байт). Модули recipe/integrity и upstream.txt включены; runtime-состояния, рабочей автолисты, dev/dist/.git в архиве нет. Новый лог: `dist/v2-core-preview-upgrade.log`.
 
 `dist/v2-legacy-upgrade-check.ps1` берёт исходники из настоящего локального тегаv1.9, загружает старый updater и ставит кандидат на TEMP-установку. Подменены только download и управление процессами/службой; распаковка, проверка digest/tag, план/копирование, личные данные и намерение перезапуска — настоящие. Обновлённый код затем проходит native CLI/filter preflight без перехвата. Обе стадии PASS.
 

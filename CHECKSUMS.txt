@@ -7,6 +7,7 @@ ba4ceccdea3576da0a0991a50d7893ea911de197281338132dbec02a5b2fcf58  winws2.exe
 6bf528fef1f0fc3c65e189216fc8a06bb873f6e25d1c29d2bfa4695a09b73440  zapret-lib.lua
 6d1fa9168e5de1682fef91fd174f68b58c50f6739ef00f42ca7db2b940b6246d  zapret-antidpi.lua
 23a9b99a776d868d92f4cc0ee5110f5c1f12fe746620d9c0337022dbc2f52df0  zapret-auto.lua
+bac79f529b582ac15142d9593358b4d5317cfb630ad55de982a47c2fd340bd53  quic_initial_ietf.txt
 
 Свои файлы пакета (не из zapret2): lua\fooling.lua, strategies\*.txt, tools\*.ps1, lists\ipset-taketwo.txt, lists\ipset-aws.txt.
 Фейки fake\*.bin, списки list-general/list-google/list-exclude/ipset-all/ipset-exclude и hosts-flowseal.txt - из Flowseal zapret-discord-youtube 1.10.4.

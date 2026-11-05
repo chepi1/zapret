@@ -12,6 +12,9 @@ $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
 $Script:Version     = '1.9'
+. (Join-Path $PSScriptRoot 'integrity.ps1')
+$Script:CoreManifest=Read-CoreManifest (Join-Path $PSScriptRoot 'upstream.txt')
+$Script:UpstreamHashes=$Script:CoreManifest.Hashes
 . (Join-Path $PSScriptRoot 'netstate.ps1')
 . (Join-Path $PSScriptRoot 'watchcode.ps1')
 . (Join-Path $PSScriptRoot 'capture.ps1')
@@ -517,7 +520,7 @@ function Get-StrategyFingerprint([string]$Id) {
     try { return (Get-FileHash -LiteralPath (Join-Path $Script:StratDir ('alt' + $Id + '.txt')) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return '' }
 }
 function Get-ScoreInputFiles {
-    $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','tools/recipe.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+    $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','tools/recipe.ps1','tools/integrity.ps1','tools/upstream.txt','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
     foreach ($dir in @('lists','fake')) {
         $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
     }
@@ -3304,7 +3307,7 @@ $Script:ValveNets = @('45.121.184.0/24', '103.10.124.0/23', '103.28.54.0/24', '1
 
 # Основа сборки: с какими версиями zapret2 и Flowseal она собрана. Выход новых проверяется раз в несколько дней.
 $Script:Upstream = [ordered]@{
-    'zapret2'  = @{ Repo = 'bol-van/zapret2'; Base = 'v1.0.6' }
+    'zapret2'  = @{ Repo = 'bol-van/zapret2'; Base = $Script:CoreManifest.Tag }
     'Flowseal' = @{ Repo = 'Flowseal/zapret-discord-youtube'; Base = '1.10.4' }
 }
 $Script:UpdatesFile = 'runtime/updates.txt'
@@ -3925,15 +3928,6 @@ function Stop-NetTrace([string]$Session) {
 #  - папки с кодом закрыты на запись для всех, кроме администраторов и SYSTEM, владелец - Администраторы
 #    (иначе владелец-пользователь мог бы вернуть себе запись). lists\ и runtime\ - данные, их не трогаем.
 # Копия для разработки (есть папка dev\) не закрывается: её правят без прав администратора.
-$Script:UpstreamHashes = [ordered]@{
-    'bin\winws2.exe'         = 'ba4ceccdea3576da0a0991a50d7893ea911de197281338132dbec02a5b2fcf58'
-    'bin\cygwin1.dll'        = '103104a52e5293ce418944725df19e2bf81ad9269b9a120d71d39028e821499b'
-    'bin\WinDivert.dll'      = '16abd6a029e65557c6a309bea7b13bf81fff4e193567582e1cddbf6719f323e0'
-    'bin\WinDivert64.sys'    = '8da085332782708d8767bcace5327a6ec7283c17cfb85e40b03cd2323a90ddc2'
-    'lua\zapret-lib.lua'     = '6bf528fef1f0fc3c65e189216fc8a06bb873f6e25d1c29d2bfa4695a09b73440'
-    'lua\zapret-antidpi.lua' = '6d1fa9168e5de1682fef91fd174f68b58c50f6739ef00f42ca7db2b940b6246d'
-    'lua\zapret-auto.lua'    = '23a9b99a776d868d92f4cc0ee5110f5c1f12fe746620d9c0337022dbc2f52df0'
-}
 $Script:ProtectedDirs = @('bin', 'lua', 'tools', 'strategies', 'fake', 'windivert')
 $Script:ProtectedFiles = @('zapret.bat')
 
@@ -3942,6 +3936,7 @@ $Script:ProtectedFiles = @('zapret.bat')
 # службы, теста и диагностики сверка всегда полная.
 $Script:IntegrityCache = $null
 function Test-PackageIntegrity([switch]$Cached) {
+    if(-not (Test-CoreManifestCurrent $Script:CoreManifest (Get-PkgPath 'tools/upstream.txt'))){return @('tools/upstream.txt - состав ядра изменён; откройте меню заново')}
     $sig = ''
     if ($Cached) {
         $sig = (@($Script:UpstreamHashes.Keys | ForEach-Object {
