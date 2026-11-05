@@ -1,8 +1,8 @@
 # zapret
 
-Обход DPI для **NBA 2K27**, **Discord** и **YouTube** на Windows. Основа — [zapret2](https://github.com/bol-van/zapret2) (winws2) от bol-van и стратегии [Flowseal zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube), переписанные на zapret2.
+Обход DPI для **Discord** и **YouTube** на Windows. Основа — [zapret2](https://github.com/bol-van/zapret2) (winws2) от bol-van и стратегии [Flowseal zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube), переписанные на zapret2.
 
-*DPI bypass for NBA 2K27, Discord and YouTube on Windows, built on bol-van's zapret2 with Flowseal's strategies. The interface is in Russian. English: [README.en.md](README.en.md).*
+*DPI bypass for Discord and YouTube on Windows, built on bol-van's zapret2 with Flowseal's strategies. The interface is in Russian. English: [README.en.md](README.en.md).*
 
 [![tests](https://github.com/chepi1/zapret/actions/workflows/tests.yml/badge.svg)](https://github.com/chepi1/zapret/actions/workflows/tests.yml)
 
