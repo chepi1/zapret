@@ -1,0 +1,14 @@
+# Telegram bridge: honor the existing local HTTPS proxy
+
+**Trigger:** Telegram stopped working. The live bridge listened on1443 and received app connections, but every direct TCP route to Telegram timed out. Normal direct HTTPS worked. Windows had an active local HTTP proxy (Happ,10808), no observed TUN; the same Telegram HTTPS endpoints through that configured proxy succeeded.
+
+**Fix:** tools/tgbridge.cs adds a C#5 Upstream transport. Read the current user's explicit proxy setting via WinHTTP for each new upstream connection; choose HTTPS-specific or generic manual proxy only. Support loopback HTTP CONNECT without credentials, preserving target hostname/remote DNS and ordinary TLS certificate verification. PAC/WPAD is not fetched/executed. Unsupported explicitly selected proxy types/remote endpoints/auth are rejected without exposing their values; absent HTTPS proxy preserves the prior direct path. One deadline bounds TCP+CONNECT and header size is limited. Both WSS and direct-MTProto fallback use the same route selector.
+
+**Evidence:** tgproxytest initially failed missing transport (dist/v2-tg-proxy-red.log).18 checks pass in dist/v2-tg-proxy-green.log: parsing, HTTPS selection, unsupported settings, real loopback CONNECT+opaque echo, rejection, timeout/socket cleanup, original crypto/framing self-test. Live task restarted with unchanged port/secret; its conhost child survived task stop, so only the verified old bridge PID9716 was terminated before running the task again. New bridge PID30024; req_pq_multi DC2/DC4 both returned ok, user confirmed chats work. winws2 PID42768 remained unchanged. No proxy/TUN/adapter settings, driver or game bypass restart.
+
+**Notification:** cached update notice is zapret2 v1.0.7 versus bundled v1.0.6, not a newer self-release (zapret cachedv1.9, Get-ZapretUpdate=null). Menu distinguishes component updates from code-folder updates. Stable Version remains1.9; no untested binary replacement or publication.
+
+- [x] Reproduce direct/proxy contrast and existing bridge ownership.
+- [x] RED→GREEN local transport/crypto tests; apply only bridge; live DC2/DC4 and user confirmation.
+- [x] Fresh read-only review: C0/I1/M0. The important finding was a generic proxy URI containing `=` being mistaken for a protocol assignment and falling back to DIRECT. Added credential/query regressions (two observed failures in dist/v2-tg-proxy-parser-red.log), recognize assignments only for scheme-name prefixes; all 20 transport/crypto checks now pass in dist/v2-tg-proxy-final.log. No repeated review.
+- [x] The staged-only package (HEAD plus this fix, without snapshot WIP) passes astlint, check and all 20 tgproxytest checks under Windows PowerShell 5.1; dist/v2-tg-staged-*.log. Local commit only. Snapshot WIP in lib/watchcode/recipe remains a separate phase.

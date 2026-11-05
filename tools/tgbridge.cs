@@ -18,6 +18,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 namespace ZapretTg
 {
@@ -161,6 +162,104 @@ namespace ZapretTg
         }
     }
 
+    // Only the user's explicit local HTTP proxy is used. PAC/WPAD is never executed here.
+    public static class Upstream
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ProxyConfig
+        {
+            [MarshalAs(UnmanagedType.Bool)] public bool AutoDetect;
+            public IntPtr Pac, Proxy, Bypass;
+        }
+        [DllImport("winhttp.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool WinHttpGetIEProxyConfigForCurrentUser(out ProxyConfig config);
+        [DllImport("kernel32.dll")] private static extern IntPtr GlobalFree(IntPtr value);
+
+        public static IPEndPoint ParseProxy(string raw)
+        {
+            string common = null, https = null;
+            foreach (string item in (raw ?? "").Split(new char[] { ';', ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                int eq = item.IndexOf('=');
+                if (eq < 0 || !System.Text.RegularExpressions.Regex.IsMatch(item.Substring(0, eq), "^[A-Za-z][A-Za-z0-9+.-]*$")) common = item;
+                else if (item.Substring(0, eq).Equals("https", StringComparison.OrdinalIgnoreCase)) https = item.Substring(eq + 1);
+            }
+            string selected = https ?? common;
+            if (string.IsNullOrEmpty(selected)) return null;
+            if (selected.IndexOf("://", StringComparison.Ordinal) < 0) selected = "http://" + selected;
+            Uri uri;
+            if (!Uri.TryCreate(selected, UriKind.Absolute, out uri) || uri.Scheme != "http" || !string.IsNullOrEmpty(uri.UserInfo) || uri.Port < 1 || uri.Port > 65535 || uri.AbsolutePath != "/" || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
+                throw new IOException("системный HTTPS-прокси: поддерживается локальный HTTP CONNECT без авторизации");
+            IPAddress ip;
+            string host = uri.DnsSafeHost.Trim('[', ']');
+            if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) ip = IPAddress.Loopback;
+            else if (!IPAddress.TryParse(host, out ip) || !IPAddress.IsLoopback(ip))
+                throw new IOException("системный HTTPS-прокси не является локальным HTTP-прокси");
+            return new IPEndPoint(ip, uri.Port);
+        }
+        private static IPEndPoint CurrentProxy()
+        {
+            ProxyConfig config = new ProxyConfig();
+            try
+            {
+                if (!WinHttpGetIEProxyConfigForCurrentUser(out config)) return null;
+                return ParseProxy(Marshal.PtrToStringUni(config.Proxy));
+            }
+            finally
+            {
+                if (config.Pac != IntPtr.Zero) GlobalFree(config.Pac);
+                if (config.Proxy != IntPtr.Zero) GlobalFree(config.Proxy);
+                if (config.Bypass != IntPtr.Zero) GlobalFree(config.Bypass);
+            }
+        }
+        public static Task<TcpClient> Connect(string addr, string host, int port, int timeoutMs)
+        {
+            return Connect(addr, host, port, timeoutMs, CurrentProxy());
+        }
+        public static async Task<TcpClient> Connect(string addr, string host, int port, int timeoutMs, IPEndPoint proxy)
+        {
+            if (port < 1 || port > 65535 || timeoutMs < 1) throw new ArgumentOutOfRangeException();
+            IPAddress literal;
+            if (!IPAddress.TryParse(host, out literal) && !System.Text.RegularExpressions.Regex.IsMatch(host, "^[A-Za-z0-9_.-]+$"))
+                throw new IOException("недопустимое имя сервера Telegram");
+            TcpClient client = new TcpClient(proxy == null ? AddressFamily.InterNetwork : proxy.AddressFamily);
+            client.NoDelay = true;
+            Task deadline = Task.Delay(timeoutMs);
+            try
+            {
+                Task connect = proxy == null ? client.ConnectAsync(addr, port) : client.ConnectAsync(proxy.Address, proxy.Port);
+                if (await Task.WhenAny(connect, deadline) != connect) throw new TimeoutException("подключение к серверу или локальному прокси");
+                await connect;
+                if (proxy != null)
+                {
+                    string authority = (literal != null && literal.AddressFamily == AddressFamily.InterNetworkV6 ? "[" + host + "]" : host) + ":" + port;
+                    byte[] request = Encoding.ASCII.GetBytes("CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n\r\n");
+                    NetworkStream stream = client.GetStream();
+                    Task write = stream.WriteAsync(request, 0, request.Length);
+                    if (await Task.WhenAny(write, deadline) != write) throw new TimeoutException("запрос к локальному прокси");
+                    await write;
+                    List<byte> header = new List<byte>();byte[] one = new byte[1];bool complete = false;
+                    while (header.Count < 16384)
+                    {
+                        Task<int> read = stream.ReadAsync(one, 0, 1);
+                        if (await Task.WhenAny(read, deadline) != read) throw new TimeoutException("ответ локального прокси");
+                        if (await read == 0) throw new IOException("локальный прокси закрыл туннель");
+                        header.Add(one[0]);int n = header.Count;
+                        if (n >= 4 && header[n - 4] == 13 && header[n - 3] == 10 && header[n - 2] == 13 && header[n - 1] == 10) { complete = true;break; }
+                    }
+                    if (!complete) throw new IOException("слишком большой ответ локального прокси");
+                    string[] status = Encoding.ASCII.GetString(header.ToArray()).Split('\n')[0].Trim().Split(' ');
+                    int code;
+                    if (status.Length < 2 || (status[0] != "HTTP/1.1" && status[0] != "HTTP/1.0") || !int.TryParse(status[1], out code) || code < 200 || code >= 300)
+                        throw new IOException("локальный прокси отклонил CONNECT");
+                }
+                return client;
+            }
+            catch { client.Close();throw; }
+        }
+    }
+
     // WebSocket-клиент поверх TLS: свой, чтобы подключаться к нужному адресу с нужным именем (SNI и Host)
     public sealed class WsClient : IDisposable
     {
@@ -173,14 +272,11 @@ namespace ZapretTg
 
         public static async Task<WsClient> Connect(string addr, string host, string path, int timeoutMs)
         {
-            TcpClient tcp = new TcpClient(AddressFamily.InterNetwork);
-            tcp.NoDelay = true;
+            TcpClient tcp = null;
             SslStream ssl = null;
             try
             {
-                Task c = tcp.ConnectAsync(addr, 443);
-                if (await Task.WhenAny(c, Task.Delay(timeoutMs)) != c) throw new TimeoutException("подключение к " + addr);
-                await c;
+                tcp = await Upstream.Connect(addr, host, 443, timeoutMs);
                 ssl = new SslStream(tcp.GetStream(), false);
                 // TLS 1.2 явно: "по умолчанию Windows" в PowerShell 5.1 на старой Windows 10 может значить устаревшие версии.
                 // Сертификат *.web.telegram.org проверяется как обычно.
@@ -212,7 +308,7 @@ namespace ZapretTg
             catch
             {
                 if (ssl != null) ssl.Dispose();
-                tcp.Close();
+                if (tcp != null) tcp.Close();
                 throw;
             }
         }
@@ -587,19 +683,16 @@ namespace ZapretTg
         {
             string ip;
             if (!DcIps.TryGetValue(dc == 203 ? 2 : dc, out ip)) return null;
-            TcpClient t = new TcpClient(AddressFamily.InterNetwork);
-            t.NoDelay = true;
+            TcpClient t = null;
             try
             {
-                Task c = t.ConnectAsync(ip, 443);
-                if (await Task.WhenAny(c, Task.Delay(5000)) != c) throw new TimeoutException("подключение к " + ip);
-                await c;
+                t = await Upstream.Connect(ip, ip, 443, 5000);
                 return t;
             }
             catch (Exception ex)
             {
                 Log("DC" + dc + ": прямое подключение к " + ip + " - " + ex.Message);
-                t.Close();
+                if (t != null) t.Close();
                 return null;
             }
         }

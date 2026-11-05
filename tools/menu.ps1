@@ -131,7 +131,10 @@ function Show-Header {
     $age = Get-ListsAgeDays
     if ($age -ge 21) { Write-BoxRow ('  ! Списки сайтов не обновлялись ' + $age + ' дн.: новые блокировки в них не попали. Обновить: Настройки -> 8.') Yellow }
     $news = @(Get-UpstreamNews)
-    if ($news.Count) { Write-BoxRow ('  ! Вышли новые версии основы: ' + ($news -join ', ') + ' - сборку стоит обновить.') Yellow }
+    if ($news.Count) {
+        Write-BoxRow ('  ! Новые версии компонентов: ' + ($news -join ', ')) Yellow
+        Write-BoxRow '    Это сведения о ядре и списках. Версия кода сборки показана в заголовке.' Gray
+    }
     Write-BoxSep
 }
 
