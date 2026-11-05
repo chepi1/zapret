@@ -14,6 +14,7 @@ param([ValidateRange(1,60)][int]$TimeoutSec = 5, [ValidateRange(1,64)][int]$Para
     [string]$CompareA='', [string]$CompareB='', [ValidateRange(4,12)][int]$CompareBlocks=4)
 
 . (Join-Path $PSScriptRoot 'lib.ps1')
+$Script:TestEntryAst=$MyInvocation.MyCommand.ScriptBlock.Ast
 
 if (-not (Test-Admin)) { Write-Color 'Нужны права администратора. Запускайте через zapret.bat.' Red; exit 1 }
 if (Test-AutotuneRunning) {
@@ -341,6 +342,13 @@ function Get-TestProbeDeadline([ValidateRange(6000,1800000)][int]$LifetimeMs){
 
 function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final, [ValidateRange(1000,1800000)][int]$LifetimeMs = 120000) {
     Assert-BypassControlAllowed
+    if($null -ne $Script:TestRunSnapshot){
+        return Invoke-RunSnapshotScope $Script:TestRunSnapshot $Settings { Start-TestInstanceCore $Settings $Alt -Final:$Final -LifetimeMs $LifetimeMs }
+    }
+    return Start-TestInstanceCore $Settings $Alt -Final:$Final -LifetimeMs $LifetimeMs
+}
+function Start-TestInstanceCore([hashtable]$Settings, [string]$Alt, [switch]$Final, [ValidateRange(1000,1800000)][int]$LifetimeMs = 120000) {
+    Assert-BypassControlAllowed
     $cmd = if ($Final) { Get-BypassCmdLine -Settings $Settings -Name 'final-check' -Alt $Alt }
            else { Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any' }
     $guard = "--lua-init=timer_set('test_lifetime_guard',function() os.exit(3) end," + $LifetimeMs.ToString([Globalization.CultureInfo]::InvariantCulture) + ',true)'
@@ -349,6 +357,7 @@ function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final, 
     for ($try = 1; $try -le 3; $try++) {
         Assert-BypassControlAllowed
         $p = Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden -PassThru
+        if($null -ne $Script:TestRunSnapshot){Add-RunSnapshotProcess $Script:TestRunSnapshot $p}
         Start-Sleep -Seconds 2
         if (-not $p.HasExited) { return $p }
         Start-Sleep -Milliseconds 700
@@ -476,6 +485,7 @@ function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFi
     $planFile=$base+'.plan.json';$journalFile=$base+'.attempts.jsonl';$resultFile=$base+'.result.json'
     foreach ($path in @($planFile,$journalFile,$resultFile)) { if (Test-Path -LiteralPath $path) { throw 'Такой RunId уже существует; свидетельства не перезаписаны.' } }
     Write-FinalistArtifact $planFile ($Plan | ConvertTo-Json -Depth 8)
+    if($null -ne $Script:TestRunSnapshot){Write-FinalistArtifact ($base+'.snapshot.json') ((Get-RunSnapshotSummary $Script:TestRunSnapshot)|ConvertTo-Json -Compress)}
     Write-FinalistArtifact $journalFile ''
     $metadata=@{RunId=$Plan.RunId;Seed=$Plan.Seed;Sequence=0;Round=0;NetworkKey=$Plan.CapturedNetworkKey;InputsHash=$Plan.CapturedInputsHash}
     foreach ($slot in $Plan.Slots) {
@@ -524,6 +534,7 @@ function Invoke-FinalistExperiment([hashtable]$Settings,$Targets,[string]$PostFi
     }
     $evidence=@([IO.File]::ReadLines($journalFile) | ForEach-Object { $_ | ConvertFrom-Json })
     # Published only after every slot's liveness/context check and PID cleanup succeeded.
+    Assert-TestRunSnapshotCurrent
     $completion=New-FinalistCompletion $Plan $evidence
     $line=($completion | ConvertTo-Json -Compress)+"`n"
     if ((Get-Item -LiteralPath $journalFile).Length+[Text.Encoding]::UTF8.GetByteCount($line) -gt 67108864) { throw 'Недостаточно места в бюджете журнала для подтверждения завершения.' }
@@ -585,6 +596,21 @@ $wasRunning = @(Get-OurProcesses).Count -gt 0
 $p = $null
 try {
     Stop-Bypass
+    Update-RuntimeLists | Out-Null
+    $loadedCode=Get-LoadedPackageCodeSnapshot $Script:TestEntryAst 'tools/test.ps1'
+    if($null -eq $loadedCode){throw 'Не удалось подтвердить загруженный код теста. Откройте меню заново.'}
+    $Script:TestRunSnapshot=Get-RunSnapshot $settings $targets (Get-NetworkObservation) -RequireSavedSettings -ExpectedCode $loadedCode
+    $settings=Get-RunSnapshotSettings $Script:TestRunSnapshot
+    $targets=@(Get-RunSnapshotTargets $Script:TestRunSnapshot)
+    $postFile=Get-RunSnapshotPostFile $Script:TestRunSnapshot
+    $snapshotSummary=Get-RunSnapshotSummary $Script:TestRunSnapshot
+    $report.Add('Снимок входных данных: '+$snapshotSummary.ConfigHash+'; файлов: '+$snapshotSummary.FileCount)
+    if($comparisonMode){
+        foreach($id in @($CompareA,$CompareB)){
+            $dry=Invoke-RunSnapshotScope $Script:TestRunSnapshot $comparisonSpec.Settings {Test-ConfigDry $comparisonSpec.Settings $id -NoAuto}
+            if(-not $dry.Ok){throw ('Конфигурация снимка отклонена: '+$dry.Output)}
+        }
+    }
     if ($comparisonMode) {
         Write-Color ('Фиксированные стратегии, автосмена выключена: A='+$comparisonSpec.AName+'; B='+$comparisonSpec.BName+'.') Cyan
         $comparison=Invoke-FinalistExperiment $comparisonSpec.Settings $targets $postFile $comparisonSpec.Plan $comparisonSpec.Parameters $comparisonSpec.Network ([ref]$p)
@@ -594,7 +620,6 @@ try {
         exit 0
     }
     Enable-TcpTimestamps
-    Update-RuntimeLists | Out-Null
 
     # IPv6 провайдера (без обхода): у некоторых провайдеров часть сетей не отвечает, отсюда "Steam не качает".
     # Пробы IPv6 и hosts идут одновременно
@@ -610,7 +635,7 @@ try {
     $report.Add($hostsText)
 
     # быстрый проверяет и круги целиком, полный - вообще всё: выпавшая из круга стратегия может в него вернуться
-    $strategies = @(Get-TestStrategies -Full:$Full)
+    $strategies = @(Invoke-RunSnapshotScope $Script:TestRunSnapshot $settings {Get-TestStrategies -Full:$Full})
     $testLifetimeMs = Get-TestInstanceLifetimeMs $targets.Count $Parallel $TimeoutSec
     $networkBefore = Get-NetworkObservation
     $resultContext = Get-TestResultContext $settings $networkBefore
@@ -624,15 +649,16 @@ try {
     $orderIds = @(Get-AllStrategiesOrdered | ForEach-Object { $_.Id })
     # Windows могла перезапустить службу после сбоя при остановке - тестовый winws2 с тем же фильтром не запустится
     if (@(Get-OurProcesses).Count) { Stop-Bypass }
-    $dry = Test-ConfigDry $settings $strategies[0].Id -NoAuto -IpsetMode 'any'
+    $dry = Invoke-RunSnapshotScope $Script:TestRunSnapshot $settings {Test-ConfigDry $settings $strategies[0].Id -NoAuto -IpsetMode 'any'}
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; exit 1 }
+    Assert-TestRunSnapshotCurrent
 
     if ($Seed -lt 0) { $Seed=Get-Random -Minimum 0 -Maximum ([int]::MaxValue) }
     $measurementOrder=New-TestMeasurementOrder $strategies $Rounds $Seed
     $measurementId=[guid]::NewGuid().ToString('N')
     $journalFile=Join-Path $Script:Runtime ('test-attempts-'+(Get-Date -Format 'yyyyMMdd-HHmmss')+'-'+$measurementId.Substring(0,8)+'.jsonl')
     $metadata=@{RunId=$measurementId;Seed=$Seed;Sequence=0;Round=0;Stage='control-before';StrategyId='0';StrategyHash='';NetworkKey=$networkBefore.Key;InputsHash=$scoreInputs}
-    $orderRecord=[ordered]@{Schema=1;RunId=$measurementId;Seed=$Seed;CapturedNetworkKey=$networkBefore.Key;CapturedInputsHash=$scoreInputs;Rounds=@($measurementOrder.Rounds | ForEach-Object { [pscustomobject]@{Number=$_.Number;StrategyIds=@($_.Strategies | ForEach-Object { $_.Id })} })}
+    $orderRecord=[ordered]@{Schema=1;RunId=$measurementId;Seed=$Seed;CapturedNetworkKey=$networkBefore.Key;CapturedInputsHash=$scoreInputs;Snapshot=$snapshotSummary;Rounds=@($measurementOrder.Rounds | ForEach-Object { [pscustomobject]@{Number=$_.Number;StrategyIds=@($_.Strategies | ForEach-Object { $_.Id })} })}
     Write-TextNoBom (Join-Path $Script:Runtime ('test-order-'+$measurementId+'.json')) ($orderRecord | ConvertTo-Json -Depth 6)
     $report.Add('Порядок измерений: seed='+$Seed+'; соседние раунды в обратном порядке.')
     $report.Add('Журнал исходных попыток: '+[IO.Path]::GetFileName($journalFile))
@@ -722,6 +748,7 @@ try {
     $report.Add(('Контроль измерений: {0}; сопоставимых адресов: {1}; причины: {2}' -f $controlAssessment.Status,$controlAssessment.MatchedTargets,($controlAssessment.Reasons -join ',')))
 
     # ---------- итог ----------
+    Assert-TestRunSnapshotCurrent
     if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) {
         $changed = 'Файлы изменились во время автоподбора. Результаты не применены и не добавлены в историю; повторите проверку после завершения правок.'
         Write-Color $changed Yellow
@@ -827,6 +854,7 @@ try {
         Copy-Item $repFile (Join-Path $Script:Runtime 'test-last.txt') -Force
         exit $(if ($ReportOnly) { 0 } else { 1 })
     }
+    Assert-TestRunSnapshotCurrent
     $historySaved = Add-ScoreHistory $alts $scoreContext $scoreFingerprints
     if (-not $historySaved) {
         if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Стратегии или код изменились перед сохранением. Результаты не применены; повторите автоподбор после завершения правок.' }
@@ -907,6 +935,7 @@ try {
             Stop-Process -Id $p.Id -Force -ErrorAction Stop
             if (-not $p.WaitForExit(5000)) { throw 'Не удалось остановить итоговую проверку.' }
             $p = $null
+            Assert-TestRunSnapshotCurrent
             if (-not (Test-ScoreInputs $scoreInputs $targets $scoreParameters $scoreFingerprints -NetworkBefore $networkBefore)) { throw 'Входные файлы изменились во время итоговой проверки.' }
             if (-not (Test-TestResultContext $resultContext (Get-TestResultContext $candidate))) { throw 'Сеть или конфигурация рейтинга изменились во время итоговой проверки.' }
             if (-not $check.Ok) { throw ('Итоговая комбинация не подтверждена: ' + ($check.Failed -join ', ')) }
@@ -950,10 +979,17 @@ try {
     foreach ($x in @(Get-RingsText $settings)) { Write-Color ('Свой круг - ' + $x) Gray }
     if ($outRing.Count) { Write-Color ('Слабые на вашем провайдере, ни в один круг не входят: ' + ($outRing -join ', ')) Gray }
     if ($ReportOnly) { Write-Color 'Режим отчёта: настройки и круги не изменены.' DarkGray }
+    Stop-RunSnapshotProcesses $Script:TestRunSnapshot
+    Close-RunSnapshot $Script:TestRunSnapshot
+    $Script:TestRunSnapshot=$null
     if ($wasRunning -or $apply) { Start-Bypass | Out-Null }
 } finally {
-    if ($p -and -not $p.HasExited) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } ; Start-Sleep -Milliseconds 700 }
     try {
+        if($null -ne $Script:TestRunSnapshot){
+            Stop-RunSnapshotProcesses $Script:TestRunSnapshot
+            Close-RunSnapshot $Script:TestRunSnapshot
+            $Script:TestRunSnapshot=$null
+        }elseif($p -and -not $p.HasExited){try{Stop-Process -Id $p.Id -Force -ErrorAction Stop}catch{};Start-Sleep -Milliseconds 700}
         if ($wasRunning -and @(Get-OurProcesses).Count -eq 0) { Start-Bypass -Quiet | Out-Null }
     } finally { Exit-BypassControl }
 }

@@ -92,6 +92,7 @@ tools/netwatch.ps1
 tools/notify.ps1
 tools/processmetrics.ps1
 tools/provider-check.ps1
+tools/recipe.ps1
 tools/recovery.ps1
 tools/report.ps1
 tools/scan.ps1

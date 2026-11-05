@@ -7,7 +7,7 @@ function Test-CaptureFilter {
     )
     try{
         if(-not ('ZapretFilter.Compiler' -as [type])){
-            Add-Type -TypeDefinition ([IO.File]::ReadAllText((Join-Path $PSScriptRoot 'filtercheck.cs'))) -Language CSharp -ErrorAction Stop
+            Add-Type -TypeDefinition ([IO.File]::ReadAllText((Get-PkgPath 'tools/filtercheck.cs'))) -Language CSharp -ErrorAction Stop
         }
         $dll=Get-PkgPath 'bin/WinDivert.dll'
         $checked=if($PSCmdlet.ParameterSetName -eq 'Bytes'){[ZapretFilter.Compiler]::CheckBytes($dll,$FilterBytes)}else{[ZapretFilter.Compiler]::Check($dll,$Filter)}

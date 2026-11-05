@@ -1,5 +1,5 @@
 ﻿# Код фонового наблюдателя должен совпадать с кодом, вошедшим в подтверждённый состав.
-function Get-NetworkWatchCodeSnapshot([Management.Automation.Language.Ast]$EntryAst) {
+function Get-LoadedPackageCodeSnapshot([Management.Automation.Language.Ast]$EntryAst,[string]$RequiredEntry) {
     $sha=$null
     try{
         if($null -eq $EntryAst){return $null}
@@ -25,9 +25,13 @@ function Get-NetworkWatchCodeSnapshot([Management.Automation.Language.Ast]$Entry
             $snapshot[$name]=$hash
             $seenRoots[$name]=$ast
         }
-        if(-not $snapshot.ContainsKey('tools/netwatch.ps1')){return $null}
+        if(-not $RequiredEntry -or -not $snapshot.ContainsKey($RequiredEntry)){return $null}
         return $snapshot
     }catch{return $null}finally{if($null -ne $sha){$sha.Dispose()}}
+}
+
+function Get-NetworkWatchCodeSnapshot([Management.Automation.Language.Ast]$EntryAst) {
+    return Get-LoadedPackageCodeSnapshot $EntryAst 'tools/netwatch.ps1'
 }
 
 function Get-NetworkWatchCodeState([hashtable]$Snapshot) {

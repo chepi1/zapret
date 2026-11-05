@@ -20,6 +20,9 @@ $Script:Version     = '1.9'
 . (Join-Path $PSScriptRoot 'selection.ps1')
 . (Join-Path $PSScriptRoot 'processmetrics.ps1')
 . (Join-Path $PSScriptRoot 'comparison.ps1')
+$Script:RecipeContext=$null
+$Script:TestRunSnapshot=$null
+. (Join-Path $PSScriptRoot 'recipe.ps1')
 $Script:RingNetworkKey = 'unknown-' + [guid]::NewGuid().ToString('N')
 $Script:RingPersistAllowed = $true
 $Script:RingCompositionKey = ''
@@ -513,6 +516,13 @@ function Get-StrategyFingerprint([string]$Id) {
     if ($Id -notmatch '^\d+$') { return '' }
     try { return (Get-FileHash -LiteralPath (Join-Path $Script:StratDir ('alt' + $Id + '.txt')) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return '' }
 }
+function Get-ScoreInputFiles {
+    $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','tools/recipe.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+    foreach ($dir in @('lists','fake')) {
+        $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
+    }
+    return $files
+}
 function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}, [hashtable]$ExpectedCode = $null) {
     try {
         if (-not @($Targets).Count) { return '' }
@@ -520,10 +530,7 @@ function Get-ScoreInputsHash($Targets, [hashtable]$Parameters = @{}, [hashtable]
         $parts = @('score-inputs-v2', $Script:Version)
         $parts += @($Targets | ForEach-Object { @($_.Group,$_.Name,$_.Url) | ConvertTo-Json -Compress } | Sort-Object)
         foreach ($key in @($Parameters.Keys | Sort-Object)) { $parts += ($key + '=' + [string]$Parameters[$key]) }
-        $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
-        foreach ($dir in @('lists','fake')) {
-            $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
-        }
+        $files = @(Get-ScoreInputFiles)
         $checkedCode=0
         foreach ($file in $files) {
             $hash=(Get-FileHash -LiteralPath (Join-Path $Script:Root $file) -Algorithm SHA256 -ErrorAction Stop).Hash
@@ -798,6 +805,11 @@ function Get-AutolistText([hashtable]$Settings) {
 # разбирается через bash, которого в Windows нет. Обычно пути абсолютные; длинные команды используют --chdir и относительные пути пакета.
 
 function Get-PkgPath([string]$Rel) {
+    if($null -ne $Script:RecipeContext){
+        $relative=$Rel.Replace('\','/')
+        if($relative -eq 'lists/autohostlist.txt'){return $Script:RecipeContext.Autolist}
+        if($relative.StartsWith('runtime/',[StringComparison]::OrdinalIgnoreCase)){return Join-Path $Script:RecipeContext.Runtime $relative.Substring(8)}
+    }
     $sep = if ($Script:Root -match '^[A-Za-z]:\\') { '\' } else { '/' }
     return $Script:Root.TrimEnd('\', '/') + $sep + ($Rel -replace '[\\/]', $sep)
 }
