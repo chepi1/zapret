@@ -21,6 +21,7 @@ $steps = [ordered]@{
     'главный экран'        = { Show-Main }
     'настройки (N)'        = { Show-SettingsMenu }
     'инструменты (I)'      = { Show-ToolsMenu }
+    'уведомления (8)'      = { Show-NotificationsMenu }
     'выбор стратегии (4)'  = { Select-AltManual }
     'неизвестное действие' = { Invoke-MenuAction 'нет-такого' }
     'проверка обходов (C)'      = { Show-PcCheck }
@@ -125,11 +126,12 @@ $cmp = @((Test-NewerVersion 'v1.0.7' 'v1.0.6'), (Test-NewerVersion '1.10.4' '1.9
 Write-TextNoBom $uf "zapret2=v1.0.6`r`nFlowseal=1.10.4`r`nzapret=v9.9`r`n"
 $newer = Get-ZapretUpdate
 $all = @(Get-AllNews)
-$hdr = ''; try { $hdr = (Show-Header 6>&1 | Out-String) } catch { $hdr = 'ERROR ' + $_.Exception.Message }
+$hdr = ''; $noticeScreen=''
+try { $hdr = (Show-Header 6>&1 | Out-String);$noticeScreen=(Show-NotificationsMenu 6>&1 | Out-String) } catch { $hdr = 'ERROR ' + $_.Exception.Message }
 Write-TextNoBom $uf "zapret=v1.0`r`n"
 $older = Get-ZapretUpdate
 if ($null -ne $savedUpd) { Write-TextNoBom $uf $savedUpd } else { Remove-Item $uf -ErrorAction SilentlyContinue }
-if (-not @($cmp | Where-Object { -not $_ }).Count -and $newer -eq 'v9.9' -and $all.Count -eq 1 -and $all[0] -like 'zapret v9.9*' -and -not $older -and $hdr -match 'новая версия zapret v9\.9') {
+if (-not @($cmp | Where-Object { -not $_ }).Count -and $newer -eq 'v9.9' -and $all.Count -eq 1 -and $all[0] -like 'zapret v9.9*' -and -not $older -and $hdr -match 'Уведомлен' -and $noticeScreen -match 'новая версия zapret v9\.9') {
     Write-Host 'ok   новые версии zapret' -ForegroundColor Green
 } else { Write-Host ('FAIL новые версии zapret: cmp=' + ($cmp -join ',') + ' newer=' + $newer + ' all=' + ($all -join '; ') + ' older=' + $older) -ForegroundColor Red; $fails++ }
 # посреди игры меню спрашивает, прежде чем трогать обход; настоящий обход этого ПК тест не трогает

@@ -51,39 +51,87 @@ function Restart-IfRunning([switch]$Quiet) {
     else { Write-Color 'Настройка сохранена: заработает при следующем запуске обхода (пункт 1).' Gray }
 }
 
-# ---------- табличка меню ----------
-# Меню рисуется в двойной рамке: рамка белая, строки внутри дополняются пробелами до одной ширины, длинная строка
-# переносится по словам. Ширина внутри рамки - 64 знака: влезает самое длинное имя стратегии в строке состояния.
-function Get-BoxWidth { return 64 }
+# ---------- оформление консоли ----------
+function Get-ConsoleWidth {
+    try{if($Host.UI.RawUI.WindowSize.Width -gt 0){return $Host.UI.RawUI.WindowSize.Width}}catch{}
+    return 80
+}
+function Get-BoxWidth { return [int][math]::Max(20,[math]::Min(74,(Get-ConsoleWidth)-4)) }
+function Write-MenuAccent([string]$Text,[switch]$NoNewline) {
+    Write-Rgb $Text @(255,209,232) -Fallback White -NoNewline:$NoNewline
+}
+function Write-MenuSecondary([string]$Text,[switch]$NoNewline) {
+    Write-Rgb $Text @(223,192,255) -Fallback White -NoNewline:$NoNewline
+}
 
 function Write-BoxLine([string]$Left, [string]$Fill, [string]$Right, [string]$Title = '') {
     $w = Get-BoxWidth
+    if($Title.Length -gt $w){$Title=$Title.Substring(0,$w-1)+'…'}
     $l = [math]::Floor(($w - $Title.Length) / 2)
-    Write-Color ($Left + ($Fill * $l) + $Title + ($Fill * ($w - $Title.Length - $l)) + $Right) White
+    Write-Host ($Left + ($Fill * $l)) -ForegroundColor DarkGray -NoNewline
+    if($Title){Write-MenuAccent $Title -NoNewline}
+    Write-Host (($Fill * ($w - $Title.Length - $l)) + $Right) -ForegroundColor DarkGray
 }
-function Write-BoxTop([string]$Title = '') { Write-BoxLine '╔' '═' '╗' $Title }
-function Write-BoxSep { Write-BoxLine '╠' '═' '╣' }
-function Write-BoxBottom { Write-BoxLine '╚' '═' '╝' }
+function Write-BoxTop([string]$Title = '') { Write-BoxLine '╭' '─' '╮' $Title }
+function Write-BoxSep([string]$Title = '') { Write-BoxLine '├' '─' '┤' $(if($Title){' '+$Title+' '}else{''}) }
+function Write-BoxBottom { Write-BoxLine '╰' '─' '╯' }
 
-# Строка внутри рамки. $Rgb - свой цвет текста (светло-розовая строка состояния), иначе $Color.
+# Текст и длинные токены переносятся без потери содержимого уведомлений.
 function Write-BoxRow([string]$Text, [string]$Color = 'Gray', [int[]]$Rgb = @()) {
     $w = Get-BoxWidth
     $indent = ([regex]::Match($Text, '^\s*')).Value
+    if($indent.Length -gt $w-2){$indent=' '*($w-2)}
+    $continuation=$indent+'  '
+    if($continuation.Length -ge $w){$continuation=' '*($w-1)}
     $rows = New-Object System.Collections.Generic.List[string]
     $cur = ''
     foreach ($word in @($Text.Trim() -split '\s+')) {
-        $next = if ($cur) { $cur + ' ' + $word } else { $indent + $word }
-        if ($next.Length -gt $w - 1 -and $cur) { $rows.Add($cur); $next = $indent + '  ' + $word }
-        $cur = $next
+        $prefix=if($cur){$cur+' '}else{$indent}
+        if($prefix.Length+$word.Length -le $w){$cur=$prefix+$word;continue}
+        if($cur){$rows.Add($cur);$prefix=$continuation}
+        $rest=$word
+        while($prefix.Length+$rest.Length -gt $w){
+            $take=$w-$prefix.Length
+            $rows.Add($prefix+$rest.Substring(0,$take))
+            $rest=$rest.Substring($take);$prefix=$continuation
+        }
+        $cur=$prefix+$rest
     }
     if ($cur -or -not $rows.Count) { $rows.Add($cur) }
     foreach ($r in $rows) {
-        if ($r.Length -gt $w) { $r = $r.Substring(0, $w - 1) + '~' }
-        Write-Host '║' -ForegroundColor White -NoNewline
+        Write-Host '│' -ForegroundColor DarkGray -NoNewline
         $pad = $r + (' ' * ($w - $r.Length))
-        if ($Rgb.Count -eq 3) { Write-Rgb $pad $Rgb -NoNewline } else { Write-Host $pad -ForegroundColor $Color -NoNewline }
-        Write-Host '║' -ForegroundColor White
+        if ($Rgb.Count -eq 3) { Write-Rgb $pad $Rgb -NoNewline }
+        elseif($Color -in @('Accent','Cyan')){Write-MenuAccent $pad -NoNewline}
+        elseif($Color -eq 'DarkGray'){Write-MenuSecondary $pad -NoNewline}
+        else { Write-Host $pad -ForegroundColor $Color -NoNewline }
+        Write-Host '│' -ForegroundColor DarkGray
     }
+}
+function Write-MenuItem([string]$Key,[string]$Text,[string]$Color='Gray') {
+    Write-BoxRow (' {0,2}  {1}' -f $Key,$Text) $Color
+}
+
+function Get-MenuStatus($Processes,$Service,$Health) {
+    $procs=@($Processes|Where-Object{$null -ne $_})
+    $state=if($Service){[string]$Service.Status}else{''}
+    if($state -eq 'StartPending'){return [pscustomobject]@{State='Starting';Text='Обход запускается';Color='Accent';CanRestart=$true}}
+    if($state -eq 'StopPending'){return [pscustomobject]@{State='Stopping';Text='Обход останавливается';Color='Yellow';CanRestart=$true}}
+    if($procs.Count){
+        if($Health -and $Health.State -eq 'Partial'){return [pscustomobject]@{State='Partial';Text='Обход запущен с замечаниями';Color='Yellow';CanRestart=$true}}
+        return [pscustomobject]@{State='Running';Text='Обход запущен';Color='Green';CanRestart=$true}
+    }
+    switch($state){
+        'Running' {return [pscustomobject]@{State='Unconfirmed';Text='Служба запущена, процесс не подтверждён';Color='Yellow';CanRestart=$true}}
+    }
+    return [pscustomobject]@{State='Stopped';Text='Обход остановлен';Color='DarkGray';CanRestart=$false}
+}
+function Get-MenuStartupText($Service) {
+    if(-not $Service){return 'выкл'}
+    if($Service.PSObject.Properties['StartType']){
+        switch([string]$Service.StartType){'Automatic'{return 'с Windows'} 'Manual'{return 'вручную'} 'Disabled'{return 'отключён'}}
+    }
+    return 'служба установлена'
 }
 
 # Сколько работает обход: " 3 ч 12 мин" (пусто, если время старта процесса не прочитать)
@@ -95,67 +143,94 @@ function Get-UptimeText($Proc) {
     return (' ({0} дн {1} ч)' -f [int][math]::Floor($up.TotalDays), $up.Hours)
 }
 
-# Шапка: одна строка состояния и только то, что требует действия. Прокси и VPN - в проверке обходов (пункт 5): клиент
-# прокси для браузера многие держат включённым постоянно, и строки о нём только мешали.
-function Show-Header {
-    Clear-Host
-    $s = Get-Settings
-    $st = Get-Strategy $s.alt
-    $procs = @(Get-OurProcesses)
-    $state = @($(if ($procs.Count) { 'Обход: запущен' + (Get-UptimeText $procs[0]) } else { 'Обход: остановлен' }),
-        $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }),
-        $(if (Get-OurService) { 'автозапуск с Windows' }),
-        $(if ($s.telegram -eq 'on') { switch (Get-TgBridgeState) { 'Open' { 'Telegram' }; 'Unknown' { 'Telegram: состояние порта неизвестно' }; 'Closed' { 'Telegram: порт недоступен' }; default { 'Telegram: не запущен' } } }))
-    Write-BoxTop (' zapret v' + $Script:Version + ' ')
-    Write-BoxRow ('  ' + (@($state | Where-Object { $_ }) -join ' · ')) -Rgb @(255, 200, 220)
-    if ($procs.Count) {
-        $health = Get-ServiceHealthSummary $procs
-        Write-BoxRow ('  ' + $health.Text) $(if ($health.State -eq 'Partial') { 'Yellow' } else { 'Gray' })
-    }
+function Get-MenuNotices {
+    $notices=New-Object 'Collections.Generic.List[object]'
     $bad = @(Test-PackageIntegrity -Cached)
-    if ($bad.Count) { Write-BoxRow ('  ! Файлы zapret2 изменены (' + ($bad -join ', ') + '): обход не запустится. Скачайте сборку заново.') Red }
-    if (Test-AutotuneRunning) { Write-BoxRow '  ! Идёт автонастройка по расписанию: обход включится сам через несколько минут.' Yellow }
-    if ($Script:Root -match "[^\x21-\x7E]|'") { Write-BoxRow '  ! В пути к папке пробелы, апостроф или русские буквы - надёжнее перенести в C:\zapret' Yellow }
+    if ($bad.Count) { $notices.Add([pscustomobject]@{Title='Проверка файлов не пройдена';Text=('Изменены: '+($bad -join ', ')+'. Откройте меню заново. Если ошибка остаётся, распакуйте проверенную сборку заново.');Color='Red'}) }
+    if (Test-AutotuneRunning) { $notices.Add([pscustomobject]@{Title='Идёт автонастройка';Text='Обход включится сам после завершения проверки. Повторный автоподбор пока недоступен.';Color='Yellow'}) }
+    if ($Script:Root -match "[^\x21-\x7E]|'") { $notices.Add([pscustomobject]@{Title='Проверьте путь к папке';Text='В пути есть пробелы, апостроф или русские буквы. Для совместимости с ядром используйте короткий путь, например C:\zapret.';Color='Yellow'}) }
     $foreign = @(Get-ForeignBypass)
-    if ($foreign.Count) { Write-BoxRow ('  ! Запущен другой обход: ' + ($foreign -join ', ') + '. Пункт 1 предложит его остановить.') Yellow }
-    foreach ($b in @(Get-GameBoosters -Cached)) { Write-BoxRow ('  ! Игровой ускоритель ' + $b + ' мешает обходу: закройте его полностью.') Yellow }
+    if ($foreign.Count) { $notices.Add([pscustomobject]@{Title='Обнаружен другой обход';Text=(($foreign -join ', ')+'. Главная -> 1 предложит его остановить перед запуском этой сборки.');Color='Yellow'}) }
+    foreach ($b in @(Get-GameBoosters -Cached)) { $notices.Add([pscustomobject]@{Title=('Запущен ускоритель '+$b);Text='Ускоритель может перехватывать трафик вместе с обходом. Подробности: Главная -> 5.';Color='Yellow'}) }
     $conf = @(Get-SystemConflicts -Cached)
-    if ($conf.Count) { Write-BoxRow ('  ! Мешает обходу: ' + (($conf | ForEach-Object { ($_.Text -split '[:(]')[0].Trim() }) -join ', ') + ' - подробно в пункте 5.') Yellow }
+    if ($conf.Count) { $notices.Add([pscustomobject]@{Title='Возможные конфликты подключения';Text=((($conf | ForEach-Object{$_.Text}) -join '; ')+'. Подробности: Главная -> 5.');Color='Yellow'}) }
     $stuck = @(Get-ProxyStuckApps -Cached)
-    if ($stuck.Count) { Write-BoxRow ('  ! ' + ($stuck -join ' и ') + ' ходит через выключенный прокси и сидит без сети (в Доте нет цен, не работает "Играть"). Перезапуск - пункт 5.') Yellow }
+    if ($stuck.Count) { $notices.Add([pscustomobject]@{Title='Приложения ждут выключенный прокси';Text=(($stuck -join ' и ')+' используют прежний прокси. Проверка и перезапуск: Главная -> 5.');Color='Yellow'}) }
     $hs = Get-HostsStatus
-    if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { Write-BoxRow '  ! В hosts есть что поправить - пункт 5.' Yellow }
+    if (@($hs.Keys | Where-Object { $hs[$_].Present -and $hs[$_].Stale }).Count -or @(Get-HostsYoutube).Count) { $notices.Add([pscustomobject]@{Title='Нужна проверка hosts';Text='В hosts есть устаревшие или лишние записи. Проверить: Главная -> 5.';Color='Yellow'}) }
     $upd = Get-ZapretUpdate
-    if ($upd) { Write-BoxRow ('  ! Вышла новая версия zapret ' + $upd + ' - обновить: Настройки -> 9.') Yellow }
-    # меню обновляет списки само раз в неделю: старше трёх недель - значит, GitHub не отвечает
+    if ($upd) { $notices.Add([pscustomobject]@{Title=('Новая версия zapret '+$upd);Text=('Вышла новая версия zapret '+$upd+'. Обновить сборку: Настройки -> 9.');Color='Accent'}) }
     $age = Get-ListsAgeDays
-    if ($age -ge 21) { Write-BoxRow ('  ! Списки сайтов не обновлялись ' + $age + ' дн.: новые блокировки в них не попали. Обновить: Настройки -> 8.') Yellow }
+    if ($age -ge 21) { $notices.Add([pscustomobject]@{Title='Списки сайтов устарели';Text=('Последнее обновление '+$age+' дн. назад. Обновить: Настройки -> 8.');Color='Yellow'}) }
     $news = @(Get-UpstreamNews)
-    if ($news.Count) {
-        Write-BoxRow ('  ! Новые версии компонентов: ' + ($news -join ', ')) Yellow
-        Write-BoxRow '    Это сведения о ядре и списках. Версия кода сборки показана в заголовке.' Gray
+    if ($news.Count) { $notices.Add([pscustomobject]@{Title='Есть обновления компонентов';Text=(($news -join ', ')+'. Это версии ядра и списков; версия кода сборки указана в заголовке.');Color='Accent'}) }
+    return $notices.ToArray()
+}
+function Get-MenuSnapshot {
+    $s=Get-Settings;$strategy=Get-Strategy $s.alt;$procs=@(Get-OurProcesses);$service=Get-OurService
+    $health=if($procs.Count){Get-ServiceHealthSummary $procs}else{$null}
+    $telegram=if($s.telegram -eq 'on'){switch(Get-TgBridgeState){'Open'{'мост доступен'} 'Unknown'{'статус неизвестен'} 'Closed'{'мост недоступен'} default{'мост не запущен'}}}else{'выключен'}
+    return [pscustomobject]@{Settings=$s;StrategyName=$(if($strategy){$strategy.Name}else{'ALT'+$s.alt+' (файл не найден)'});Processes=$procs;Service=$service;Startup=(Get-MenuStartupText $service);Health=$health;Status=(Get-MenuStatus $procs $service $health);Telegram=$telegram;Notices=@(Get-MenuNotices)}
+}
+function Show-Header([string]$Screen='Главная',[switch]$HideNoticeSummary) {
+    Clear-Host
+    $Script:MenuView=Get-MenuSnapshot;$view=$Script:MenuView
+    Write-BoxTop (' zapret v'+$Script:Version+' ')
+    $uptime=if($view.Processes.Count){Get-UptimeText $view.Processes[0]}else{''}
+    Write-BoxRow ('  '+$view.Status.Text+$uptime) $view.Status.Color
+    Write-BoxRow ('  Стратегия: '+$view.StrategyName+' · автосмена '+$(if($view.Settings.auto -eq 'on'){'вкл'}else{'выкл'})) White
+    Write-BoxRow ('  Автозапуск: '+$view.Startup+' · Telegram: '+$view.Telegram)
+    if($view.Health){
+        $healthText=if($view.Health.State -eq 'Unknown'){'Доступность сервисов не проверена · Главная -> 5'}else{$view.Health.Text}
+        Write-BoxRow ('  '+$healthText) $(if($view.Health.State -eq 'Partial'){'Yellow'}else{'DarkGray'})
     }
-    Write-BoxSep
+    if($view.Notices.Count -and -not $HideNoticeSummary){
+        Write-BoxRow ('  ! '+$view.Notices[0].Title) $view.Notices[0].Color
+        Write-BoxRow ('  Уведомлений: '+$view.Notices.Count+' · открыть все: Главная -> 8') DarkGray
+    }
+    Write-BoxSep $Screen.ToUpperInvariant()
 }
 
 # Главный экран - только то, что нужно каждый день. Остальное - в "Настройках" и "Инструментах". На каждом экране
 # свои номера по порядку, 0 - назад (на главном - выход).
 function Show-Main {
-    Write-BoxRow '  1. Запустить / перезапустить обход'
-    Write-BoxRow '  2. Остановить обход'
-    Write-BoxRow '  3. Автоподбор стратегии'
-    Write-BoxRow '  4. Выбрать стратегию вручную'
-    Write-BoxRow '  5. Проверка обходов'
+    $variable=Get-Variable MenuView -Scope Script -ErrorAction SilentlyContinue
+    $view=if($variable){$variable.Value}else{Get-MenuSnapshot}
+    Write-BoxRow '  УПРАВЛЕНИЕ' DarkGray
+    Write-MenuItem '1' $(if($view.Status.CanRestart){'Перезапустить обход'}else{'Запустить обход'}) White
+    Write-MenuItem '2' 'Остановить обход'
+    Write-MenuItem '3' 'Автоподбор стратегии'
+    Write-MenuItem '4' 'Выбрать стратегию вручную'
+    Write-MenuItem '5' 'Проверка подключения и конфликтов'
     Write-BoxSep
-    Write-BoxRow '  6. Настройки'
-    Write-BoxRow '  7. Инструменты: трекер, пинг, отчёты'
-    Write-BoxRow '  0. Выход'
+    Write-MenuItem '6' 'Настройки'
+    Write-MenuItem '7' 'Инструменты: трекер, пинг, отчёты'
+    Write-MenuItem '8' ('Уведомления'+$(if($view.Notices.Count){' ('+$view.Notices.Count+')'}else{''})) $(if($view.Notices.Count){'Accent'}else{'Gray'})
+    Write-BoxRow ''
+    Write-MenuItem '0' 'Выйти из меню' DarkGray
     Write-BoxBottom
+}
+function Show-NotificationsMenu {
+    while($true){
+        Show-Header -Screen 'Уведомления' -HideNoticeSummary
+        if(-not $Script:MenuView.Notices.Count){Write-BoxRow '  Сейчас нет уведомлений.'}
+        foreach($notice in $Script:MenuView.Notices){
+            Write-BoxRow ('  '+$notice.Title) $notice.Color
+            Write-BoxRow ('    '+$notice.Text)
+            Write-BoxRow ''
+        }
+        Write-BoxRow ('  Сборка v'+$Script:Version+' · ядро zapret2 '+$Script:CoreManifest.Tag) DarkGray
+        Write-BoxSep
+        Write-MenuItem '0' 'Назад'
+        Write-BoxBottom
+        $choice=(Read-Host 'Выбор').Trim()
+        if(-not $choice -or $choice -eq '0'){return}
+    }
 }
 
 function Show-SettingsMenu {
     while ($true) {
-        Show-Header
+        Show-Header -Screen 'Настройки'
         $s = Get-Settings
         $st = Get-Strategy $s.alt
         $svc = Get-OurService
@@ -164,21 +239,23 @@ function Show-SettingsMenu {
             $game += $(if ($s.gametcp -eq $Script:GamePortsPreset.tcp -and $s.gameudp -eq $Script:GamePortsPreset.udp) { ', только порты игр' } else { ', свои порты' })
         }
         $tune = if (-not (Get-AutotuneTask)) { 'выкл' } elseif ((Get-AutotuneText) -match 'другой папки') { '! задача от другой папки' } else { 'раз в неделю' }
-        Write-BoxRow ' Настройки' Cyan
-        Write-BoxRow ('  1. Стратегия: ' + $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }))
-        Write-BoxRow ('  2. Автосмена при сбое: ' + $(if ($s.auto -eq 'on') { 'вкл' } else { 'выкл' }))
-        Write-BoxRow ('  3. Game Filter: ' + $game)
-        Write-BoxRow ('  4. IPSet: ' + $s.ipset)
-        Write-BoxRow ('  5. Автосписок сайтов: ' + $(if ($s.autolist -ne 'on') { 'выкл' } else { 'вкл, сайтов: ' + @(Get-AutolistDomains).Count }))
-        Write-BoxRow ('  6. Автозапуск с Windows: ' + $(if (-not $svc) { 'нет' } elseif ($svc.Status -eq 'Running') { 'служба работает' } else { 'служба (' + $svc.Status + ')' }))
-        Write-BoxRow ('  7. Автонастройка по расписанию: ' + $tune)
-        Write-BoxRow '  8. Обновить списки'
+        $ipsetText=switch($s.ipset){'loaded'{'по IP-спискам'} 'any'{'все IP'} 'none'{'выключен'} default{$s.ipset}}
+        Write-BoxRow '  ПОДКЛЮЧЕНИЕ' DarkGray
+        Write-MenuItem '1' ('Стратегия: ' + $(if ($st) { $st.Name } else { 'ALT' + $s.alt + ' (нет файла!)' }))
+        Write-MenuItem '2' ('Автосмена при сбое: ' + $(if ($s.auto -eq 'on') { 'вкл' } else { 'выкл' }))
+        Write-MenuItem '3' ('Game Filter: ' + $game)
+        Write-MenuItem '4' ('IPSet: ' + $ipsetText)
+        Write-MenuItem '5' ('Автосписок сайтов: ' + $(if ($s.autolist -ne 'on') { 'выкл' } else { 'вкл, сайтов: ' + @(Get-AutolistDomains).Count }))
+        Write-BoxSep 'ПРИЛОЖЕНИЕ'
+        Write-MenuItem '6' ('Автозапуск: ' + (Get-MenuStartupText $svc))
+        Write-MenuItem '7' ('Автонастройка по расписанию: ' + $tune)
+        Write-MenuItem '8' 'Обновить списки'
         $upd = Get-ZapretUpdate
-        Write-BoxRow ('  9. Обновить zapret: у вас ' + $Script:Version + $(if ($upd) { ', вышла ' + $upd } else { '' }))
-        Write-BoxRow ('  10. Уведомления Windows: ' + $(if (Test-NotifyEnabled $s) { 'вкл' } else { 'выкл' }))
-        Write-BoxRow '  11. Удалить zapret из Windows (перед удалением папки)'
+        Write-MenuItem '9' ('Обновить zapret: у вас ' + $Script:Version + $(if ($upd) { ', вышла ' + $upd } else { '' }))
+        Write-MenuItem '10' ('Уведомления Windows: ' + $(if (Test-NotifyEnabled $s) { 'вкл' } else { 'выкл' }))
+        Write-MenuItem '11' 'Удалить zapret из Windows' DarkGray
         Write-BoxSep
-        Write-BoxRow '  0. Назад'
+        Write-MenuItem '0' 'Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
@@ -189,20 +266,21 @@ function Show-SettingsMenu {
 
 function Show-ToolsMenu {
     while ($true) {
-        Show-Header
-        Write-BoxRow ' Инструменты' Cyan
-        Write-BoxRow '  1. Трекер: где сервер матча, пинг, голос Discord'
-        Write-BoxRow '  2. Сканер адресов игры'
-        Write-BoxRow '  3. Проверка провайдера (отчёт, чтобы переслать)'
-        Write-BoxRow '  4. Отчёт: настройки и логи одним файлом'
-        Write-BoxRow '  5. Диагностика: winws2 в видимом окне'
-        Write-BoxRow '  6. Исключить игру из обхода (по последнему трекеру)'
-        Write-BoxRow '  7. Правила "напрямую" для Happ (Steam, Discord, игры)'
-        Write-BoxRow '  8. Telegram: встроенный мост (без VPN и программ)'
-        Write-BoxRow '  9. Discord не запускается: очистить кэш'
-        Write-BoxRow '  10. Пинг до игровых серверов'
+        Show-Header -Screen 'Инструменты'
+        Write-BoxRow '  ДИАГНОСТИКА И ОТЧЁТЫ' DarkGray
+        Write-MenuItem '1' 'Трекер матча: сервер, пинг, Discord'
+        Write-MenuItem '2' 'Сканер адресов игры'
+        Write-MenuItem '3' 'Отчёт о провайдере'
+        Write-MenuItem '4' 'Настройки и логи одним файлом'
+        Write-MenuItem '5' 'Диагностика: winws2 в видимом окне'
+        Write-BoxSep 'ПОДКЛЮЧЕНИЕ И ПРИЛОЖЕНИЯ'
+        Write-MenuItem '6' 'Исключить игру по последнему трекеру'
+        Write-MenuItem '7' 'Правила «напрямую» для Happ'
+        Write-MenuItem '8' 'Мост Telegram'
+        Write-MenuItem '9' 'Очистить кэш Discord'
+        Write-MenuItem '10' 'Проверить задержку подключения'
         Write-BoxSep
-        Write-BoxRow '  0. Назад'
+        Write-MenuItem '0' 'Назад'
         Write-BoxBottom
         $c = (Read-Host 'Выбор').Trim().ToUpper()
         if (-not $c -or $c -eq '0') { return }
@@ -229,9 +307,9 @@ function Start-TelegramWithBypass {
     }
     if ($s.telegram -or -not (Test-TelegramDesktop)) { return }
     Write-Host ''
-    Write-Color 'Telegram у нас режут по адресам его серверов: без VPN он тормозит или не грузит фото и видео.' Cyan
-    Write-Color 'Обход это не лечит, а встроенный мост zapret - лечит: Telegram Desktop ходит через него, а мост - через' Cyan
-    Write-Color 'веб-версию Telegram, которую не режут. Ничего не скачивается; мост работает с входа в Windows.' Cyan
+    Write-MenuAccent 'Telegram у нас режут по адресам его серверов: без VPN он тормозит или не грузит фото и видео.'
+    Write-MenuAccent 'Обход это не лечит, а встроенный мост zapret - лечит: Telegram Desktop ходит через него, а мост - через'
+    Write-MenuAccent 'веб-версию Telegram, которую не режут. Ничего не скачивается; мост работает с входа в Windows.'
     if (Read-YesNo 'Включить мост Telegram?') {
         if (Set-TelegramMode $true) { Write-Color 'Telegram: мост работает.' Green; Connect-TgDesktop }
         else { Write-Color 'Мост не запустился: Инструменты -> 8.' Yellow }
@@ -346,7 +424,7 @@ function Show-Autolist {
     $file = Get-PkgPath $Script:AutolistFile
     $doms = @(Get-AutolistDomains)
     Write-Host ''
-    Write-Color ('Автосписок сайтов: ' + (Get-AutolistText $s)) Cyan
+    Write-MenuAccent ('Автосписок сайтов: ' + (Get-AutolistText $s))
     Write-Color 'Сюда zapret2 сам дописывает сайты вне списков, которые 3 раза подряд за минуту не открылись' Gray
     Write-Color '(замерзание на 16-20 КБ, сброс от DPI). Дальше такие сайты идут через обход.' Gray
     Write-Color 'Если сюда попал сайт, который просто лежал, - не страшно, обход ему обычно не мешает. Лишнее можно удалить.' Gray
@@ -388,13 +466,13 @@ function Show-Autolist {
 }
 
 function Update-Lists {
-    Write-Color ('Скачиваю свежие списки Flowseal (' + $Script:FlowsealRaw + '):') Cyan
+    Write-MenuAccent ('Скачиваю свежие списки Flowseal (' + $Script:FlowsealRaw + '):')
     $res = @(Update-FlowsealLists)
     foreach ($u in $res) { Write-Color ('  ' + $u.Text) $(if (-not $u.Ok) { 'Red' } elseif ($u.Changed) { 'Green' } else { 'Gray' }) }
     if (@($res | Where-Object { $_.Changed }).Count) {
         Write-Color 'Старые версии сохранены рядом (.bak). winws2 сам перечитает списки, перезапуск не нужен.' Gray
     }
-    Write-Color 'Проверяю новые версии zapret, zapret2 и Flowseal...' Cyan
+    Write-MenuAccent 'Проверяю новые версии zapret, zapret2 и Flowseal...'
     if (Update-UpstreamCheck -Force) {
         $upd = Get-ZapretUpdate
         $news = @(Get-UpstreamNews)
@@ -412,7 +490,7 @@ function Update-Lists {
 function Update-ZapretMenu {
     Write-Host ''
     if (Test-Path (Join-Path $Script:Root '.git')) { Write-Color 'Это папка с исходниками (есть .git): обновляйте её через git pull.' Yellow; Pause-Menu; return }
-    Write-Color 'Узнаю последнюю версию на GitHub...' Cyan
+    Write-MenuAccent 'Узнаю последнюю версию на GitHub...'
     $rel = Get-ZapretRelease
     if (-not $rel) { Write-Color ('  GitHub не ответил. Скачать можно вручную: https://github.com/' + $Script:SelfRepo + '/releases') Yellow; Pause-Menu; return }
     if (-not (Test-NewerVersion $rel.Tag $Script:Version)) { Write-Color ('  У вас последняя версия: zapret ' + $Script:Version + '.') Green; Pause-Menu; return }
@@ -428,7 +506,7 @@ function Update-ZapretMenu {
 
 function Clear-DiscordMenu {
     Write-Host ''
-    Write-Color 'Очистка кэша Discord (как у Flowseal): помогает, если Discord не запускается, висит на загрузке или на обновлении.' Cyan
+    Write-MenuAccent 'Очистка кэша Discord (как у Flowseal): помогает, если Discord не запускается, висит на загрузке или на обновлении.'
     Write-Color 'Discord закроется. Вход, настройки и сообщения останутся - удаляются только папки кэша.' Gray
     if (-not (Read-YesNo 'Очистить?')) { return }
     $res = @(Clear-DiscordCache)
@@ -454,10 +532,10 @@ function Connect-TgDesktop {
 
 function Show-TelegramMenu {
     while ($true) {
-        Show-Header
+        Show-Header -Screen 'Telegram'
         $on = (Get-Settings).telegram -eq 'on'
         $state = if (-not $on) { 'выключен' } elseif (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' }
-        Write-BoxRow ' Telegram: встроенный мост' Cyan
+        Write-BoxRow ' Telegram: встроенный мост' Accent
         Write-BoxRow '  Telegram Desktop ходит через мост на этом ПК, а мост - через веб-версию Telegram, которую не режут. Ничего не скачивается.' Gray
         Write-BoxRow ('  Сейчас: ' + $state) Gray
         Write-BoxRow ('  1. ' + $(if ($on) { 'Выключить' } else { 'Включить: работает с входа в Windows и сам поднимается, если закрылся' }))
@@ -499,7 +577,7 @@ function Export-DirectRules {
     $copied = $false
     try { Set-Clipboard -Value (@($text | Where-Object { $_ -like 'domain:*' }) -join "`r`n"); $copied = $true } catch { }
     Write-Host ''
-    Write-Color 'Правила "напрямую" для Happ и других прокси: Steam, Discord и игры мимо прокси, их обрабатывает обход.' Cyan
+    Write-MenuAccent 'Правила "напрямую" для Happ и других прокси: Steam, Discord и игры мимо прокси, их обрабатывает обход.'
     foreach ($g in $Script:DirectDomains.Keys) { Write-Color ('  ' + $g + ': ' + ($Script:DirectDomains[$g] -join ', ')) Gray }
     Write-Color ('Полный список (домены и сети серверов игр) - на рабочем столе: ' + (Split-Path -Leaf $file)) Green
     if ($copied) { Write-Color 'Домены с приставкой domain: уже скопированы - вставьте их в прямые (direct) домены маршрутизации Happ.' Green }
@@ -514,7 +592,7 @@ function Toggle-Notify {
         if (Read-YesNo 'Уведомления включены. Выключить?') { $s.notify = 'off'; Save-Settings $s; Sync-UserTask $s | Out-Null; Write-Color 'Уведомления выключены.' Green }
         Pause-Menu; return
     }
-    Write-Color 'Уведомления Windows (раз в 5 минут, без окон, от имени вашей учётной записи):' Cyan
+    Write-MenuAccent 'Уведомления Windows (раз в 5 минут, без окон, от имени вашей учётной записи):'
     Write-Color '  - служба обхода остановилась и не поднялась сама;' Gray
     Write-Color '  - Steam или Discord запущены при включённом прокси и после его выключения остались без сети;' Gray
     Write-Color '  - вышла новая версия zapret; автонастройка обновила круги или списки.' Gray
@@ -533,7 +611,7 @@ function Toggle-Autotune {
     Write-Host ''
     $task = Get-AutotuneTask
     if ($task) {
-        Write-Color ('Автонастройка: ' + (Get-AutotuneText)) Cyan
+        Write-MenuAccent ('Автонастройка: ' + (Get-AutotuneText))
         $log = Join-Path $Script:Runtime 'autotune.log'
         if (Test-Path $log) {
             Write-Color 'Последние записи журнала (runtime\autotune.log):' DarkGray
@@ -547,7 +625,7 @@ function Toggle-Autotune {
         }
         Pause-Menu; return
     }
-    Write-Color 'Автонастройка по расписанию (планировщик заданий Windows):' Cyan
+    Write-MenuAccent 'Автонастройка по расписанию (планировщик заданий Windows):'
     Write-Color ('  - раз в неделю сама запускает полный автоподбор (все стратегии) и обновляет круги автосмены (основную не меняет);') Gray
     Write-Color ('  - раз в месяц скачивает свежие списки Flowseal (сети ipset-all и домены), раз в неделю узнаёт о новых версиях;') Gray
     Write-Color '  - только когда ПК простаивает (ночью или пока вас нет), обход выключается на ~10 минут теста и включается обратно;' Gray
@@ -566,7 +644,7 @@ function Toggle-Service {
         Write-Color 'Служба удалена, обход остановлен.' Green
     } else {
         if (-not (Resolve-ForeignBypass)) { Write-Color 'Служба не установлена: сначала остановите другой обход.' Red; Pause-Menu; return }
-        Write-Color 'Ставлю службу: обход будет включаться сам при старте Windows...' Cyan
+        Write-MenuAccent 'Ставлю службу: обход будет включаться сам при старте Windows...'
         if (Install-BypassService) { Write-Color 'Служба установлена и запущена.' Green }
         else { Write-Color 'Автозапуск с Windows не включён.' Yellow }
     }
@@ -584,7 +662,7 @@ function Exclude-TrackedGame {
         Pause-Menu; return
     }
     if (-not $t.Nets.Count) { Write-Color ('В последнем трекере ({0}, {1}) обход не трогал ни одного адреса - исключать нечего.' -f $t.App, $t.Started) Green; Pause-Menu; return }
-    Write-Color ('По последнему трекеру ({0}, {1}) обход трогает сети:' -f $t.App, $t.Started) Cyan
+    Write-MenuAccent ('По последнему трекеру ({0}, {1}) обход трогает сети:' -f $t.App, $t.Started)
     foreach ($n in $t.Nets) { Write-Host ('  ' + $n) }
     Write-Color 'Исключайте, только если игра с обходом работает хуже, чем без него: не находит матч, вылетает, ругается античит.' Gray
     if ($t.App -like 'NBA2K*') { Write-Color 'Для NBA 2K27 не стоит: её серверы на AWS без обхода замерзают на 16-20 КБ, и игра выкидывает из матча.' Yellow }
@@ -609,11 +687,11 @@ function Start-Diagnostics {
     $dbg = Read-YesNo 'Писать подробный лог в runtime\debug.log?'
     $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
     $a = '-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $PSScriptRoot 'diag.ps1') + '"' + $(if ($dbg) { ' -DebugLog' } else { '' })
-    Write-Color 'Диагностика выполняется в отдельном окне; закройте его для продолжения.' Cyan
+    Write-MenuAccent 'Диагностика выполняется в отдельном окне; закройте его для продолжения.'
     Assert-BypassControlAllowed
     Start-Process -Wait -FilePath $ps -ArgumentList $a -WorkingDirectory $Script:Root
-    Write-Color 'Открыл окно winws2. Если в нём ошибка, по ней видно, что мешает (антивирус, другой обход, файлы).' Cyan
-    Write-Color 'Для обычной работы закройте то окно и запустите обход пунктом 1.' Cyan
+    Write-MenuAccent 'Открыл окно winws2. Если в нём ошибка, по ней видно, что мешает (антивирус, другой обход, файлы).'
+    Write-MenuAccent 'Для обычной работы закройте то окно и запустите обход пунктом 1.'
     Pause-Menu
 
     } finally { Exit-BypassControl }
@@ -637,7 +715,7 @@ function Show-PcCheck {
     $healthIdentity = Get-BypassIdentity @(Get-OurProcesses)
     $healthNetwork = Get-NetworkObservation -Machine
     $svcJobs = Start-ServiceProbes
-    Write-Color '1/5 Подключение' Cyan
+    Write-MenuAccent '1/5 Подключение'
     Show-ConnectionCheck | Out-Null
     $foreign = @(Get-ForeignBypass)
     if ($foreign.Count) {
@@ -688,7 +766,7 @@ function Show-PcCheck {
         if ($via.Count) { Write-Color ('  ' + ($via -join ' и ') + ' сейчас ходит через прокси. Выключите прокси - перезапустите ' + $(if ($via.Count -gt 1) { 'их' } else { 'его' }) + ', иначе останется без сети.') Gray }
     }
 
-    Write-Color '2/5 Сервисы - открываются ли прямо сейчас' Cyan
+    Write-MenuAccent '2/5 Сервисы - открываются ли прямо сейчас'
     $svcOn = @(Get-OurProcesses).Count -gt 0
     if (-not $svcOn) { Write-Color '  (обход остановлен - проверка без него)' Gray }
     $svcRows = @(Get-ServiceProbeResults $svcJobs)
@@ -701,7 +779,7 @@ function Show-PcCheck {
     if ($svcBad.Count -and $svcOn) { Write-Color ('  ! Не открываются: ' + ($svcBad -join ', ') + '. Провайдер мог сменить блокировку - автоподбор (пункт 3) найдёт стратегию, которая пробивает.') Yellow }
     elseif ($svcBad.Count) { Write-Color '  Обход остановлен: включите его пунктом 1.' Yellow }
 
-    Write-Color '3/5 IPv6 (~6 с)' Cyan
+    Write-MenuAccent '3/5 IPv6 (~6 с)'
     $v6 = Get-Ipv6Report $v6Jobs
     $v6Bad = $v6.Broken.Count -and -not $v6.PreferV4
     Write-Color ('  ' + $v6.Text) $(if ($v6Bad) { 'Yellow' } else { 'Gray' })
@@ -710,7 +788,7 @@ function Show-PcCheck {
         Add-Fix 'Вернуть стандартный порядок Windows (сначала IPv6): сейчас IPv6 везде отвечает, "предпочитать IPv4" не нужно' { Set-PreferIpv4 $false }
     }
 
-    Write-Color '4/5 hosts: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal, серверы игр' Cyan
+    Write-MenuAccent '4/5 hosts: GitHub, Telegram и Discord по адресу из DNS и по адресу Flowseal, серверы игр'
     if ($vpnOn) {
         Write-Color '  ! Включён VPN: через туннель проверка проходит на любом адресе, поэтому hosts и закрепление серверов игр не проверяю и не меняю. Выключите VPN и запустите проверку снова.' Yellow
     } else {
@@ -770,7 +848,7 @@ function Show-PcCheck {
         }
     }
 
-    Write-Color '5/5 Автосписок сайтов' Cyan
+    Write-MenuAccent '5/5 Автосписок сайтов'
     $ips = @(Get-AutolistIps)
     Write-Color ('  ' + (Get-AutolistText (Get-Settings))) Gray
     if ($ips.Count) {
@@ -981,6 +1059,7 @@ while ($true) {
         '5' { Invoke-MenuAction 'check' }
         '6' { Show-SettingsMenu }
         '7' { Show-ToolsMenu }
+        '8' { Show-NotificationsMenu }
         default {
             if (@('N', 'Т') -contains $c) { Show-SettingsMenu }
             elseif (@('I', 'Ш') -contains $c) { Show-ToolsMenu }

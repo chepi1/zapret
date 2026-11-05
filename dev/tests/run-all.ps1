@@ -13,6 +13,7 @@ $tests = @('astlint', 'check', 'lintstrat', 'profiletest', 'capturetest', 'dryst
 $tests += @('hostcachetest','watchcodetest','restarttest','filtertest','buildtest','settingstest','migrationtest','convertertest','updatearchivetest','tgproxytest')
 $tests += @('recipetest','reciperuntest')
 $tests += @('integritytest')
+$tests += @('menutest')
 if (-not $Offline) { $tests += @('liststest', 'hoststest', 'tgtest') }
 $ps = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
 $failed = @()
