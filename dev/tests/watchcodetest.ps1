@@ -12,6 +12,24 @@ if($helper){
     $entry=[Management.Automation.Language.Parser]::ParseFile($watch,[ref]$tokens,[ref]$errors)
     $snapshot=Get-NetworkWatchCodeSnapshot $entry
     Check 'snapshot pins entry library and observation implementation' ($snapshot.ContainsKey('tools/netwatch.ps1') -and $snapshot.ContainsKey('tools/lib.ps1') -and $snapshot.ContainsKey('tools/netstate.ps1') -and $snapshot.ContainsKey('tools/watchcode.ps1'))
+    # Installed module catalogs may advertise functions that this session never loaded.
+    $catalogPath=Join-Path $Pkg 'tools/unloaded-catalog-fixture.ps1'
+    [IO.File]::WriteAllText($catalogPath,'function UnloadedCatalogFixture { return 1 }',(New-Object Text.UTF8Encoding($true)))
+    $catalogAst=[Management.Automation.Language.Parser]::ParseFile($catalogPath,[ref]$null,[ref]$null)
+    $catalogFunction=$catalogAst.Find({$args[0] -is [Management.Automation.Language.FunctionDefinitionAst]},$true)
+    $script:catalogOnlyCommand=[pscustomobject]@{ScriptBlock=$catalogFunction.Body.GetScriptBlock()}
+    $script:loadedFunctionCommands=@(Microsoft.PowerShell.Core\Get-Command -CommandType Function -ListImported)
+    function Get-Command {
+        [CmdletBinding()]param([Management.Automation.CommandTypes]$CommandType,[switch]$ListImported)
+        $script:loadedFunctionCommands
+        if(-not $ListImported){$script:catalogOnlyCommand}
+    }
+    try{
+        $loadedOnly=Get-NetworkWatchCodeSnapshot $entry
+        $same=$null -ne $loadedOnly -and $loadedOnly.Count -eq $snapshot.Count
+        foreach($name in $snapshot.Keys){if($null -eq $loadedOnly -or $loadedOnly[$name] -cne $snapshot[$name]){$same=$false}}
+        Check 'installed but unloaded module code cannot enter a loaded-code snapshot' ($same -and -not $loadedOnly.ContainsKey('tools/unloaded-catalog-fixture.ps1'))
+    }finally{Remove-Item -LiteralPath 'Function:\Get-Command';Remove-Item -LiteralPath $catalogPath -Force}
     Check 'unchanged loaded code matches the actual source files' ((Get-NetworkWatchCodeState $snapshot) -eq 'Current')
     $settings=Get-Settings
     $before=Get-RingCompositionKey $settings

@@ -6,7 +6,7 @@ function Get-LoadedPackageCodeSnapshot([Management.Automation.Language.Ast]$Entr
         $prefix=[IO.Path]::GetFullPath((Join-Path $Script:Root 'tools')).TrimEnd('\')+'\'
         $root=[IO.Path]::GetFullPath($Script:Root).TrimEnd('\')+'\'
         $asts=@($EntryAst)
-        foreach($command in @(Get-Command -CommandType Function)){
+        foreach($command in @(Get-Command -CommandType Function -ListImported)){
             if($null -ne $command.ScriptBlock){$asts+=@($command.ScriptBlock.Ast)}
         }
         $snapshot=@{};$seenRoots=@{};$encoding=New-Object Text.UTF8Encoding($true)
