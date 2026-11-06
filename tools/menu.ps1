@@ -535,8 +535,8 @@ function Show-TelegramMenu {
         Show-Header -Screen 'Telegram'
         $on = (Get-Settings).telegram -eq 'on'
         $state = if (-not $on) { 'выключен' } elseif (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' }
-        Write-BoxRow ' Telegram: встроенный мост' Accent
-        Write-BoxRow '  Telegram Desktop ходит через мост на этом ПК, а мост - через веб-версию Telegram, которую не режут. Ничего не скачивается.' Gray
+        Write-BoxRow ' Telegram: TG WS Proxy' Accent
+        Write-BoxRow '  Встроенный официальный TG WS Proxy от Flowseal. Подключите Telegram Desktop к локальному прокси; при недоступности основного пути компонент использует резервный.' Gray
         Write-BoxRow ('  Сейчас: ' + $state) Gray
         Write-BoxRow ('  1. ' + $(if ($on) { 'Выключить' } else { 'Включить: работает с входа в Windows и сам поднимается, если закрылся' }))
         Write-BoxRow '  2. Подключить Telegram Desktop к мосту'

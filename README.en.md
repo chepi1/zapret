@@ -1,49 +1,47 @@
-# zapret
+# zapret 2.0
+
+**YouTube, Discord and Telegram in one Windows package.** Built on bol-van's [zapret2](https://github.com/bol-van/zapret2), with [Flowseal strategies](https://github.com/Flowseal/zapret-discord-youtube), ISP-specific strategy selection and the official [TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy). **The interface is in Russian.**
+
+[Download](https://github.com/chepi1/zapret/releases/latest) · [Changelog](CHANGELOG.md) · [Russian documentation](README.md)
 
 [![tests](https://github.com/chepi1/zapret/actions/workflows/tests.yml/badge.svg)](https://github.com/chepi1/zapret/actions/workflows/tests.yml)
 
-DPI bypass for **NBA 2K27**, **Discord** and **YouTube** on Windows, for Russian ISPs. Built on bol-van's [zapret2](https://github.com/bol-van/zapret2) (winws2) with all strategies of [Flowseal zapret-discord-youtube](https://github.com/Flowseal/zapret-discord-youtube) ported to zapret2. **The interface is in Russian.**
-
-Traffic goes directly from your IP over your ISP's route. The bypass injects fake packets at the start of connections; game latency still depends on the route, load and Wi-Fi, and the bypass's own effect requires measurement.
-
-## Why
-
-Many Russian ISPs freeze connections to foreign hosting (AWS, Cloudflare, Hetzner and others) after the first 16–20 KB. NBA 2K game servers and Easy Anti-Cheat live there: the game lets you into the City but kicks you out of matches. Discord and YouTube are blocked separately. One bypass covers all of it.
+YouTube and Discord traffic uses your direct ISP connection. Telegram has a separately enabled local proxy with WebSocket and CF/H2 fallback paths. Start `zapret.bat` to check your connection, run the bypass and select a strategy.
 
 ## Features
 
-- 34 strategies: all 22 Flowseal strategies, 3 from bol-van's docs, 2 "soft" variants that don't break Akamai sites, 5 "white" variants of the soft ALT11 whose fake ClientHello carries the name of a site on ISP whitelists, 2 new STUN-order variants.
-- The22 source profiles are pinned and checked offline. EXP retains documented differences for QUIC ports, unknown voice UDP, an IPSet domain exclusion and the default unknown-TCP fake. The developer importer rejects unsupported changes; see [Russian developer notes](README.md) for details.
-- The fourth white variant now uses 6 fake repeats instead of 8 in the general TCP profile, retaining STUN. Its dedicated game, Discord and YouTube profiles are unchanged.
-- **Autotest** picks the best strategy for your ISP: it checks the 16–20 KB freeze on 36 hosting providers, Discord, YouTube, SoundCloud, 2K and EAC servers, and **harm** — whether ordinary unblocked sites (and Steam) stop working. Score = passed − harm. The primary strategy is compared by the average of the last 3 runs and only changes on a gap of at least 2 points.
-- In the v2 development branch, strategy tests share a frozen input snapshot, with a separate autohostlist and temporary state for each engine launch. Learning cannot carry over between strategies. Source, saved-setting or network changes reject publication; cleanup waits for owned test engines to exit. Normal play does not create these snapshots.
-- The core version and official file hashes come from the protected `tools/upstream.txt` manifest. Runtime integrity, component notices and test snapshots share these pins; the builder checks the derived CHECKSUMS header and pinned source streams before replacing the ZIP.
-- The refreshed console keeps actions1–7, adds a read-only notifications page on8 and separates bypass, strategy and Telegram status. It adapts to console width and uses light pink and lilac accents with a white fallback on older consoles.
-- Telegram uses the actual bundled [Flowseal TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy) v1.11.4, including its WebSocket and CF fallback paths. Tools →8 manages the component with the existing local port/secret. No separate Python installation is needed; private settings/logs stay in `runtime/tgws`. The official executable is SHA256-pinned and its independent autostart/update checks are disabled. It retains the upstream tray icon.
-- Per-server strategy rotation (`circular`), with rings for sites, YouTube and Discord picked by autotune; games always use the standard ring. Sites that need a non-first strategy are remembered across restarts, and the ring is built by coverage: right after the primary come strategies that open what it cannot.
-- Forged resets from the DPI are recognised by TTL or by arriving faster than the server could answer, and dropped, so connections are not torn down while the server is still answering.
-- 2K's own servers (Take-Two) are never touched: desync there breaks Easy Anti-Cheat.
-- Tools: match tracker, game address scanner, ISP check report, one-file report, diagnostics, excluding a game from the bypass by the tracker log, "direct" routing rules for proxy clients (Happ etc.).
-- Checks the PC for VPN, proxies, game boosters (ExitLag…), another bypass, broken IPv6, Flowseal hosts entries; warns when Steam or Discord got stuck on a proxy that was turned off. Shows when the bypass crashed in the last 7 days.
-- While a game with anti-cheat is running, the menu asks before stopping or restarting the bypass.
-- Scheduled autotune, list updates, Windows notifications, in-menu update from GitHub releases (SHA-256 verified).
+- **34 strategies**, including all 22 Flowseal 1.10.4 profiles ported to zapret2. Dedicated profiles for sites, video and Discord voice.
+- **Strategy selection for your ISP.** Checks service availability, stalled transfers and effects on ordinary sites and Steam. Retries failed probes, explains the primary-strategy decision and uses compatible run history.
+- **Per-server rotation.** Separate rings for sites, YouTube and Discord; successful alternatives are remembered across restarts. Games retain their standard ring.
+- **Bundled Telegram support.** Official Flowseal TG WS Proxy v1.11.4, without installing Python. Tools → 8 manages it. Existing port/secret settings survive updates; private files stay in `runtime/tgws`.
+- **Checked startup and recovery.** Configuration and the complete WinDivert filter are validated before stopping the current bypass. A failed replacement can trigger one checked attempt to restore the last confirmed configuration. Background changes are deferred while a game is open.
+- **Wi-Fi and proxy context.** Detects Happ, system proxies, TUN, route and DNS state. Changed network/settings/files invalidate stale test results. Observed Wi-Fi interruptions suspend strategy learning.
+- **Diagnostics.** Connection and service checks, a connection tracker, ISP testing and shareable reports. HTTPS timings and game-address measurements are kept separate.
+- **Windows service and updates.** Optional startup service, scheduled tuning, SHA-256-checked updates, preserved personal settings/lists and journal-based recovery from interrupted updates.
+- **Refreshed console.** Light pink and lilac accents, familiar actions 1–7, notifications on 8 and text that adapts to narrow windows.
+
+Results depend on your ISP and strategy. Take-Two and Steam/Valve exclusions are preserved. Reduced game latency is not promised: routes, load and Wi-Fi still affect it.
 
 ## Quick start
 
-1. Download the archive from [Releases](https://github.com/chepi1/zapret/releases) and unpack it to a simple path, e.g. `C:\zapret`.
-2. Add the folder to your antivirus exclusions (`WinDivert64.sys` is a packet capture driver, often a false positive).
-3. Fully quit VPNs, proxy clients and game boosters.
-4. Run `zapret.bat` (asks for admin rights), then: **5** — PC check, **1** — start, **3** — autotest.
-5. **6 → 6** installs the service to start with Windows.
+1. Download `zapret-v2.0.zip` from [Releases](https://github.com/chepi1/zapret/releases/latest) and unpack it to a simple path, e.g. `C:\zapret`.
+2. Fully quit VPNs, proxy clients and game boosters before selecting a strategy.
+3. Run `zapret.bat` (asks for administrator rights): **5** — connection check, **1** — start, **3** — strategy test.
+4. **6 → 6** installs the Windows startup service. **7 → 8** manages Telegram support.
+5. For an existing installation, **6 → 9** updates from GitHub and preserves personal state.
 
-## Security and privacy
+If a driver or executable is blocked, inspect your antivirus history and the startup error. Tools → 4 creates a report for troubleshooting.
 
-- zapret2 files are verified against the official release SHA-256 before every start; code folders are locked to Administrators and SYSTEM.
-- No telemetry. Network requests (HTTPS only): ipwho.is / ipinfo.io (ISP and country), GitHub (Flowseal lists, new versions, updates), web.telegram.org (when the Telegram bridge is on), hyperion-cs.github.io (test hosting set), Cloudflare / Google DoH (fixed DNS diagnostic names, no browsing history), the autotest targets.
-- Reports hide the last octet of your IP and your Windows user name.
+## Components and privacy
 
-## License
+- Core: official zapret2 v1.0.6. Telegram: official Flowseal TG WS Proxy v1.11.4. Bundled binaries are SHA-256-pinned; see [CHECKSUMS.txt](CHECKSUMS.txt) and [third-party notices](THIRD-PARTY-NOTICES.md).
+- Code directories are protected for Administrators and SYSTEM. The package does not install root certificates.
+- Service requests include ISP lookup, GitHub updates/lists, diagnostic DNS and test targets. The optional Telegram component connects through its upstream Telegram/CF/H2 paths.
+- Settings and logs stay in `runtime`. Shareable reports mask the final part of your public IP, Windows username and Telegram proxy secrets. Detailed native logs and the learned host list require separate consent.
+- Developer strategy tests use isolated input snapshots and private learning state. Network/settings/source changes reject application of the result. CPU/memory comparisons and HTTPS timings do not measure game RTT.
 
-MIT for this project's code. zapret2 © bol-van (MIT), Flowseal strategies and lists (MIT), WinDivert and Cygwin (LGPL) — see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+## Contact and licenses
 
-Contact: Telegram [@chepi1](https://t.me/chepi1), Discord `chepi228`.
+Contact: Telegram [@chepi1](https://t.me/chepi1), Discord `chepi228`. For a bug, attach a report from Tools → 4 or the ISP check from Tools → 3.
+
+Project code, zapret2 and Flowseal components use MIT; WinDivert and Cygwin use LGPL. See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
