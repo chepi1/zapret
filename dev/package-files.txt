@@ -12,6 +12,7 @@ bin/WinDivert.dll
 bin/WinDivert64.sys
 bin/cygwin1.dll
 bin/winws2.exe
+bin/tgws/TgWsProxy_windows.exe
 fake/ACTIVE_DISCORD_UDP.bin
 fake/ACTIVE_GAME_UDP.bin
 fake/quic_initial_4pda_to.bin
@@ -85,6 +86,7 @@ tools/filtercheck.cs
 tools/integrity.ps1
 tools/latency.ps1
 tools/latencyprobe.ps1
+tools/launch.ps1
 tools/lib.ps1
 tools/linkguard.ps1
 tools/menu.ps1
@@ -102,6 +104,8 @@ tools/targets.txt
 tools/test.ps1
 tools/tgbridge.cs
 tools/tgbridge.ps1
+tools/tgws.ps1
+tools/tgwsrunner.cs
 tools/track.ps1
 tools/upstream.txt
 tools/watchcode.ps1

@@ -234,7 +234,7 @@ function Invoke-RunSnapshotScope($Snapshot,[hashtable]$Settings,[scriptblock]$Ac
     try{
         $Script:Root=$state.Root;$Script:Lists=Join-Path $state.Root 'lists';$Script:StratDir=Join-Path $state.Root 'strategies';$Script:Runtime=$runtime
         $Script:Exe=$state.Exe;$Script:Bin=$state.Bin;$Script:StrategiesCache=$null;$Script:RingCache=@{}
-        $Script:RecipeContext=[pscustomobject]@{Runtime=$runtime;Autolist=$auto}
+        $Script:RecipeContext=[pscustomobject]@{Runtime=$runtime;Autolist=$auto;ExpectedCode=$state.ExpectedCode.Clone()}
         return & $Action
     }finally{
         foreach($name in $variables){if($saved[$name].Exists){Set-Variable -Name $name -Scope Script -Value $saved[$name].Value}else{Remove-Variable -Name $name -Scope Script -ErrorAction SilentlyContinue}}

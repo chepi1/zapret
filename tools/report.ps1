@@ -16,6 +16,8 @@ function Add-File([string]$Title, [string]$Path, [int]$Tail = 0, [string]$StopAt
     if ($Tail -gt 0 -and $lines.Count -gt $Tail) { $r.Add("(последние $Tail строк из $($lines.Count))"); $lines = $lines[($lines.Count - $Tail)..($lines.Count - 1)] }
     foreach ($l in $lines) {
         if ($StopAt -and $l.StartsWith($StopAt)) { $r.Add('(подробности по каждому адресу - в ' + (Split-Path -Leaf $Path) + ')'); break }
+        # Upstream logs its full initial config, including the local proxy secret.
+        if($Title -eq 'Журнал TG WS Proxy' -and $l -match '\bConfig:\s*\{'){continue}
         $r.Add($l)
     }
 }
@@ -103,6 +105,7 @@ $r.Add($(if ($crashes.Count) { Format-BypassCrashes $crashes } else { '(не б�
 Add-Section 'Telegram'
 $r.Add('Мост Telegram: ' + $(if ($s.telegram -eq 'on') { if (Test-TgBridgeRunning) { 'включён, работает' } else { 'включён, но не запущен' } } else { 'выключен' }))
 Add-File 'Журнал моста Telegram (последние строки)' (Join-Path $Script:Runtime 'tgbridge.log') 40
+Add-File 'Журнал TG WS Proxy' (Join-Path $Script:Runtime 'tgws/TgWsProxy/proxy.log') 40
 Add-File 'Последний автоподбор' (Join-Path $Script:Runtime 'test-last.txt') -StopAt 'Подробно'
 Add-File 'Журнал автонастройки' (Join-Path $Script:Runtime 'autotune.log') 30
 Add-File 'Последний сканер' (Join-Path $Script:Runtime 'scan-last.txt')

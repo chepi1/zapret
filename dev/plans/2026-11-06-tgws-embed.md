@@ -1,0 +1,15 @@
+# Embed the actual Flowseal TG WS Proxy
+
+User correction: bundle tg-ws-proxy itself in zapret, not a C# reimplementation. Telegram works when the local proxy is disabled. Prior v2 launch/recovery WIP stays separate and uncommitted; its last recovery/native test was not executed because automatic approval review hit a usage limit. Offline astlint passed; full integration/review is pending.
+
+Source: Flowseal/tg-ws-proxy v1.11.4, official Windows x64 asset TgWsProxy_windows.exe, SHA256454205cbcf76f333934108d893b58a528373bce8096624e27f0b6dc16eea660f (GitHub expanded_assets/v1.11.4). Upstream windows.py always starts the tray app, not the Python CLI. Keep that official binary unchanged and run it as a managed child. Isolate its APPDATA in runtime/tgws; use the actual upstream config schema. Existing Telegram port/secret/link remain valid. Keep MIT attribution.
+
+- [x] RED tgws-embed-red.log; config preservation/domain/listener/secret, trusted asset and process ownership tests pass. Legacy C# server is not a runtime fallback.
+- [x] Official binary+isolated APPDATA+Job Object implemented. Suspended startup assigns ownership before a bootloader can fork. Parent/grandchild kill, listener membership and exact wrapper identity are tested.
+- [x] Pinned download helper, explicit inventory, build hash verification and MIT notice included. Binary21805650 bytes; all personal config/logs remain in runtime.
+- [x] Six staged DC2/DC4/media probes and four production probes passed. Early user acceptance was negative, so did not declare success. After bypass repair, real Desktop traffic reached26 sessions/1.6MiB via the official CF/H2 fallback; user confirmed working. Happ/proxy/adapter settings were not changed. Separate user-requested bypass repair restored native PID26288; only normal UAC used.
+- [x] One review C1/I3/M1 for combined scope. Forged PID file cannot force-kill another process: verify creation time, image and exact wrapper argv on the same kernel handle. A matching port is ready only when its owner is inside our Job Object. Run-key migration parses the executable, preserving independent installs. Upstream Secret/tg:// credentials are redacted from reports, with RED→GREEN regression. No re-review.
+
+Blockers observed: sandbox denies all socket connections including loopback, so earlier tgproxytest's loopback tunnel failed in the environment. GitHub connector returned403; official web sources are readable. Host permission review earlier failed due account usage limit, not an unsafe-action determination; do not route around that check. All code can be prepared/reviewed before requesting guidance if host download/start remains blocked.
+
+Resolved: user granted host access, official download+digest and host tests completed. Windows UI access to Telegram was independently denied; no other UI route was used. User checked selected127.0.0.1:1443 and confirmed working. Actual direct Telegram WS endpoints remain blocked on this connection; official CF/H2 fallback is the observed working route. Source version2.0 is a local candidate, no GitHub publication.

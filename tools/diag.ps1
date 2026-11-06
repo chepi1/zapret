@@ -14,12 +14,17 @@ if ($bad.Count) { Write-IntegrityError $bad; Read-Host 'Enter - закрыть' 
 Enable-TcpTimestamps
 Update-RuntimeLists
 $log = if ($DebugLog) { Get-PkgPath 'runtime/debug.log' } else { $null }
-try { $cmd = Get-BypassCmdLine -Settings (Get-Settings) -Name 'diag' -DebugFile $log }
+try { $recipe=New-BypassLaunchRecipe -Settings (Get-Settings) -Name 'diag' -DebugFile $log }
 catch { Write-Color $_.Exception.Message Red; Read-Host 'Enter - закрыть' | Out-Null; exit 1 }
 
 Write-Color 'winws2 работает в этом окне. Остановить - закрыть окно или Ctrl+C.' Cyan
 if ($log) { Write-Color 'Пишется подробный лог runtime\debug.log. Повторите проблему, потом остановите winws2 и сделайте отчёт (Инструменты -> 4).' Cyan }
-$p = Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -NoNewWindow -PassThru -Wait
+try {
+    Assert-BypassControlAllowed
+    Assert-BypassLaunchCurrent $recipe
+    $launch=Get-BypassLaunchState $recipe
+    $p = Start-Process -FilePath $launch.Exe -ArgumentList $launch.CommandLine -WorkingDirectory $launch.Bin -NoNewWindow -PassThru -Wait
+} finally { Close-BypassLaunchRecipe $recipe }
 Write-Host ''
 Write-Color ('winws2 завершился с кодом ' + $p.ExitCode + '. Сообщение об ошибке - выше.') Yellow
 Read-Host 'Enter - закрыть' | Out-Null

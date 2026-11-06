@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '1.9'
+$Script:Version     = '2.0'
 . (Join-Path $PSScriptRoot 'integrity.ps1')
 $Script:CoreManifest=Read-CoreManifest (Join-Path $PSScriptRoot 'upstream.txt')
 $Script:UpstreamHashes=$Script:CoreManifest.Hashes
@@ -26,6 +26,9 @@ $Script:UpstreamHashes=$Script:CoreManifest.Hashes
 $Script:RecipeContext=$null
 $Script:TestRunSnapshot=$null
 . (Join-Path $PSScriptRoot 'recipe.ps1')
+. (Join-Path $PSScriptRoot 'launch.ps1')
+. (Join-Path $PSScriptRoot 'tgws.ps1')
+$Script:LastBypassStartAttempt=$null
 $Script:RingNetworkKey = 'unknown-' + [guid]::NewGuid().ToString('N')
 $Script:RingPersistAllowed = $true
 $Script:RingCompositionKey = ''
@@ -520,7 +523,7 @@ function Get-StrategyFingerprint([string]$Id) {
     try { return (Get-FileHash -LiteralPath (Join-Path $Script:StratDir ('alt' + $Id + '.txt')) -Algorithm SHA256 -ErrorAction Stop).Hash } catch { return '' }
 }
 function Get-ScoreInputFiles {
-    $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','tools/recipe.ps1','tools/integrity.ps1','tools/upstream.txt','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
+    $files = @('tools/test.ps1','tools/lib.ps1','tools/netstate.ps1','tools/netwatch.ps1','tools/watchcode.ps1','tools/capture.ps1','tools/filtercheck.cs','tools/linkguard.ps1','tools/recovery.ps1','tools/selection.ps1','tools/comparison.ps1','tools/processmetrics.ps1','tools/recipe.ps1','tools/launch.ps1','tools/tgws.ps1','tools/tgwsrunner.cs','tools/integrity.ps1','tools/upstream.txt','CHECKSUMS.txt') + @(Get-ChildItem -LiteralPath (Join-Path $Script:Root 'lua') -Filter '*.lua' -ErrorAction Stop | Sort-Object Name | ForEach-Object { 'lua/' + $_.Name })
     foreach ($dir in @('lists','fake')) {
         $files += @(Get-ChildItem -LiteralPath (Join-Path $Script:Root $dir) -File -ErrorAction Stop | Where-Object { $_.Name -ne 'autohostlist.txt' -and $_.Extension -ne '.bak' } | Sort-Object Name | ForEach-Object { $dir+'/'+$_.Name })
     }
@@ -1235,8 +1238,13 @@ function Start-Bypass([switch]$Quiet) {
     try {
         Assert-BypassControlAllowed
         Add-BypassAction 'start' 'начало'
-        $ok = Start-BypassCore -Quiet:$Quiet
-        Add-BypassAction 'start' $(if ($ok) { 'запущен' } else { 'не запущен; проверьте последний сбой' })
+        $Script:LastBypassStartAttempt=$null
+        $ok=$false;$restored=$false
+        try{$ok = Start-BypassCore -Quiet:$Quiet}
+        catch{Add-BypassAction 'start' $_.Exception.Message;Write-Color $_.Exception.Message Yellow}
+        $attempt=$Script:LastBypassStartAttempt
+        if(-not $ok){$restored=Try-RestoreConfirmedBypass $attempt;$ok=$restored}
+        Add-BypassAction 'start' $(if($restored){'восстановлена прежняя конфигурация'}elseif ($ok) { 'запущен' } else { 'не запущен; проверьте последний сбой' })
         return $ok
     } catch {
         Add-BypassAction 'start' $_.Exception.Message
@@ -1384,19 +1392,21 @@ function Invoke-Native([string]$File, [string]$Arguments, [string]$WorkDir, [int
 # Проверка параметров без перехвата трафика (--dry-run)
 # $CmdLine - уже собранная строка запуска: проверяется тот же фильтр. Только у dry-run отключаем mutex
 # дубликата: winws2 проверяет его до выхода по --dry-run, когда прежний обход ещё должен работать.
-function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [string]$CmdLine) {
+function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [string]$IpsetMode, [string]$CmdLine, $Recipe=$null) {
     $filterFile=$null;$exportOwned=$false
     try{
+        $exe=$Script:Exe;$bin=$Script:Bin
+        if($null -ne $Recipe){Assert-BypassLaunchCurrent $Recipe;$launch=Get-BypassLaunchState $Recipe;$CmdLine=$launch.CommandLine;$exe=$launch.Exe;$bin=$launch.Bin}
         $filterFile=Join-Path ([IO.Path]::GetTempPath()) ('zapret-filter-'+[guid]::NewGuid().ToString('N')+'.txt')
         if(-not $CmdLine){$CmdLine=Get-BypassCmdLine -Settings $Settings -Name 'check' -Alt $Alt -NoAuto:$NoAuto -IpsetMode $IpsetMode}
         $reserved=[IO.File]::Open($filterFile,'CreateNew','Write','None')
         try{$exportOwned=$true}finally{$reserved.Dispose()}
         $cmd=(ConvertTo-WinArg '--dry-run')+' '+$CmdLine+' '+(ConvertTo-WinArg ('--wf-save='+$filterFile))+' --wf-dup-check=0'
-        $r=Invoke-Native $Script:Exe $cmd $Script:Bin 60
+        $r=Invoke-Native $exe $cmd $bin 60
         if($r.ExitCode -ne 0 -and -not $r.Output -and -not $r.TimedOut){
             Start-Sleep -Milliseconds 500
             [IO.File]::WriteAllText($filterFile,'',$Script:Utf8NoBom)
-            $r=Invoke-Native $Script:Exe $cmd $Script:Bin 60
+            $r=Invoke-Native $exe $cmd $bin 60
         }
         if($r.TimedOut){return [pscustomobject]@{Ok=$false;Output='Проверка параметров winws2 превысила отведённое время.'}}
         if($r.ExitCode -ne 0){return [pscustomobject]@{Ok=$false;Output=$(if($r.Output){$r.Output}else{'winws2 завершился с кодом '+$r.ExitCode+' без сообщений'})}}
@@ -1412,27 +1422,60 @@ function Test-ConfigDry([hashtable]$Settings, [string]$Alt, [switch]$NoAuto, [st
 function Get-ServiceBinPath([string]$CmdLine) {
     return '"' + $Script:Exe + '" ' + $CmdLine
 }
+function Assert-BypassServiceRecipe($Recipe,[switch]$Started){
+    Assert-BypassLaunchCurrent $Recipe
+    $launch=Get-BypassLaunchState $Recipe
+    $service=Get-CimInstance Win32_Service -Filter ("Name='"+$Script:ServiceName+"'") -ErrorAction Stop
+    $expected='"'+$launch.Exe+'" '+$launch.CommandLine
+    if($null -ne $service -and $service.PSObject.Properties['PathName'] -and $service.PathName){
+        if($service.PathName -cne $expected){throw 'Не удалось подтвердить точную команду службы обхода. Запуск и запись рабочей конфигурации отменены.'}
+    }else{
+        # Legacy long ImagePath can exceed the8KiB QueryServiceConfig result limit.
+        $saved=Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\'+$Script:ServiceName) -Name ImagePath -ErrorAction Stop
+        if($null -eq $saved -or $saved.ImagePath -cne $expected){throw 'Сохранённая команда службы не совпадает с проверенной конфигурацией.'}
+    }
+    if(-not $Started){return}
+    if(Test-BypassServiceProcess $Recipe $expected){return}
+    throw 'Не удалось подтвердить команду запущенного процесса службы. Рабочая конфигурация не записана.'
+}
+function Test-BypassServiceProcess($Recipe,[string]$Expected){
+    $launch=Get-BypassLaunchState $Recipe
+    $processes=@(Get-OurProcesses)
+    Initialize-TgWsRunner
+    return ($processes.Count -eq 1 -and [ZapretTgWs.Runner]::MatchesCommand([uint32]$processes[0].Id,$processes[0].StartTime.Ticks,$launch.Exe,$Expected))
+}
 
 # Запускает обход с текущими настройками. Возвращает $true, если winws2 жив через 3 секунды.
-function Start-BypassCore([switch]$Quiet) {
+function Start-BypassCore([switch]$Quiet,[hashtable]$SettingsOverride=$null,[string]$ExpectedConfigHash,[string]$ExpectedInputsHash) {
+    $Script:LastBypassStartAttempt=[pscustomobject]@{ReplacementStarted=$false;ConfigHash='';SettingsJson=''}
     Set-RingNetworkContext (Get-NetworkObservation)
     # обход снова включают - уведомление "обход не работает" опять имеет смысл (см. пункт 2 меню)
     Remove-Item (Get-PkgPath $Script:ManualStopFile) -Force -ErrorAction SilentlyContinue
     $bad = @(Test-PackageIntegrity)
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
-    $settings = Get-Settings
+    $settings = if($null -ne $SettingsOverride){$SettingsOverride.Clone()}else{Get-Settings}
     Update-RuntimeLists | Out-Null
-    try { $cmd = Get-BypassCmdLine -Settings $settings }
+    $recipe=$null
+    try { $recipe=New-BypassLaunchRecipe -Settings $settings }
     catch { Write-Color $_.Exception.Message Red; return $false }
-    $dry = Test-ConfigDry $settings -CmdLine $cmd
+    try {
+    $launch=Get-BypassLaunchState $recipe;$cmd=$launch.CommandLine
+    $Script:LastBypassStartAttempt.ConfigHash=$launch.ConfigHash;$Script:LastBypassStartAttempt.SettingsJson=$launch.SettingsJson
+    if(($ExpectedConfigHash -and $ExpectedConfigHash -cne $launch.ConfigHash) -or ($ExpectedInputsHash -and $ExpectedInputsHash -cne $launch.InputsHash)){
+        Write-Color 'Прежняя конфигурация больше не совпадает с текущими файлами или параметрами. Автовосстановление отменено.' Yellow
+        return $false
+    }
+    $dry = Test-ConfigDry $settings -CmdLine $cmd -Recipe $recipe
     if (-not $dry.Ok) {
         Write-Color 'Проверка конфигурации не пройдена:' Red
         Write-Host $dry.Output
         return $false
     }
 
+    Assert-BypassLaunchCurrent $recipe
     Assert-BypassControlAllowed
     Stop-Bypass
+    $Script:LastBypassStartAttempt.ReplacementStarted=$true
     Repair-WinDivertService
     Enable-TcpTimestamps
 
@@ -1441,25 +1484,31 @@ function Start-BypassCore([switch]$Quiet) {
     $err = ''
     if ($svc) {
         # параметры службы живут в её командной строке: обновляем под текущие настройки
-        Set-ItemProperty -Path ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $Script:ServiceName) -Name ImagePath -Value (Get-ServiceBinPath $cmd)
+        Set-ItemProperty -Path ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $Script:ServiceName) -Name ImagePath -Value (Get-ServiceBinPath $cmd) -ErrorAction Stop
+        Assert-BypassServiceRecipe $recipe
         $err = Start-OurService
     } else {
         # без окна: ошибки запуска видны через Инструменты -> 5 (диагностика)
         Assert-BypassControlAllowed
-        Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
+        Assert-BypassLaunchCurrent $recipe
+        Start-Process -FilePath $launch.Exe -ArgumentList $cmd -WorkingDirectory $launch.Bin -WindowStyle Hidden | Out-Null
     }
     $alive = Wait-BypassAlive
     if (-not $alive -and -not $svc -and @(Get-OurProcesses).Count -eq 0) {
         # winws2 (cygwin) изредка падает при старте без причины - ещё одна попытка (у службы есть свой перезапуск)
         Assert-BypassControlAllowed
-        Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
+        Assert-BypassLaunchCurrent $recipe
+        Start-Process -FilePath $launch.Exe -ArgumentList $cmd -WorkingDirectory $launch.Bin -WindowStyle Hidden | Out-Null
         $alive = Wait-BypassAlive
     }
     if (-not $alive) {
         Write-Color $(if ($svc) { 'Не удалось подтвердить стабильную работу службы обхода.' } else { 'Не удалось подтвердить стабильный запуск winws2.' }) Red
-        $alive = Show-StartFailure $err $since
+        $alive = Show-StartFailure $err $since -Recipe $recipe
     }
     if ($alive) {
+        if($svc){Assert-BypassServiceRecipe $recipe -Started}
+        $launch.StartupConfirmed=$true
+        if(-not(Save-ConfirmedBypassRecipe $recipe)){Add-BypassAction 'confirm-launch' 'Обход работает, но запись для автоматического восстановления не сохранена.'}
         if (-not (Start-NetworkWatcher)) { Add-BypassAction 'network-watch' 'Не запущен; память остаётся только в RAM до свежего heartbeat.' }
         Remove-Item (Join-Path $Script:Runtime 'start-error.txt') -Force -ErrorAction SilentlyContinue
         Set-HighPriority
@@ -1481,6 +1530,7 @@ function Start-BypassCore([switch]$Quiet) {
         }
     }
     return $alive
+    } finally { Close-BypassLaunchRecipe $recipe }
 }
 
 # Start-Service, но вместо исключения - текст ошибки Windows ('' - служба запустилась)
@@ -1530,8 +1580,9 @@ function Get-StartFailureHints([string]$Text) {
 # работать без неё. Всё это пишется в runtime\start-error.txt и попадает в отчёт (Инструменты -> 4).
 # -RemoveService - служба только что поставлена и не запустилась: она удаляется, а не остаётся сбоить при каждом старте.
 # Возвращает $true, если обход в итоге запущен без службы.
-function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$RemoveService) {
+function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$RemoveService, $Recipe=$null) {
     if (-not (Enter-BypassControl 'Show-StartFailure')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    $ownedRecipe=$null
     try {
         Assert-BypassControlAllowed
 
@@ -1559,9 +1610,12 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
     }
     $restoreMode = if ($svc) { switch ($svc.StartMode) { 'Manual' { 'demand' } 'Disabled' { 'disabled' } default { 'auto' } } } else { '' }
     try {
-        $cmd = Get-BypassCmdLine -Settings (Get-Settings)
         $kind = Get-StartFailureKind ($lines -join "`n")
-        if ($kind -eq 'Unknown') { Assert-BypassControlAllowed; $r = Invoke-Native $Script:Exe $cmd $Script:Bin 5 }
+        if ($kind -eq 'Unknown') {
+            if($null -eq $Recipe){$ownedRecipe=New-BypassLaunchRecipe -Settings (Get-Settings);$Recipe=$ownedRecipe}
+            Assert-BypassLaunchCurrent $Recipe;$launch=Get-BypassLaunchState $Recipe;$cmd=$launch.CommandLine
+            Assert-BypassControlAllowed; $r = Invoke-Native $launch.Exe $cmd $launch.Bin 5
+        }
         else { $r = $null }
     } finally {
         if ($svc -and -not $RemoveService) { & sc.exe config $Script:ServiceName start= $restoreMode | Out-Null }
@@ -1572,9 +1626,9 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
     } elseif ($r.TimedOut) {
         $lines.Add('winws2 без службы запускается и работает: сбой только у службы Windows')
         Assert-BypassControlAllowed
-        Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden | Out-Null
-        Start-Sleep -Seconds 2
-        $fallback = @(Get-OurProcesses).Count -gt 0
+        Assert-BypassLaunchCurrent $Recipe
+        Start-Process -FilePath $launch.Exe -ArgumentList $cmd -WorkingDirectory $launch.Bin -WindowStyle Hidden | Out-Null
+        $fallback = Wait-BypassAlive
     } else {
         $tail = @(($r.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 4)
         $lines.Add(('winws2 и без службы завершился сразу (код {0})' -f $r.ExitCode) + $(if ($tail.Count) { ':' } else { ', ничего не написав' }))
@@ -1592,7 +1646,7 @@ function Show-StartFailure([string]$StartError, [datetime]$Since, [switch]$Remov
     Write-TextNoBom (Join-Path $Script:Runtime 'start-error.txt') (($save -join "`r`n") + "`r`n")
     return $fallback
 
-    } finally { Exit-BypassControl }
+    } finally { if($null -ne $ownedRecipe){Close-BypassLaunchRecipe $ownedRecipe}; Exit-BypassControl }
 }
 
 function Get-AltText([hashtable]$Settings) {
@@ -1611,6 +1665,8 @@ function Get-AltText([hashtable]$Settings) {
 
 function Install-BypassService {
     if (-not (Enter-BypassControl 'Install-BypassService')) { throw 'Другая операция управляет обходом; действие отложено.' }
+    $recipe=$null;$installed=$false
+    $attempt=[pscustomobject]@{ReplacementStarted=$false;ConfigHash='';SettingsJson=''}
     try {
         Assert-BypassControlAllowed
 
@@ -1619,31 +1675,52 @@ function Install-BypassService {
     if ($bad.Count) { Write-IntegrityError $bad; return $false }
     $settings = Get-Settings
     Update-RuntimeLists | Out-Null
-    try { $cmd = Get-BypassCmdLine -Settings $settings }
+    try {
+        $recipe=New-BypassLaunchRecipe -Settings $settings;$launch=Get-BypassLaunchState $recipe;$cmd=$launch.CommandLine
+        $attempt.ConfigHash=$launch.ConfigHash;$attempt.SettingsJson=$launch.SettingsJson
+    }
     catch { Write-Color $_.Exception.Message Red; return $false }
-    $dry = Test-ConfigDry $settings -CmdLine $cmd
+    $dry = Test-ConfigDry $settings -CmdLine $cmd -Recipe $recipe
     if (-not $dry.Ok) { Write-Color 'winws2 отклонил параметры:' Red; Write-Host $dry.Output; return $false }
 
+    Assert-BypassLaunchCurrent $recipe
     Stop-Bypass
-    if (Get-OurService) { & sc.exe delete $Script:ServiceName | Out-Null; Start-Sleep -Seconds 1 }
+    $attempt.ReplacementStarted=$true
+    if (Get-OurService) {
+        & sc.exe delete $Script:ServiceName | Out-Null
+        if($LASTEXITCODE -ne 0){throw 'Windows не удалила прежнюю службу обхода. Замена отменена.'}
+        for($poll=0;$poll -lt 50 -and (Get-OurService);$poll++){Start-Sleep -Milliseconds 100}
+        if(Get-OurService){throw 'Прежняя служба ещё удаляется. Новая служба не создана.'}
+    }
     Enable-TcpTimestamps
     $binPath = Get-ServiceBinPath $cmd
     $since = Get-Date
     New-Service -Name $Script:ServiceName -BinaryPathName $binPath -DisplayName $Script:ServiceDisplayName `
-        -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic | Out-Null
+        -Description 'Обход DPI для NBA 2K27, Discord и YouTube (zapret2 / winws2)' -StartupType Automatic -ErrorAction Stop | Out-Null
+    Assert-BypassServiceRecipe $recipe
     & sc.exe failure $Script:ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/30000 | Out-Null
     $err = Start-OurService
     if (Wait-BypassAlive) {
+        Assert-BypassServiceRecipe $recipe -Started
+        $launch=Get-BypassLaunchState $recipe;$launch.StartupConfirmed=$true
+        if(-not(Save-ConfirmedBypassRecipe $recipe)){Add-BypassAction 'confirm-launch' 'Служба работает, но запись для автоматического восстановления не сохранена.'}
         Set-HighPriority
         if (-not (Install-NetworkWatchTask)) { Write-Color 'Наблюдатель сети не добавлен в автозапуск; до свежего heartbeat память будет только в RAM.' Yellow }
         Start-NetworkWatcher | Out-Null
+        $installed=$true
         return $true
     }
     Write-Color 'Служба не запустилась и удалена.' Red
-    Show-StartFailure $err $since -RemoveService | Out-Null
+    Show-StartFailure $err $since -RemoveService -Recipe $recipe | Out-Null
     return $false
 
-    } finally { Exit-BypassControl }
+    } catch {Write-Color $_.Exception.Message Yellow;return $false}
+    finally {
+        try{
+            if($null -ne $recipe){Close-BypassLaunchRecipe $recipe}
+            if(-not $installed -and $attempt.ReplacementStarted){Try-RestoreConfirmedBypass $attempt|Out-Null}
+        }finally{Exit-BypassControl}
+    }
 }
 
 # Сборка называлась NBA2K27-zapret2: служба и задача автонастройки прежних версий переносятся под новые имена
@@ -1974,10 +2051,10 @@ function Clear-DiscordCache {
     return $res
 }
 
-# ---------- Telegram: встроенный мост (tools\tgbridge.cs) ----------
+# ---------- Telegram: официальный TG WS Proxy Flowseal ----------
 # Обход сам Telegram не лечит: у нас режут адреса его дата-центров. Мост - перенос основной логики tg-ws-proxy от Flowseal
 # (MIT): Telegram Desktop подключается к нему как к MTProto-прокси 127.0.0.1:1443, а мост гонит трафик через WebSocket
-# веб-версии Telegram, которую не режут. Ничего не скачивается: C# из tools\tgbridge.cs компилирует сама Windows.
+# Официальный TG WS Proxy поставляется в bin/tgws; свои настройки и логи хранит в runtime/tgws.
 # Мост работает задачей "zapret telegram" от имени пользователя, без окна: с входа в Windows, а если упал или его
 # закрыли - Windows запускает его снова (задача повторяется раз в 5 минут; второй экземпляр не запускается).
 $Script:TgTask = 'zapret telegram'
@@ -2033,12 +2110,23 @@ function Get-TgBridgeProcess {
     if ($x.Count -ne 2 -or $x[0] -notmatch '^\d+$' -or $x[1] -notmatch '^\d+$') { return $null }
     $p = Get-Process -Id ([int]$x[0]) -ErrorAction SilentlyContinue
     if (-not $p) { return $null }
-    try { if ($p.StartTime.Ticks -ne [long]$x[1]) { return $null } } catch { return $null }
+    try {
+        if ($p.StartTime.Ticks -ne [long]$x[1]) { return $null }
+        Initialize-TgWsRunner
+        $ps=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        if(-not [ZapretTgWs.Runner]::IsWrapper([uint32]$p.Id,[long]$x[1],$ps,(Join-Path $PSScriptRoot 'tgbridge.ps1'))){return $null}
+    } catch { return $null }
     return $p
 }
 
 function Get-TgBridgeState {
     if (-not (Get-TgBridgeProcess)) { return 'Stopped' }
+    $job=Get-TgWsBridgeJob
+    if($job){
+        Initialize-TgWsRunner
+        if([ZapretTgWs.Runner]::OwnsListener($job,(Get-TgConfig).Port)){return 'Open'}
+        return 'Unknown'
+    }
     return (Get-LoopbackPortObservation ([pscustomobject]@{Host='127.0.0.1';Port=(Get-TgConfig).Port})).State
 }
 function Test-TgBridgeRunning {
@@ -2083,31 +2171,39 @@ function Install-TgTask {
 
 # Запуск моста задачей - от имени пользователя, даже из меню с правами администратора. $true - мост слушает порт.
 function Start-TgBridge {
-    if (Test-TgBridgeRunning) { return $true }
+    try{Assert-TgWsBinary $Script:Root|Out-Null}catch{Write-Color $_.Exception.Message Red;return $false}
+    if ((Test-TgBridgeRunning) -and (Test-TgWsBridgeCurrent)) { return $true }
+    if(Get-TgBridgeProcess){Stop-TgBridge}
     if (-not (Get-TgTask) -and -not (Install-TgTask)) { return $false }
     try { Start-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { }
-    # первый запуск - компиляция C# (секунда-две)
-    for ($i = 0; $i -lt 40 -and -not (Test-TgBridgeRunning); $i++) { Start-Sleep -Milliseconds 500 }
-    return (Test-TgBridgeRunning)
+    # Первый старт официального PyInstaller-компонента включает распаковку его runtime.
+    for ($i = 0; $i -lt 80 -and -not ((Test-TgBridgeRunning) -and (Test-TgWsBridgeCurrent)); $i++) { Start-Sleep -Milliseconds 500 }
+    return ((Test-TgBridgeRunning) -and (Test-TgWsBridgeCurrent))
 }
 
 function Stop-TgBridge {
     try { Stop-ScheduledTask -TaskName $Script:TgTask -ErrorAction Stop } catch { }
     $p = Get-TgBridgeProcess
-    if ($p) { try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+    if ($p) {
+        Initialize-TgWsRunner
+        $ps=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        [ZapretTgWs.Runner]::StopWrapper([uint32]$p.Id,$p.StartTime.Ticks,$ps,(Join-Path $PSScriptRoot 'tgbridge.ps1'))|Out-Null
+    }
 }
 
-# tg-ws-proxy от Flowseal больше не нужен: мост его заменяет и занимает тот же порт. Закрываем его, убираем
-# его автозапуск и копию, которую ставила zapret 1.2 (runtime\tg-ws-proxy). Возвращает $true, если он был.
+# Миграция только старой копии, которую ставила zapret1.2. Самостоятельные установки не трогаем.
 function Remove-FlowsealTg {
     $was = $false
-    foreach ($p in @(Get-Process -Name 'TgWsProxy*' -ErrorAction SilentlyContinue)) { $was = $true; try { Stop-Process -Id $p.Id -Force -ErrorAction Stop } catch { } }
+    $d=Resolve-UpdateFilePath $Script:Root $Script:TgDir
+    $prefix=$d.TrimEnd('\')+'\'
+    foreach ($p in @(Get-Process -Name 'TgWsProxy*' -ErrorAction SilentlyContinue)) {
+        try{if($p.Path.StartsWith($prefix,[StringComparison]::OrdinalIgnoreCase)){$was=$true;Stop-Process -Id $p.Id -Force -ErrorAction Stop}}catch{}
+    }
     try {
         $run = Get-ItemProperty -Path $Script:TgRunKey -ErrorAction Stop
-        if ($run.PSObject.Properties.Name -contains 'TgWsProxy') { $was = $true; Remove-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -ErrorAction SilentlyContinue }
+        if ($run.PSObject.Properties.Name -contains 'TgWsProxy' -and (Test-TgWsLegacyRunCommand ([string]$run.TgWsProxy) $d)) { $was = $true; Remove-ItemProperty -Path $Script:TgRunKey -Name 'TgWsProxy' -ErrorAction SilentlyContinue }
     } catch { }
-    $d = Get-PkgPath $Script:TgDir
-    if (Test-Path $d) { $was = $true; Start-Sleep -Milliseconds 500; Remove-Item $d -Recurse -Force -ErrorAction SilentlyContinue }
+    # Legacy files contain the imported credentials; keep them as a local backup.
     return $was
 }
 
@@ -2486,6 +2582,7 @@ function Get-DirectConnectionInfo {
 # Отчёты пересылают и прикладывают к issue: имя пользователя Windows (оно в путях к папке) и свой внешний IP
 # в них заменяются на заглушки, где бы они ни встретились.
 function Protect-ReportText([string]$Text, [string]$SelfIp) {
+    $Text=[regex]::Replace($Text,'(?i)(\bsecret["'']?\s*[:=]\s*["'']?)(?:dd|ee)?[0-9a-f]{32}','$1<hidden>')
     if ($env:USERPROFILE) { $Text = [regex]::Replace($Text, [regex]::Escape($env:USERPROFILE), '%USERPROFILE%', 'IgnoreCase') }
     if ($env:USERNAME) { $Text = [regex]::Replace($Text, '(?i)(\\Users\\)' + [regex]::Escape($env:USERNAME) + '(?=\\|\s|$)', '${1}%USERNAME%') }
     if ($SelfIp) { $Text = $Text.Replace($SelfIp, (Get-MaskedIp $SelfIp)) }

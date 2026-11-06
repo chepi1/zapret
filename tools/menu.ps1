@@ -307,9 +307,9 @@ function Start-TelegramWithBypass {
     }
     if ($s.telegram -or -not (Test-TelegramDesktop)) { return }
     Write-Host ''
-    Write-MenuAccent 'Telegram у нас режут по адресам его серверов: без VPN он тормозит или не грузит фото и видео.'
-    Write-MenuAccent 'Обход это не лечит, а встроенный мост zapret - лечит: Telegram Desktop ходит через него, а мост - через'
-    Write-MenuAccent 'веб-версию Telegram, которую не режут. Ничего не скачивается; мост работает с входа в Windows.'
+    Write-MenuAccent 'В zapret встроен официальный TG WS Proxy от Flowseal: MTProto -> WebSocket, с резервными путями CF.'
+    Write-MenuAccent 'Telegram Desktop подключается к нему на этом ПК. Отдельно устанавливать TG WS Proxy не нужно.'
+    Write-MenuAccent 'Компонент запускается с входа в Windows; настройки и журналы остаются в runtime этой сборки.'
     if (Read-YesNo 'Включить мост Telegram?') {
         if (Set-TelegramMode $true) { Write-Color 'Telegram: мост работает.' Green; Connect-TgDesktop }
         else { Write-Color 'Мост не запустился: Инструменты -> 8.' Yellow }

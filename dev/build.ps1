@@ -48,6 +48,10 @@ try{
     $sumText=$encoding.GetString($sumBytes).TrimStart([char]0xFEFF).Replace("`r`n","`n")
     if(-not $sumText.StartsWith($core.ChecksumsBlock.Replace("`r`n","`n"),[StringComparison]::Ordinal)){throw 'CHECKSUMS.txt differs from tools/upstream.txt'}
     $expectedHashes=@{'tools/upstream.txt'=$core.ContentHash;'CHECKSUMS.txt'=(Get-CoreManifestHash $sumBytes)}
+    . (Join-Path $root 'tools/tgws.ps1')
+    $telegramComponent=Get-TgWsRelease
+    if(-not $names.Contains($telegramComponent.RelativePath)){throw 'Missing official TG WS Proxy package entry'}
+    $expectedHashes[$telegramComponent.RelativePath]=$telegramComponent.Sha256
     foreach($name in $core.Hashes.Keys){
         $relative=$name.Replace('\','/')
         if(-not $names.Contains($relative)){throw ('Missing pinned core package entry: '+$relative)}

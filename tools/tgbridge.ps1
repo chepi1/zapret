@@ -5,18 +5,27 @@
 param([int]$Port = 0, [string]$Secret = '', [string]$Log = '', [switch]$SelfTest, [int]$LiveTest = 0)
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
-# C# компилируется заново при каждом запуске (секунда-две): готовой программы в папке нет, подменять нечего
-Add-Type -TypeDefinition ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tgbridge.cs'))) -Language CSharp
-
-if ($SelfTest) { [ZapretTg.Bridge]::SelfTest(); exit 0 }
+if ($SelfTest -or $LiveTest) {
+    # Legacy C# is only a protocol test client now; its server is never used by the task.
+    Add-Type -TypeDefinition ([System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'tgbridge.cs'))) -Language CSharp
+    if ($SelfTest) { [ZapretTg.Bridge]::SelfTest(); exit 0 }
+}
 
 $cfg = Get-TgConfig
 if (-not $Port) { $Port = $cfg.Port }
 if (-not $Secret) { $Secret = $cfg.Secret }
 if ($LiveTest) { [ZapretTg.Bridge]::LiveTest($Port, $Secret, $LiveTest); exit 0 }
-if (-not $Log) { $Log = Join-Path $Script:Runtime 'tgbridge.log' }
+Assert-TgWsBinary $Script:Root | Out-Null
+$spec=Initialize-TgWsConfig -Port $Port -Secret $Secret
+Initialize-TgWsRunner
 
 # PID и время запуска - чтобы меню и задача узнавали именно этот процесс
 $me = Get-Process -Id $PID
 Write-TextNoBom (Get-PkgPath $Script:TgPidFile) ('{0}|{1}' -f $PID, $me.StartTime.Ticks)
-[ZapretTg.Bridge]::Run($Port, $Secret, $Log)
+$runner=$null
+try{
+    $runner=[ZapretTgWs.Runner]::Start($spec.Exe,(Split-Path -Parent $spec.Exe),$spec.AppData)
+    Write-TextNoBom (Join-Path $Script:Runtime 'tgws-engine.txt') ('{0}|{1}|{2}|{3}' -f $PID,$me.StartTime.Ticks,(Get-TgWsRelease).Tag,$runner.JobName)
+    $exitCode=$runner.Wait()
+}finally{if($runner){$runner.Dispose()}}
+exit $exitCode

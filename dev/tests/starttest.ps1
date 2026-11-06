@@ -136,8 +136,9 @@ $script:launches = 0
 $ok = Start-Bypass -Quiet
 Check 'failed stop prevents replacement process launch' (-not $ok -and $script:launches -eq 0)
 $menuAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools\menu.ps1'), [ref]$null, [ref]$null)
-$fn = $menuAst.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-Diagnostics'}, $true)
-Invoke-Expression ($fn.Extent.Text.Replace('$PSScriptRoot', ("'" + (Join-Path $Pkg 'tools') + "'")))
+foreach($fn in $menuAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Start-Diagnostics','Write-MenuAccent')}, $true)){
+    Invoke-Expression ($fn.Extent.Text.Replace('$PSScriptRoot', ("'" + (Join-Path $Pkg 'tools') + "'")))
+}
 function Stop-Bypass { }
 function Pause-Menu { }
 function Read-YesNo { $script:games = @('NBA2K27'); return $false }

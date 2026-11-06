@@ -349,20 +349,22 @@ function Start-TestInstance([hashtable]$Settings, [string]$Alt, [switch]$Final, 
 }
 function Start-TestInstanceCore([hashtable]$Settings, [string]$Alt, [switch]$Final, [ValidateRange(1000,1800000)][int]$LifetimeMs = 120000) {
     Assert-BypassControlAllowed
-    $cmd = if ($Final) { Get-BypassCmdLine -Settings $Settings -Name 'final-check' -Alt $Alt }
-           else { Get-BypassCmdLine -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any' }
-    $guard = "--lua-init=timer_set('test_lifetime_guard',function() os.exit(3) end," + $LifetimeMs.ToString([Globalization.CultureInfo]::InvariantCulture) + ',true)'
-    $cmd += ' ' + (ConvertTo-WinArg $guard)
+    $recipe = if ($Final) { New-BypassLaunchRecipe -Settings $Settings -Name 'final-check' -Alt $Alt -LifetimeMs $LifetimeMs }
+              else { New-BypassLaunchRecipe -Settings $Settings -Name 'test' -Alt $Alt -NoAuto -IpsetMode 'any' -LifetimeMs $LifetimeMs }
+    try {
+    $launch=Get-BypassLaunchState $recipe;$cmd=$launch.CommandLine
     # winws2 (cygwin) изредка падает при старте без причины - тогда стратегия выпадала из теста. Пробуем до трёх раз.
     for ($try = 1; $try -le 3; $try++) {
         Assert-BypassControlAllowed
-        $p = Start-Process -FilePath $Script:Exe -ArgumentList $cmd -WorkingDirectory $Script:Bin -WindowStyle Hidden -PassThru
+        Assert-BypassLaunchCurrent $recipe
+        $p = Start-Process -FilePath $launch.Exe -ArgumentList $cmd -WorkingDirectory $launch.Bin -WindowStyle Hidden -PassThru
         if($null -ne $Script:TestRunSnapshot){Add-RunSnapshotProcess $Script:TestRunSnapshot $p}
         Start-Sleep -Seconds 2
         if (-not $p.HasExited) { return $p }
         Start-Sleep -Milliseconds 700
     }
     return $null
+    } finally { Close-BypassLaunchRecipe $recipe }
 }
 
 # Как незаблокированные сайты открываются без обхода: имя -> минимальное время TLS (только те, что открылись)
