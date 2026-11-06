@@ -1,4 +1,4 @@
-# zapret 2.0
+# zapret 2.1
 
 **YouTube, Discord и Telegram в одной сборке для Windows.** Обход DPI на основе [zapret2 от bol-van](https://github.com/bol-van/zapret2), со стратегиями [Flowseal](https://github.com/Flowseal/zapret-discord-youtube), автоподбором под провайдера и встроенным [TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy).
 

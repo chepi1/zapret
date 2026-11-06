@@ -166,11 +166,28 @@ function Get-MenuNotices {
     if ($news.Count) { $notices.Add([pscustomobject]@{Title='Есть обновления компонентов';Text=(($news -join ', ')+'. Это версии ядра и списков; версия кода сборки указана в заголовке.');Color='Accent'}) }
     return $notices.ToArray()
 }
+function Get-UnreadMenuNotices($Notices, [switch]$MarkRead) {
+    $path = Join-Path $Script:Runtime 'menu-notices-read.json'
+    $seen = @()
+    if ([IO.File]::Exists($path)) {
+        try { $seen = ConvertFrom-Json ([IO.File]::ReadAllText($path)) -ErrorAction Stop } catch { $seen = @() }
+    }
+    $activeRead = @()
+    foreach ($notice in $Notices) {
+        $key = $notice.Title + "`n" + $notice.Text
+        if ($MarkRead -or $seen -contains $key) { $activeRead += $key }
+        else { $notice }
+    }
+    if ($activeRead.Count -ne $seen.Count -or @($activeRead | Where-Object { $seen -notcontains $_ }).Count) {
+        Write-TextNoBom $path (ConvertTo-Json -InputObject $activeRead -Compress)
+    }
+}
 function Get-MenuSnapshot {
     $s=Get-Settings;$strategy=Get-Strategy $s.alt;$procs=@(Get-OurProcesses);$service=Get-OurService
     $health=if($procs.Count){Get-ServiceHealthSummary $procs}else{$null}
     $telegram=if($s.telegram -eq 'on'){switch(Get-TgBridgeState){'Open'{'мост доступен'} 'Unknown'{'статус неизвестен'} 'Closed'{'мост недоступен'} default{'мост не запущен'}}}else{'выключен'}
-    return [pscustomobject]@{Settings=$s;StrategyName=$(if($strategy){$strategy.Name}else{'ALT'+$s.alt+' (файл не найден)'});Processes=$procs;Service=$service;Startup=(Get-MenuStartupText $service);Health=$health;Status=(Get-MenuStatus $procs $service $health);Telegram=$telegram;Notices=@(Get-MenuNotices)}
+    $notices = @(Get-MenuNotices)
+    return [pscustomobject]@{Settings=$s;StrategyName=$(if($strategy){$strategy.Name}else{'ALT'+$s.alt+' (файл не найден)'});Processes=$procs;Service=$service;Startup=(Get-MenuStartupText $service);Health=$health;Status=(Get-MenuStatus $procs $service $health);Telegram=$telegram;Notices=$notices;UnreadNotices=@(Get-UnreadMenuNotices $notices)}
 }
 function Show-Header([string]$Screen='Главная',[switch]$HideNoticeSummary) {
     Clear-Host
@@ -184,9 +201,9 @@ function Show-Header([string]$Screen='Главная',[switch]$HideNoticeSummary
         $healthText=if($view.Health.State -eq 'Unknown'){'Доступность сервисов не проверена · Главная -> 5'}else{$view.Health.Text}
         Write-BoxRow ('  '+$healthText) $(if($view.Health.State -eq 'Partial'){'Yellow'}else{'DarkGray'})
     }
-    if($view.Notices.Count -and -not $HideNoticeSummary){
-        Write-BoxRow ('  ! '+$view.Notices[0].Title) $view.Notices[0].Color
-        Write-BoxRow ('  Уведомлений: '+$view.Notices.Count+' · открыть все: Главная -> 8') DarkGray
+    if($view.UnreadNotices.Count -and -not $HideNoticeSummary){
+        Write-BoxRow ('  ! '+$view.UnreadNotices[0].Title) $view.UnreadNotices[0].Color
+        Write-BoxRow ('  Новых уведомлений: '+$view.UnreadNotices.Count+' · открыть все: Главная -> 8') DarkGray
     }
     Write-BoxSep $Screen.ToUpperInvariant()
 }
@@ -205,7 +222,7 @@ function Show-Main {
     Write-BoxSep
     Write-MenuItem '6' 'Настройки'
     Write-MenuItem '7' 'Инструменты: трекер, пинг, отчёты'
-    Write-MenuItem '8' ('Уведомления'+$(if($view.Notices.Count){' ('+$view.Notices.Count+')'}else{''})) $(if($view.Notices.Count){'Accent'}else{'Gray'})
+    Write-MenuItem '8' ('Уведомления'+$(if($view.UnreadNotices.Count){' ('+$view.UnreadNotices.Count+')'}else{''})) $(if($view.UnreadNotices.Count){'Accent'}else{'Gray'})
     Write-BoxRow ''
     Write-MenuItem '0' 'Выйти из меню' DarkGray
     Write-BoxBottom
@@ -213,12 +230,13 @@ function Show-Main {
 function Show-NotificationsMenu {
     while($true){
         Show-Header -Screen 'Уведомления' -HideNoticeSummary
-        if(-not $Script:MenuView.Notices.Count){Write-BoxRow '  Сейчас нет уведомлений.'}
-        foreach($notice in $Script:MenuView.Notices){
+        if(-not $Script:MenuView.UnreadNotices.Count){Write-BoxRow '  Сейчас нет уведомлений.'}
+        foreach($notice in $Script:MenuView.UnreadNotices){
             Write-BoxRow ('  '+$notice.Title) $notice.Color
             Write-BoxRow ('    '+$notice.Text)
             Write-BoxRow ''
         }
+        Get-UnreadMenuNotices $Script:MenuView.Notices -MarkRead
         Write-BoxRow ('  Сборка v'+$Script:Version+' · ядро zapret2 '+$Script:CoreManifest.Tag) DarkGray
         Write-BoxSep
         Write-MenuItem '0' 'Назад'

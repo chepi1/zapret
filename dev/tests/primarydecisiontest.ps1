@@ -49,4 +49,30 @@ $primaryNameBefore='Прежняя стратегия';$ReportOnly=$true;$repFil
 . ([scriptblock]::Create($reportOnlyBlock.Extent.Text))
 $saved=[IO.File]::ReadAllLines((Join-Path $Script:Runtime 'test-last.txt'))
 Check 'report-only saved report leads with the actual primary rather than just a probe winner' ($saved[1].StartsWith('Основная после теста: Прежняя стратегия.'))
+# Exercise the selection and confirmation blocks from the actual autotest entry point.
+$manualAssignment=$ast.Find({$args[0] -is [Management.Automation.Language.AssignmentStatementAst] -and $args[0].Left.Extent.Text -eq '$manualPick'},$true)
+$selectionBlock=$ast.Find({$args[0] -is [Management.Automation.Language.IfStatementAst] -and $args[0].Extent.Text.StartsWith('if ($manualPick)')},$true)
+$applyBlock=$ast.Find({$args[0] -is [Management.Automation.Language.IfStatementAst] -and $args[0].Extent.Text.StartsWith('if ($ReportOnly)') -and $args[0].Extent.Text.Contains('Read-YesNo')},$true)
+if(-not $manualAssignment -or -not $selectionBlock -or -not $applyBlock){throw 'FAIL autotest selection blocks are missing'}
+$averages=@{'31'=[pscustomobject]@{Avg=48.25;Runs=2};'58'=[pscustomobject]@{Avg=48.5;Runs=2};'60'=[pscustomobject]@{Avg=49.0;Runs=2}}
+$avg=$averages
+$best=$alts[0];$settings=@{alt='58';game='off'};$orderIds=@('31','58','60')
+function Read-YesNo($Text){$script:selectionPrompt=$Text;return $true}
+foreach($mode in @('Manual','NoPrompt','ReportOnly','KeepPrimary')){
+    $NoPrompt=$mode -eq 'NoPrompt';$ReportOnly=$mode -eq 'ReportOnly';$KeepPrimary=$mode -eq 'KeepPrimary'
+    $script:selectionPrompt='';$choice=$null;$apply=$true
+    . ([scriptblock]::Create($manualAssignment.Extent.Text))
+    . ([scriptblock]::Create($selectionBlock.Extent.Text))
+    . ([scriptblock]::Create($applyBlock.Extent.Text))
+    if($mode -eq 'Manual'){
+        Check 'manual autotest offers the current winner despite a different historical leader and small average gap' ($pick.Id -eq $best.Id -and $apply -and $script:selectionPrompt.Contains($best.Name) -and $decisionLine.Contains($best.Name))
+    }else{
+        Check ($mode+' retains its historical choice and does not apply the manual winner') ($pick.Id -eq '60' -and -not $apply -and -not $script:selectionPrompt)
+    }
+}
+$NoPrompt=$false;$ReportOnly=$false;$KeepPrimary=$false;$settings.alt=$best.Id;$apply=$true;$script:selectionPrompt=''
+. ([scriptblock]::Create($manualAssignment.Extent.Text))
+. ([scriptblock]::Create($selectionBlock.Extent.Text))
+. ([scriptblock]::Create($applyBlock.Extent.Text))
+Check 'current primary winning the manual run avoids a redundant change prompt' ($pick.Id -eq $best.Id -and -not $apply -and -not $script:selectionPrompt)
 if ($fails) { exit 1 }

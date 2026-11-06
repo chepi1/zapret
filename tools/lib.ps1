@@ -11,7 +11,7 @@ $Script:Lists       = Join-Path $Script:Root 'lists'
 $Script:StratDir    = Join-Path $Script:Root 'strategies'
 $Script:ServiceName = 'zapret2-bypass'
 $Script:ServiceDisplayName = 'zapret - обход DPI'
-$Script:Version     = '2.0'
+$Script:Version     = '2.1'
 . (Join-Path $PSScriptRoot 'integrity.ps1')
 $Script:CoreManifest=Read-CoreManifest (Join-Path $PSScriptRoot 'upstream.txt')
 $Script:UpstreamHashes=$Script:CoreManifest.Hashes

@@ -1,4 +1,4 @@
-# zapret 2.0
+# zapret 2.1
 
 **YouTube, Discord and Telegram in one Windows package.** Built on bol-van's [zapret2](https://github.com/bol-van/zapret2), with [Flowseal strategies](https://github.com/Flowseal/zapret-discord-youtube), ISP-specific strategy selection and the official [TG WS Proxy](https://github.com/Flowseal/tg-ws-proxy). **The interface is in Russian.**
 
@@ -24,7 +24,7 @@ Results depend on your ISP and strategy. Take-Two and Steam/Valve exclusions are
 
 ## Quick start
 
-1. Download `zapret-v2.0.zip` from [Releases](https://github.com/chepi1/zapret/releases/latest) and unpack it to a simple path, e.g. `C:\zapret`.
+1. Download `zapret-v2.1.zip` from [Releases](https://github.com/chepi1/zapret/releases/latest) and unpack it to a simple path, e.g. `C:\zapret`.
 2. Fully quit VPNs, proxy clients and game boosters before selecting a strategy.
 3. Run `zapret.bat` (asks for administrator rights): **5** — connection check, **1** — start, **3** — strategy test.
 4. **6 → 6** installs the Windows startup service. **7 → 8** manages Telegram support.

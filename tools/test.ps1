@@ -844,7 +844,7 @@ try {
         $ipLine = 'Заблокированы по IP (не подключаются вовсе, ни одна стратегия их не откроет - только VPN): ' + ($ipBlocked -join ', ')
         Write-Color $ipLine Gray
     }
-    # Баллы плавают от прогона к прогону: основную выбираем по среднему за последние прогоны, а не по этому одному
+    # Проверяем качество измерений перед выбором основной стратегии.
     if (-not $controlAssessment.CanApply) {
         $qualityLine=if ($controlAssessment.Status -eq 'Changed') { 'Контрольные HTTPS-запросы изменились во время автоподбора. Новый рейтинг не применён; сравнение нужно повторить.' } else { 'Недостаточно повторяемых контрольных запросов. Новый рейтинг не применён; это не доказывает отсутствие интернета.' }
         Write-Color $qualityLine Yellow
@@ -865,8 +865,19 @@ try {
     }
     else { $report.Add('История средних баллов: только этот провайдер, набор адресов и версия стратегии.') }
     $avg = Get-AverageScores $alts $scoreContext
-    $choice = Get-PrimaryChoice $alts $avg $settings.alt $orderIds
-    $decisionLine=Get-PrimaryDecisionText $choice $avg $primaryNameBefore $Script:ScoreMargin -ReportOnly:$ReportOnly -KeepPrimary:$KeepPrimary
+    $manualPick = -not ($NoPrompt -or $ReportOnly -or $KeepPrimary)
+    if ($manualPick) {
+        $pick = $best
+        $decisionLine = if ($pick.Id -eq $settings.alt) {
+            "Основная стратегия уже выиграла текущий прогон: $($pick.Name)."
+        } else {
+            "Кандидат на смену основной по текущему прогону: $($pick.Name)."
+        }
+    } else {
+        $choice = Get-PrimaryChoice $alts $avg $settings.alt $orderIds
+        $pick = $choice.Top
+        $decisionLine=Get-PrimaryDecisionText $choice $avg $primaryNameBefore $Script:ScoreMargin -ReportOnly:$ReportOnly -KeepPrimary:$KeepPrimary
+    }
     $avgTop = @($alts | Sort-Object @{ Expression = { $avg[$_.Id].Avg }; Descending = $true } | Select-Object -First 5 |
         ForEach-Object { '{0} {1} ({2})' -f $_.Name, (Format-Points $avg[$_.Id].Avg), $avg[$_.Id].Runs })
     $avgLine = ('Средний балл за последние прогоны (до {0}), в скобках их число: ' -f $Script:ScoreRuns) + ($avgTop -join ', ')
@@ -888,14 +899,13 @@ try {
     Write-Color ('Отчёт сохранён: ' + $repFile) Gray
 
     $apply = $true
-    $pick = $choice.Top
     if ($ReportOnly) {
         $apply = $false
     } elseif ($KeepPrimary) {
         $apply = $false
     } elseif ($pick.Id -eq $settings.alt) {
         $apply = $false
-    } elseif ($choice.Noise) {
+    } elseif (-not $manualPick -and $choice.Noise) {
         $apply = $false
     } elseif (-not $NoPrompt) {
         # автоподбор проверяет сайты, а игру в матче - нет: стратегию, проверенную в игре, он менять не должен молча

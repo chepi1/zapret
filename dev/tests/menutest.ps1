@@ -2,6 +2,8 @@
 if(Test-Path (Join-Path $Pkg '.git')){throw 'Run on a package copy.'}
 $ErrorActionPreference='Stop'
 . (Join-Path $Pkg 'tools/lib.ps1')
+$Script:Runtime=Join-Path $Script:Runtime ('menutest-'+[guid]::NewGuid().ToString('N'))
+[void][IO.Directory]::CreateDirectory($Script:Runtime)
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $Pkg 'tools/menu.ps1'),[ref]$null,[ref]$null)
 foreach($f in $ast.FindAll({$args[0] -is [Management.Automation.Language.FunctionDefinitionAst]},$false)){. ([scriptblock]::Create($f.Extent.Text))}
 $fails=0
@@ -57,6 +59,10 @@ Check 'main keeps keys1..7 and exposes notifications on8' (@(1..8|Where-Object{$
 Check 'main offers restart when a process or running service exists' ($main -match 'Перезапустить обход')
 $script:render='';Show-NotificationsMenu
 Check 'all self and upstream update details remain accessible' ($script:render -match 'новая версия zapret v9\.9' -and $script:render -match 'zapret2 v1\.0\.7' -and $script:render -match 'Настройки')
+$script:render='';Show-Header;Show-Main
+Check 'viewed notices disappear from the main header and unread count' ($Script:MenuView.Notices.Count -eq 2 -and $Script:MenuView.UnreadNotices.Count -eq 0 -and $script:render -notmatch 'Новых уведомлений:|Уведомления \([0-9]+\)')
+$script:render='';Show-NotificationsMenu
+Check 'reopening notifications reads persisted acknowledgements without redisplaying old notices' ($script:render -match 'Сейчас нет уведомлений' -and $script:render -notmatch 'новая версия zapret v9\.9|zapret2 v1\.0\.7')
 $script:consoleWidth=24;$script:render=''
 function Test-PackageIntegrity{return @('lua/zapret-antidpi.lua - изменён')}
 Show-NotificationsMenu
@@ -84,5 +90,22 @@ function Show-NotificationsMenu{$script:openedNotices++}
 $c='8';& ([scriptblock]::Create($dispatch.Extent.Text))
 ${function:Show-NotificationsMenu}=$originalNotices
 Check 'key8 dispatches directly to the read-only notifications page' ($script:openedNotices -eq 1)
+$originalRuntime=$Script:Runtime
+$Script:Runtime=Join-Path $originalRuntime 'menu-notice-fixture'
+[void][IO.Directory]::CreateDirectory($Script:Runtime)
+$notices=@([pscustomobject]@{Title='First';Text='Version 1'},[pscustomobject]@{Title='Second';Text='Version 1'})
+Check 'two unseen notices are returned before reading' (@(Get-UnreadMenuNotices $notices).Count -eq 2)
+Check 'marking notices read emits no menu content' (@(Get-UnreadMenuNotices $notices -MarkRead).Count -eq 0)
+Check 'PowerShell 5.1 deserializes multiple read keys without nesting them' (@(Get-UnreadMenuNotices $notices).Count -eq 0)
+$notices[0].Text='Version 2'
+$unread=@(Get-UnreadMenuNotices $notices)
+Check 'changed notice content becomes unread again' ($unread.Count -eq 1 -and $unread[0].Title -eq 'First')
+Get-UnreadMenuNotices $notices -MarkRead
+Get-UnreadMenuNotices @($notices[0]) | Out-Null
+$unread=@(Get-UnreadMenuNotices $notices)
+Check 'a resolved notice is new when the condition recurs' ($unread.Count -eq 1 -and $unread[0].Title -eq 'Second')
+Write-TextNoBom (Join-Path $Script:Runtime 'menu-notices-read.json') '{broken'
+Check 'invalid acknowledgement data keeps notices visible' (@(Get-UnreadMenuNotices $notices).Count -eq 2)
+$Script:Runtime=$originalRuntime
 Remove-Item -LiteralPath Function:\Write-Host
 if($fails){exit 1}

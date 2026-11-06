@@ -49,7 +49,7 @@ function Test-ScoreInputs { return $true }
 function Invoke-CurlBatch { return $script:actual }
 function Run-FinalBlock($Rows, [switch]$KeepPrimary, [switch]$OnlyReport) {
     $script:actual=$Rows; $script:savedSettings=0
-    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11';Name='Кандидат'}; $choice=@{Noise=$false}; $apply=$true; $ReportOnly=[bool]$OnlyReport; $NoPrompt=$true
+    $settings=@{alt='12';auto='on';ipset='loaded'}; $pick=@{Id='11';Name='Кандидат'}; $choice=@{Noise=$false}; $apply=$true; $ReportOnly=[bool]$OnlyReport; $NoPrompt=$true; $manualPick=$false
     $primaryNameBefore='Прежняя стратегия'
     . $script:selectionBlock
     $base=@{}; $alts=@(); $table=@{'12'=$before;'11'=$before;'0'=@((Row Clean normal OK))}
